@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Nevermore</string>
+<key>CFBundleIdentifier</key><string>ch.goodvantage.Nevermore</string>
+<key>CFBundleName</key><string>Nevermore</string>
+<key>CFBundleDisplayName</key><string>Nevermore</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0-beta.4</string>
+<key>CFBundleVersion</key><string>5</string>
+<key>CFBundleIconFile</key><string>Nevermore</string>
+<key>LSMinimumSystemVersion</key><string>26.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>SUEnableInstallerLauncherService</key><true/>
+<key>SUShowReleaseNotes</key><false/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSHumanReadableCopyright</key><string>Nevermore contributors. Released under the Unlicense.</string>
+<key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>Nevermore OAuth</string><key>CFBundleURLSchemes</key><array><string>ch.goodvantage.Nevermore</string></array></dict></array>
+<key>NSServices</key><array><dict><key>NSMenuItem</key><dict><key>default</key><string>Compose in Nevermore</string></dict><key>NSMessage</key><string>composeSelection</string><key>NSPortName</key><string>Nevermore</string><key>NSSendTypes</key><array><string>public.utf8-plain-text</string></array></dict></array>
+<key>LSApplicationCategoryType</key><string>public.app-category.social-networking</string>
+<key>NSSupportsAutomaticTermination</key><false/>
+<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+</dict></plist>

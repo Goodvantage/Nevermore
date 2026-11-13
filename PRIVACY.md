@@ -1,0 +1,26 @@
+# Nevermore privacy
+
+Nevermore connects directly to the Raven/Frappe sites you configure. Browser login is handled by the site's system-browser page. The app receives OAuth tokens; it does not collect your site password. Tokens are kept in account-scoped Keychain items. Requests carrying account credentials are confined to that account's origin, including redirects and private downloads.
+
+Account metadata, received history, drafts and queued sends are kept locally in the app's sandbox. Received history is bounded and can be cleared or disabled in Settings. Drafts and accepted queued sends are retained for recovery until sent or explicitly discarded; removing an account discards them after a warning. Window routes, frames, search text, reading preferences and account-scoped local quiet hours are stored in app preferences. Removing an account also clears its saved window routes and quiet hours. Local databases and files are not encrypted by an app-specific encryption layer. FileVault and your Mac's access controls provide the device-at-rest boundary. Backups and exported attachments are outside guaranteed removal.
+
+Nevermore does not include analytics, advertising, crash uploads, Spotlight indexing, iCloud database/token synchronization or a mandatory Nevermore-operated relay. No message content is sent to an AI service by this client. Features your Raven site or bots provide remain subject to that site's policies.
+
+Promised files are received into a private temporary destination, copied into protected snapshots, and staged under the originating account. Account changes cancel uncommitted imports. Temporary destinations are cleaned on completion/cancellation and graceful Quit; abandoned marked destinations are checked on startup. Providers can continue writing after cancellation, so forced termination and a broken provider can delay cleanup.
+
+Reading/clipboard text omits hidden spoiler bodies and the editor’s original-HTML metadata. Code-reader windows close and clear when their source is deleted/changed, the account changes, or known parent permissions are revoked.
+
+The expanded Markdown and table editors work locally. They do not send text to
+an editor service or fetch images embedded in source. Their unapplied edits stay
+in memory; Use Text/Use Table updates the normal draft, and Cancel discards the
+transaction. Account changes and window closure dismiss attached private editors.
+
+Private images are fetched through the authenticated site transport. When a profile photo is unavailable, Nevermore draws a raven portrait locally from a stable hash of the Raven username, not the display name. Channel tiles use a separate name-and-workspace seed; renaming a channel changes its colors and pattern, while access level changes its hash or lock symbol. It sends no names to an avatar service and writes no generated image to disk. The bounded generated-image caches belong to the account and are cleared when that account stops. Arbitrary remote HTML, scripts, embeds and tracking images are not executed as browser content. Opening an external link sends it to your selected browser/application, whose privacy policy then applies.
+
+Chat notifications are opt-in and use generic message bodies. They run through the live app's connection; sleep or Quit stops this delivery path. No APNs/FCM provider enrollment is included. Local quiet hours and Do Not Disturb suppress incoming notifications. Presence refreshes only from interaction with Nevermore while it is active; quitting does not clear presence established by another device. Notification activation reopens the matching local account and conversation.
+
+Software update checks contact apps.goodvantage.cloud about ten seconds after launch and daily while Nevermore runs. They are enabled by default and can be disabled in Settings → General; manual checks still work. Prerelease builds read the beta manifest, other builds read stable. The separate, cookie-free transport sends the User-Agent `Nevermore/<version> (macOS)`, but no account, token, document data or device identifier. The host sees your network address. Redirects are refused. Demos and automated fixtures do not check automatically.
+
+A newer release can prompt for system notification permission. Notification attempts and dismissed versions are remembered locally so relaunching does not repeat the notice. Update notifications contain only the public version. Download opens the validated installer URL in your browser, whose download/privacy rules then apply. Nevermore does not download, execute or install updates itself; Sparkle is not started.
+
+Diagnostic errors use endpoint/error categories and identifiers rather than chat content or credentials. Do not include private chat histories, authentication callbacks, tokens or full databases in public issue reports.

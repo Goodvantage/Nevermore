@@ -1,0 +1,157 @@
+{
+  "measurements": {
+    "cached_switch": {
+      "count": 20,
+      "maximum": 160.34841666987631,
+      "minimum": 72.6872499944875,
+      "p50": 76.12833332677837,
+      "p95": 160.08741667610593,
+      "samples": [
+        74.95020833448507,
+        160.34841666987631,
+        74.86424999660812,
+        158.39770833554212,
+        73.09195832931437,
+        159.1700000135461,
+        73.28595832223073,
+        159.4103749957867,
+        74.8206249991199,
+        158.4689166629687,
+        74.33987500553485,
+        160.08741667610593,
+        74.16929166356567,
+        159.55870832840446,
+        72.6872499944875,
+        156.64720833592582,
+        76.12833332677837,
+        157.38412500650156,
+        75.605166668538,
+        158.18312499322928
+      ],
+      "unit": "milliseconds"
+    },
+    "compiled_architecture": "arm64",
+    "configuration": "Release",
+    "demo_fixture_launch_since_main_ms": 4418.877625008463,
+    "durable_enqueue_commit": {
+      "count": 20,
+      "maximum": 0.5139999993843958,
+      "minimum": 0.31708333699498326,
+      "p50": 0.40499999886378646,
+      "p95": 0.49033333198167384,
+      "samples": [
+        0.49033333198167384,
+        0.5139999993843958,
+        0.4079166683368385,
+        0.37200000951997936,
+        0.46316666703205556,
+        0.3287083236500621,
+        0.37212501047179103,
+        0.31708333699498326,
+        0.3663749957922846,
+        0.4634583310689777,
+        0.32779165485408157,
+        0.33666667877696455,
+        0.41091667662840337,
+        0.42124999163206667,
+        0.40499999886378646,
+        0.38770833634771407,
+        0.42745833343360573,
+        0.483750001876615,
+        0.448458333266899,
+        0.39541667501907796
+      ],
+      "unit": "milliseconds"
+    },
+    "event": "result",
+    "fixture": {
+      "large_channel_cached": 1000,
+      "large_channel_seeded": 10000,
+      "large_channel_visible": 500,
+      "mixed_media": "native tables/code/marks/emoji shortcodes; no downloaded media",
+      "seeded_messages": 10200
+    },
+    "idle": {
+      "cpu_percent_one_core": 0.006586130059074821,
+      "measured_seconds": 302.74227537499974,
+      "requested_seconds": 300
+    },
+    "limits": [
+      "Fresh demo fixture startup includes seeding, not persisted cached relaunch.",
+      "Switch timings await actual cached load/render/layout; no live server or downloaded images.",
+      "Scroll steps measure synchronous layout/display CPU time, not presented frames or 60 Hz.",
+      "Durable enqueue measures acceptDraft transaction completion, excluding draft save and UI feedback.",
+      "Settled local demo resource samples do not prove real-server, multi-account, energy or memory-growth budgets.",
+      "Launch excludes work before Swift main; driver separately measures spawn-to-interactive.",
+      "Reference hardware and production Release configuration require operator confirmation."
+    ],
+    "resources_after_idle": {
+      "cpu_seconds": 6.933149,
+      "physical_footprint_bytes": 47842528,
+      "resident_bytes": 76726272,
+      "task_info_status": 0
+    },
+    "resources_before_idle": {
+      "cpu_seconds": 6.91321,
+      "physical_footprint_bytes": 56149240,
+      "resident_bytes": 130957312,
+      "task_info_status": 0
+    },
+    "schema": 1,
+    "scroll_step_layout_display": {
+      "count": 20,
+      "maximum": 0.07258333789650351,
+      "minimum": 0.01850000990089029,
+      "p50": 0.022291671484708786,
+      "p95": 0.06204165401868522,
+      "samples": [
+        0.07258333789650351,
+        0.0542499910807237,
+        0.030166673241183162,
+        0.06204165401868522,
+        0.0344166619470343,
+        0.03345833101775497,
+        0.024708322598598897,
+        0.022291671484708786,
+        0.020374995074234903,
+        0.019750004867091775,
+        0.018958322471007705,
+        0.01879165938589722,
+        0.018666658434085548,
+        0.01850000990089029,
+        0.06095833668950945,
+        0.03399999695830047,
+        0.02487500023562461,
+        0.021708343410864472,
+        0.01991666795220226,
+        0.019541665096767247
+      ],
+      "unit": "milliseconds"
+    },
+    "targets": {
+      "cached_relaunch_under_2_seconds": "unmeasured",
+      "cached_switch_p95_under_100_ms": "fail",
+      "demo_footprint_under_200_MB": "pass",
+      "energy_and_network_activity": "unmeasured",
+      "queued_send_UI_feedback_under_100_ms": "unmeasured",
+      "quiet_5min_cpu_below_0_5_percent": "pass",
+      "scroll_60Hz": "unmeasured"
+    }
+  },
+  "metadata": {
+    "architecture": "arm64",
+    "binary_sha256": "00e157318c82a58a0f0bd6629b3915850eab560737d74895e276153292097768",
+    "binary_source_match": "Universal Release build and 264 native checks were run from commit 38df47be21ddee1f784b1bcc6ab6f04075e07413; dirty changes at measurement start were documentation only.",
+    "command_started_utc": "2026-11-08T21:56:16Z",
+    "commit": "38df47be21ddee1f784b1bcc6ab6f04075e07413",
+    "configuration": "Release",
+    "cpu": "Apple M4 Max",
+    "fixture_nonce": "8CB2D27F-7D84-409E-87C3-D68EDB1746E4",
+    "hardware_model": "Mac16,9",
+    "macos": "27.0.1",
+    "memory_bytes": "38654705664",
+    "os": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "spawn_to_demo_interactive_ms": 4633.0470419925405,
+    "working_tree_dirty": true
+  }
+}

@@ -1,0 +1,157 @@
+name: Native Mac checks
+
+# Forgejo Actions (forge.goodvantage.cloud). The runners resolve an
+# unqualified `uses: owner/repo@ref` against github.com, so give any action
+# that does not exist there a fully qualified URL.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Re-runs CI on a branch without an empty commit, e.g. after a runner
+  # problem. Forgejo's API has no re-run endpoint, only workflow dispatch.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref/PR at a time; superseded runs on an outdated diff are
+# worthless, and the forge has a single Mac.
+concurrency:
+  group: native-mac-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # mac-mini-1 is the forge's only macOS runner. It executes jobs directly
+    # on the host, as the runner account on a persistent machine, with no VM
+    # in between. Never let untrusted fork code onto it.
+    runs-on:
+      - macos-arm64
+      - xcode-current
+    if: >-
+      ${{ github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository }}
+    # A hung step on the only Mac blocks every later macOS job, so bound it.
+    timeout-minutes: 45
+    env:
+      NATIVE_FIXTURE_LABEL: ch.goodvantage.Nevermore.native-fixture.${{ github.run_id }}-${{ github.run_attempt || '1' }}
+    steps:
+      # v4.2.2. v4 runs on the runner's node20, which GoodDrive's jobs on
+      # this Mac already use.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # A job inherits the machine's active developer directory, which is
+      # Command Line Tools unless a full Xcode was selected. Resolve Xcode per
+      # job through DEVELOPER_DIR, so the shared Mac needs no
+      # `sudo xcode-select`, and fail here if its SDK predates macOS 26.
+      - name: Select Xcode toolchain
+        env:
+          XCODE_DEVELOPER_DIR: ${{ vars.XCODE_DEVELOPER_DIR }}
+        run: |
+          dir="${XCODE_DEVELOPER_DIR:-}"
+          if [ -z "$dir" ]; then
+            current="$(xcode-select -p 2>/dev/null || true)"
+            case "$current" in
+              */Xcode*.app/Contents/Developer) dir="$current" ;;
+              *)
+                for app in /Applications/Xcode*.app; do
+                  [ -d "$app/Contents/Developer" ] && dir="$app/Contents/Developer"
+                done
+                ;;
+            esac
+          fi
+          if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+            echo "::error::No full Xcode on this runner (active developer dir: $(xcode-select -p 2>/dev/null || echo none)). Install Xcode 26 or later, or set the variable XCODE_DEVELOPER_DIR to its Developer path."
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$dir" >> "$GITHUB_ENV"
+          export DEVELOPER_DIR="$dir"
+          xcodebuild -version
+          swift --version
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+          if [ "${sdk%%.*}" -lt 26 ]; then
+            echo "::error::The macOS SDK in $dir is $sdk; Nevermore needs the macOS 26 SDK (Xcode 26) or later."
+            exit 1
+          fi
+      - name: Report native session context
+        run: |
+          uid="$(id -u)"
+          echo "Runner UID: $uid; console UID: $(stat -f %u /dev/console)"
+          if launchctl print "gui/$uid" >/dev/null 2>&1; then
+            echo 'Runner user has a GUI login domain.'
+          else
+            echo 'Runner user has no GUI login domain; native keyboard-focus checks need one.'
+          fi
+      - name: Check browser callback isolation
+        run: |
+          xcrun swiftc -parse-as-library -swift-version 6 -target "$(uname -m)-apple-macos26.0" Sources/NevermoreApp/BrowserAuthenticationCallback.swift Sources/NevermoreApp/BrowserAuthenticationSelfChecks.swift scripts/check-browser-auth.swift -o "$RUNNER_TEMP/nevermore-browser-auth-check"
+          "$RUNNER_TEMP/nevermore-browser-auth-check"
+      - name: Build and test
+        run: swift test --disable-keychain --triple "$(uname -m)-apple-macosx26.0"
+      - name: Check performance driver ownership
+        run: python3 scripts/test-performance-driver.py
+      - name: Check fixture process cleanup
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Release build
+        run: swift build --disable-keychain -c release --triple "$(uname -m)-apple-macosx26.0"
+      - name: Check native attachment integration
+        id: native
+        run: |
+          date +%s > "$RUNNER_TEMP/nevermore-native-start"
+          SIGN_IDENTITY=- CONFIGURATION=release scripts/build-app.sh
+          python3 scripts/check-native-attachments.py --user-session --polls --reactions --avatars
+      - name: Validate packaging inputs
+        run: |
+          plutil -lint Resources/Info.plist Resources/Nevermore.entitlements
+          bash -n scripts/build-app.sh scripts/package-release.sh scripts/resolve-sign-identity.sh \
+            scripts/notarize.sh scripts/release.sh scripts/apps-site-release.sh scripts/semver-pattern.sh
+      - name: Report native startup crash details
+        if: ${{ failure() && steps.native.outcome == 'failure' }}
+        run: |
+          # ReportCrash writes asynchronously. Keep only the reason and symbols,
+          # not a full report with register or memory contents.
+          sleep 10
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          cutoff = float((Path(os.environ['RUNNER_TEMP']) / 'nevermore-native-start').read_text())
+          roots = [Path.home() / 'Library/Logs/DiagnosticReports', Path('/Library/Logs/DiagnosticReports')]
+          found = False
+          for root in roots:
+              for path in sorted(root.glob('Nevermore*.ips')):
+                  try:
+                      if path.stat().st_mtime < cutoff:
+                          continue
+                      text = path.read_text()
+                      decoder = json.JSONDecoder()
+                      report, end = decoder.raw_decode(text)
+                      if text[end:].strip():
+                          report, _ = decoder.raw_decode(text[end:].lstrip())
+                      print('Crash report:', path.name)
+                      for key in ('exception', 'termination', 'asi'):
+                          if key in report:
+                              print(key + ':', json.dumps(report[key]))
+                      index = report.get('faultingThread')
+                      threads = report.get('threads', [])
+                      if isinstance(index, int) and 0 <= index < len(threads):
+                          for frame in threads[index].get('frames', [])[:12]:
+                              print('frame:', frame.get('symbol', '<no symbol>'))
+                      found = True
+                  except (OSError, ValueError) as error:
+                      print('Crash report unavailable:', type(error).__name__)
+          if not found:
+              print('No crash report found for this native check; a runner-side investigation is required.')
+          PY
+      # The Mac is persistent: leave no build trees behind.
+      - name: Clean build output
+        if: always()
+        run: |
+          status=0
+          # Also runs if the Python parent was killed before its finally block.
+          target="gui/$(id -u)/$NATIVE_FIXTURE_LABEL"
+          if launchctl print "$target" >/dev/null 2>&1; then
+            launchctl bootout "$target" || status=$?
+          fi
+          rm -rf .build build "$RUNNER_TEMP/nevermore-browser-auth-check" \
+            "$RUNNER_TEMP"/nevermore-native-agent-* || status=$?
+          exit "$status"

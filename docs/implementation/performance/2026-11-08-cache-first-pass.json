@@ -1,0 +1,222 @@
+{
+  "measurements": {
+    "cached_relaunch_since_main": {
+      "count": 5,
+      "p50": 365.4932499921415,
+      "p95": 383.59549999586307,
+      "samples": [
+        378.64937499398366,
+        383.59549999586307,
+        365.4932499921415,
+        356.84074999880977,
+        343.5452916601207
+      ],
+      "unit": "milliseconds"
+    },
+    "cached_relaunch_spawn_to_interactive": {
+      "count": 5,
+      "p50": 382.9266669927165,
+      "p95": 416.5389590198174,
+      "samples": [
+        396.3467080029659,
+        416.5389590198174,
+        382.9266669927165,
+        373.84362501325086,
+        359.64795798645355
+      ],
+      "unit": "milliseconds"
+    },
+    "cached_switch": {
+      "count": 20,
+      "maximum": 135.4459166759625,
+      "minimum": 64.0914999821689,
+      "p50": 73.71845832676627,
+      "p95": 134.59262499236502,
+      "samples": [
+        73.71845832676627,
+        135.4459166759625,
+        65.25187499937601,
+        134.59262499236502,
+        64.0914999821689,
+        132.21195834921673,
+        68.64533334737644,
+        132.00033333851025,
+        68.16904168226756,
+        133.25337501009926,
+        65.49333332804963,
+        131.69137499062344,
+        67.42020833189599,
+        133.24950000969693,
+        66.61066666129045,
+        133.4938750078436,
+        67.71633331663907,
+        133.74366666539572,
+        67.34716665232554,
+        133.60566666233353
+      ],
+      "unit": "milliseconds"
+    },
+    "compiled_architecture": "arm64",
+    "configuration": "Release",
+    "demo_fixture_launch_since_main_ms": 344.67833332018927,
+    "durable_enqueue_commit": {
+      "count": 20,
+      "maximum": 0.6960833270568401,
+      "minimum": 0.35179167753085494,
+      "p50": 0.42070832569152117,
+      "p95": 0.5185416666790843,
+      "samples": [
+        0.6960833270568401,
+        0.4750416846945882,
+        0.4785833298228681,
+        0.4145833372604102,
+        0.4295833350624889,
+        0.3616666654124856,
+        0.5185416666790843,
+        0.35179167753085494,
+        0.4537499917205423,
+        0.3865000035148114,
+        0.48850002349354327,
+        0.363083352567628,
+        0.4006249946542084,
+        0.5087083263788372,
+        0.4982083337381482,
+        0.42070832569152117,
+        0.459291652077809,
+        0.4042916698381305,
+        0.39704167284071445,
+        0.37379167042672634
+      ],
+      "unit": "milliseconds"
+    },
+    "event": "result",
+    "fixture": {
+      "large_channel_cached": 1000,
+      "large_channel_seeded": 10000,
+      "large_channel_visible": 500,
+      "mixed_media": "native tables/code/marks/emoji shortcodes; no downloaded media",
+      "seeded_messages": 10200
+    },
+    "idle": {
+      "cpu_percent_one_core": 0.005622295371686437,
+      "measured_seconds": 302.40318012499483,
+      "requested_seconds": 300
+    },
+    "limits": [
+      "This run reopens a preseeded fixture; driver reports independent cached launch probes.",
+      "Switch timings await actual cached load/render/layout; no live server or downloaded images.",
+      "Scroll steps measure synchronous layout/display CPU time, not presented frames or 60 Hz.",
+      "Durable enqueue measures acceptDraft transaction completion. Separate UI feedback samples use the production Send button and credential-free loopback transport; they include observable cleared/enabled composer and native display.",
+      "Loopback acknowledgement is bounded and never replayed by the harness; no real account or server is used.",
+      "Settled local demo resource samples do not prove real-server, multi-account, energy or memory-growth budgets.",
+      "Launch excludes work before Swift main; driver separately measures spawn-to-interactive.",
+      "Reference hardware and production Release configuration require operator confirmation."
+    ],
+    "loopback_fixture": {
+      "failures": [],
+      "requests": 11,
+      "unique_send_posts": 5
+    },
+    "pid": 98327,
+    "queued_send_UI_feedback": {
+      "count": 5,
+      "maximum": 109.60029167472385,
+      "minimum": 98.66337501443923,
+      "p50": 105.67550000268966,
+      "p95": 109.60029167472385,
+      "samples": [
+        98.66337501443923,
+        105.63070833450183,
+        105.92262499267235,
+        105.67550000268966,
+        109.60029167472385
+      ],
+      "unit": "milliseconds"
+    },
+    "resources_after_idle": {
+      "cpu_seconds": 2.781387,
+      "physical_footprint_bytes": 48514272,
+      "resident_bytes": 81805312,
+      "task_info_status": 0
+    },
+    "resources_before_idle": {
+      "cpu_seconds": 2.764385,
+      "physical_footprint_bytes": 51987680,
+      "resident_bytes": 125419520,
+      "task_info_status": 0
+    },
+    "schema": 1,
+    "scroll_step_layout_display": {
+      "count": 20,
+      "maximum": 0.07879166514612734,
+      "minimum": 0.020625011529773474,
+      "p50": 0.02916666562668979,
+      "p95": 0.07191667100414634,
+      "samples": [
+        0.07879166514612734,
+        0.039333332097157836,
+        0.06737501826137304,
+        0.03412499791011214,
+        0.06741666584275663,
+        0.03037499845959246,
+        0.024500011932104826,
+        0.022249994799494743,
+        0.02087498432956636,
+        0.020833307644352317,
+        0.03512500552460551,
+        0.024458335246890783,
+        0.022166670532897115,
+        0.021291663870215416,
+        0.042833329644054174,
+        0.07191667100414634,
+        0.038208323530852795,
+        0.02916666562668979,
+        0.021124986233189702,
+        0.020625011529773474
+      ],
+      "unit": "milliseconds"
+    },
+    "targets": {
+      "cached_relaunch_under_2_seconds": "pass",
+      "cached_switch_p95_under_100_ms": "fail",
+      "demo_footprint_under_200_MB": "pass",
+      "energy_and_network_activity": "unmeasured",
+      "queued_send_UI_feedback_under_100_ms": "fail",
+      "quiet_5min_cpu_below_0_5_percent": "pass",
+      "scroll_60Hz": "unmeasured"
+    }
+  },
+  "metadata": {
+    "architecture": "arm64",
+    "binary": "build/Nevermore.app/Contents/MacOS/Nevermore",
+    "binary_sha256": "9128ac9ed0654f379aba886a10d61b793d1282c31a064c5255aef16d89762635",
+    "binary_source_match": "not independently verified; build from the recorded checkout before measuring",
+    "command_started_utc": "2026-11-08T22:23:49Z",
+    "commit": "27fdad915c289c1f183c62bb77ce3376e35221db",
+    "configuration": "Release",
+    "cpu": "Apple M4 Max",
+    "fixture_nonce": "CD98B709-E7AC-4C8F-A91D-D903821BFE38",
+    "hardware_model": "Mac16,9",
+    "invocation": [
+      "build/Nevermore.app/Contents/MacOS/Nevermore",
+      "--demo",
+      "--performance-check",
+      "--performance-fixture-id",
+      "CD98B709-E7AC-4C8F-A91D-D903821BFE38",
+      "--performance-reuse-fixture",
+      "--performance-loopback-origin",
+      "http://127.0.0.1:51897",
+      "--performance-idle-seconds",
+      "300",
+      "--performance-iterations",
+      "20"
+    ],
+    "macos": "27.0.1",
+    "memory_bytes": "38654705664",
+    "os": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "seed_database_ms": 4193.956458329922,
+    "seed_process_elapsed_ms": 4225.92262501712,
+    "source_note": "Release universal build from 27fdad9; only validation documentation was dirty when the driver started. App source stayed unchanged during measurement.",
+    "working_tree_dirty": true
+  }
+}

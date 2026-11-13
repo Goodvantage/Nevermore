@@ -1,0 +1,254 @@
+{
+  "measurements": {
+    "cached_relaunch_since_main": {
+      "count": 5,
+      "p50": 301.9009999989066,
+      "p95": 340.1730000041425,
+      "samples": [
+        340.1730000041425,
+        297.83458332531154,
+        301.9009999989066,
+        306.0870000044815,
+        300.8622083289083
+      ],
+      "unit": "milliseconds"
+    },
+    "cached_relaunch_spawn_to_interactive": {
+      "count": 5,
+      "p50": 320.07008302025497,
+      "p95": 357.99283400410786,
+      "samples": [
+        357.99283400410786,
+        315.724375017453,
+        320.07008302025497,
+        325.45262499479577,
+        317.82641701283865
+      ],
+      "unit": "milliseconds"
+    },
+    "cached_switch": {
+      "count": 20,
+      "maximum": 101.70979166286997,
+      "minimum": 47.0118333469145,
+      "p50": 58.81870834855363,
+      "p95": 100.52425001049414,
+      "samples": [
+        58.81870834855363,
+        90.89991668588482,
+        51.31687500397675,
+        90.2956250065472,
+        49.87187500228174,
+        90.9034583310131,
+        50.46304166899063,
+        101.70979166286997,
+        48.77483335440047,
+        100.52425001049414,
+        53.125208331039175,
+        89.12754166522063,
+        49.148291669553146,
+        87.50720834359527,
+        48.73645835323259,
+        86.19795832782984,
+        47.51725000096485,
+        86.5253749943804,
+        47.0118333469145,
+        87.65358335222118
+      ],
+      "unit": "milliseconds"
+    },
+    "compiled_architecture": "arm64",
+    "configuration": "Release",
+    "demo_fixture_launch_since_main_ms": 310.80991667113267,
+    "durable_enqueue_commit": {
+      "count": 20,
+      "maximum": 0.6484583427663893,
+      "minimum": 0.3223750100005418,
+      "p50": 0.4164583224337548,
+      "p95": 0.5761249922215939,
+      "samples": [
+        0.6484583427663893,
+        0.5449166928883642,
+        0.5445416609290987,
+        0.4638333339244127,
+        0.44150001485832036,
+        0.4164583224337548,
+        0.5761249922215939,
+        0.4082916711922735,
+        0.37741666892543435,
+        0.41433333535678685,
+        0.3514583222568035,
+        0.37900000461377203,
+        0.33116666600108147,
+        0.43120834743604064,
+        0.5272499984130263,
+        0.3223750100005418,
+        0.5252916598692536,
+        0.4077916673850268,
+        0.5377083143685013,
+        0.4136666830163449
+      ],
+      "unit": "milliseconds"
+    },
+    "event": "result",
+    "fixture": {
+      "large_channel_cached": 1000,
+      "large_channel_seeded": 10000,
+      "large_channel_visible": 500,
+      "mixed_media": "native tables/code/marks/emoji shortcodes; no downloaded media",
+      "seeded_messages": 10200
+    },
+    "idle": {
+      "cpu_percent_one_core": 0.008932915300244914,
+      "measured_seconds": 300.17076283332426,
+      "requested_seconds": 300
+    },
+    "limits": [
+      "This run reopens a preseeded fixture; driver reports independent cached launch probes.",
+      "Switch timings await actual cached load/render/layout; no live server or downloaded images.",
+      "Scroll steps measure synchronous layout/display CPU time, not presented frames or 60 Hz.",
+      "Durable enqueue measures acceptDraft transaction completion. Separate UI feedback samples use the production Send button and credential-free loopback transport; they include observable cleared/enabled composer and native display.",
+      "Queued-send UI target starts at original action delivery and ends at observed cleared/enabled composer plus display. Separate performClick totals retain synthetic pre-action animation; no guessed delay is subtracted.",
+      "A benchmark-only forwarding target timestamps immediately before forwarding the original target/action exactly once, and restores both in defer. Physical input/event-delivery latency is not measured.",
+      "Loopback acknowledgement is bounded and never replayed by the harness; no real account or server is used.",
+      "Settled local demo resource samples do not prove real-server, multi-account, energy or memory-growth budgets.",
+      "Launch excludes work before Swift main; driver separately measures spawn-to-interactive.",
+      "Reference hardware and production Release configuration require operator confirmation."
+    ],
+    "loopback_fixture": {
+      "failures": [],
+      "requests": 11,
+      "unique_send_posts": 5
+    },
+    "pid": 49675,
+    "queued_send_UI_feedback": {
+      "count": 5,
+      "maximum": 107.6396249991376,
+      "minimum": 99.18279165867716,
+      "p50": 106.2049166939687,
+      "p95": 107.6396249991376,
+      "samples": [
+        99.18279165867716,
+        106.38475001906045,
+        106.2049166939687,
+        105.58475001016632,
+        107.6396249991376
+      ],
+      "unit": "milliseconds"
+    },
+    "queued_send_perform_click_total": {
+      "count": 5,
+      "maximum": 107.67304163891822,
+      "minimum": 99.23645830713212,
+      "p50": 106.24354166793637,
+      "p95": 107.67304163891822,
+      "samples": [
+        99.23645830713212,
+        106.41433333512396,
+        106.24354166793637,
+        105.6173333490733,
+        107.67304163891822
+      ],
+      "unit": "milliseconds"
+    },
+    "resources_after_idle": {
+      "cpu_seconds": 2.136846,
+      "physical_footprint_bytes": 49202376,
+      "resident_bytes": 79740928,
+      "task_info_status": 0
+    },
+    "resources_before_idle": {
+      "cpu_seconds": 2.110032,
+      "physical_footprint_bytes": 52987080,
+      "resident_bytes": 123863040,
+      "task_info_status": 0
+    },
+    "schema": 1,
+    "scroll_step_layout_display": {
+      "count": 20,
+      "maximum": 0.6906666676513851,
+      "minimum": 0.02174999099224806,
+      "p50": 0.029875023756176233,
+      "p95": 0.4989166627638042,
+      "samples": [
+        0.6906666676513851,
+        0.03837500116787851,
+        0.027583329938352108,
+        0.024333334295079112,
+        0.02274999860674143,
+        0.02174999099224806,
+        0.022583320969715714,
+        0.06999998004175723,
+        0.03908333019353449,
+        0.02916666562668979,
+        0.06925000343471766,
+        0.066250009695068,
+        0.037874997360631824,
+        0.04420834011398256,
+        0.029875023756176233,
+        0.03137500607408583,
+        0.024541659513488412,
+        0.022624997654929757,
+        0.021916668629273772,
+        0.4989166627638042
+      ],
+      "unit": "milliseconds"
+    },
+    "synthetic_button_pre_action": {
+      "count": 5,
+      "maximum": 0.05366664845496416,
+      "minimum": 0.02958331606350839,
+      "p50": 0.0334166397806257,
+      "p95": 0.05366664845496416,
+      "samples": [
+        0.05366664845496416,
+        0.02958331606350839,
+        0.038624973967671394,
+        0.0325833389069885,
+        0.0334166397806257
+      ],
+      "unit": "milliseconds"
+    },
+    "targets": {
+      "cached_relaunch_under_2_seconds": "pass",
+      "cached_switch_p95_under_100_ms": "fail",
+      "demo_footprint_under_200_MB": "pass",
+      "energy_and_network_activity": "unmeasured",
+      "queued_send_UI_feedback_under_100_ms": "fail",
+      "quiet_5min_cpu_below_0_5_percent": "pass",
+      "scroll_60Hz": "unmeasured"
+    }
+  },
+  "metadata": {
+    "architecture": "arm64",
+    "binary": "build/Nevermore.app/Contents/MacOS/Nevermore",
+    "binary_sha256": "271e0c71baceb9a0a818faf141dc77965db409962d935e28cc67031cf3764323",
+    "binary_source_match": "not independently verified; build from the recorded checkout before measuring",
+    "command_started_utc": "2026-11-08T22:37:02Z",
+    "commit": "7de0693c8fae83f065720e76d7ec852a1fcf94f7",
+    "configuration": "Release",
+    "cpu": "Apple M4 Max",
+    "fixture_nonce": "CE789D12-A080-47E5-A492-1595DAA5EB15",
+    "hardware_model": "Mac16,9",
+    "invocation": [
+      "build/Nevermore.app/Contents/MacOS/Nevermore",
+      "--demo",
+      "--performance-check",
+      "--performance-fixture-id",
+      "CE789D12-A080-47E5-A492-1595DAA5EB15",
+      "--performance-reuse-fixture",
+      "--performance-loopback-origin",
+      "http://127.0.0.1:56064",
+      "--performance-idle-seconds",
+      "300",
+      "--performance-iterations",
+      "20"
+    ],
+    "macos": "27.0.1",
+    "memory_bytes": "38654705664",
+    "os": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "seed_database_ms": 4142.772708350094,
+    "seed_process_elapsed_ms": 4169.038084015483,
+    "source_note": "Universal Release build from 7de0693. Feature-inventory documentation was dirty at driver start; later source corrections were not part of this running binary.",
+    "working_tree_dirty": true
+  }
+}

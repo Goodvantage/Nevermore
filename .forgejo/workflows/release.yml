@@ -1,0 +1,323 @@
+name: Release
+
+# `scripts/release.sh X.Y.Z --push` tags vX.Y.Z, which runs this workflow:
+# it tests the tagged commit, builds the universal app, signs it with the
+# Goodvantage Developer ID, notarizes and staples the app and its DMG, then
+# attaches the DMG to the forge release for the tag and publishes it on
+# apps.goodvantage.cloud. A prerelease tag (vX.Y.Z-beta.1) becomes a forge
+# prerelease and goes to the site's beta channel. CICD.md lists the secrets.
+#
+# Forgejo Actions: an unqualified `uses:` resolves against github.com, so
+# actions that live only on code.forgejo.org use full URLs.
+
+on:
+  push:
+    tags: ['v*']
+
+# Never cancel a release that is waiting on notarization. The group is
+# per repository; the Mac runner runs one job at a time anyway.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Forgejo takes the automatic token's scope from the repository's Actions
+# settings; this documents what the jobs need.
+permissions:
+  contents: write
+
+env:
+  APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || 'RY935S6RFA' }}
+  BUNDLE_ID: ch.goodvantage.Nevermore
+
+jobs:
+  macos-app:
+    name: Build, sign and notarize the DMG
+    # mac-mini-1 runs jobs directly on the host, a persistent machine shared
+    # with other repositories: every credential this job decodes goes into
+    # the job's temporary directory and is removed by the last step.
+    runs-on:
+      - macos-arm64
+      - xcode-current
+    # Tests and the universal build take about half an hour; each of the two
+    # notarizations may wait up to NOTARY_WAIT_ROUNDS x 30 minutes.
+    timeout-minutes: 240
+    env:
+      NOTARY_WAIT_ROUNDS: '3'
+    steps:
+      - name: Check the signing secrets
+        shell: bash
+        env:
+          P12: ${{ secrets.MACOS_SIGN_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          missing=''
+          [ -n "$P12" ] || missing="$missing MACOS_SIGN_P12_BASE64"
+          [ -n "$P12_PASSWORD" ] || missing="$missing MACOS_SIGN_P12_PASSWORD"
+          [ -n "$NOTARY_KEY" ] || missing="$missing NOTARY_KEY_P8_BASE64"
+          [ -n "$NOTARY_KEY_ID" ] || missing="$missing NOTARY_KEY_ID"
+          [ -n "$NOTARY_ISSUER_ID" ] || missing="$missing NOTARY_ISSUER_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing (CICD.md, Releases)"
+            exit 1
+          fi
+
+      # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # Before any secret is decoded or any build starts. The grammar is the
+      # site publisher's, so a version it would refuse fails here, not after
+      # the forge release is out.
+      - name: Check the tag and the version in Info.plist
+        shell: bash
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "::error::$GITHUB_REF is not a release tag"; exit 1 ;;
+          esac
+          VERSION="${GITHUB_REF_NAME#v}"
+          source scripts/semver-pattern.sh
+          if [[ ! "$VERSION" =~ $SEMVER_PATTERN ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME is not v plus a semantic version such as v1.2.0 or v1.2.0-beta.1 (scripts/semver-pattern.sh)"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          plist_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+          if [ "$plist_version" != "$VERSION" ]; then
+            echo "::error::Resources/Info.plist says $plist_version, the tag $GITHUB_REF_NAME. Tag releases with scripts/release.sh."
+            exit 1
+          fi
+
+      # Same selection as ci.yml: a full Xcode with the macOS 26 SDK.
+      - name: Select Xcode toolchain
+        shell: bash
+        env:
+          XCODE_DEVELOPER_DIR: ${{ vars.XCODE_DEVELOPER_DIR }}
+        run: |
+          dir="${XCODE_DEVELOPER_DIR:-}"
+          if [ -z "$dir" ]; then
+            current="$(xcode-select -p 2>/dev/null || true)"
+            case "$current" in
+              */Xcode*.app/Contents/Developer) dir="$current" ;;
+              *)
+                for app in /Applications/Xcode*.app; do
+                  [ -d "$app/Contents/Developer" ] && dir="$app/Contents/Developer"
+                done
+                ;;
+            esac
+          fi
+          if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+            echo "::error::No full Xcode on this runner. Install Xcode 26 or later, or set the variable XCODE_DEVELOPER_DIR."
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$dir" >> "$GITHUB_ENV"
+          export DEVELOPER_DIR="$dir"
+          xcodebuild -version
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+          if [ "${sdk%%.*}" -lt 26 ]; then
+            echo "::error::The macOS SDK in $dir is $sdk; Nevermore needs the macOS 26 SDK or later."
+            exit 1
+          fi
+          xcrun notarytool --version
+
+      # The tag is cut on main, but nothing guarantees CI passed there first.
+      - name: Test the tagged commit
+        run: swift test --disable-keychain --triple "$(uname -m)-apple-macosx26.0"
+
+      - name: Import the Developer ID certificate into a temporary keychain
+        shell: bash
+        env:
+          MACOS_SIGN_P12_BASE64: ${{ secrets.MACOS_SIGN_P12_BASE64 }}
+          MACOS_SIGN_P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/nevermore-release.keychain-db"
+          saved_list="$RUNNER_TEMP/nevermore-keychain-list.txt"
+          # The runner account's search list is restored exactly by the
+          # cleanup step, so record it before changing anything.
+          security list-keychains -d user > "$saved_list"
+          echo "SAVED_KEYCHAIN_LIST=$saved_list" >> "$GITHUB_ENV"
+          echo "RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+          keychain_password="$(uuidgen)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          # No automatic locking: the DMG is signed after the app's
+          # notarization, which can take longer than any lock timeout.
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          p12="$RUNNER_TEMP/nevermore-signing.p12"
+          ( umask 077; printf '%s' "$MACOS_SIGN_P12_BASE64" | base64 -D > "$p12" )
+          security import "$p12" -k "$keychain" -P "$MACOS_SIGN_P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$p12"
+          # Lets codesign use the key without a prompt nobody could answer.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$keychain_password" "$keychain" > /dev/null
+
+          # Prepend, never replace: a run that dies before cleanup must not
+          # leave the account with only a deleted keychain in its list.
+          originals=()
+          while IFS= read -r line; do
+            line="$(printf '%s' "$line" | tr -d '"' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            [ -n "$line" ] && originals+=("$line")
+          done < "$saved_list"
+          security list-keychains -d user -s "$keychain" ${originals[@]+"${originals[@]}"}
+
+          # One line per certificate (this keychain holds only the .p12), so
+          # two certificates sharing a name fail here, not as "ambiguous"
+          # in codesign after the build.
+          names="$(security find-identity -v -p codesigning "$keychain" \
+            | sed -n 's/^ *[0-9][0-9]*) [0-9A-F]\{40\} "\(Developer ID Application: .*\)"$/\1/p')"
+          if [ -z "$names" ] || [ "$(printf '%s\n' "$names" | wc -l)" -ne 1 ]; then
+            echo "::error::MACOS_SIGN_P12_BASE64 must hold exactly one Developer ID Application identity"
+            exit 1
+          fi
+          case "$names" in
+            *"($APPLE_TEAM_ID)") ;;
+            *) echo "::error::The signing identity is not from team $APPLE_TEAM_ID"; exit 1 ;;
+          esac
+          echo "SIGN_IDENTITY=$names" >> "$GITHUB_ENV"
+
+      - name: Build, sign, notarize and package
+        shell: bash
+        env:
+          NOTARY_KEY_P8_BASE64: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          export NOTARY_KEY_FILE="$RUNNER_TEMP/nevermore-notary.p8"
+          ( umask 077; printf '%s' "$NOTARY_KEY_P8_BASE64" | base64 -D > "$NOTARY_KEY_FILE" )
+          scripts/package-release.sh
+          rm -f "$NOTARY_KEY_FILE"
+
+      - name: Check the packaged app
+        shell: bash
+        run: |
+          set -euo pipefail
+          plist=build/Nevermore.app/Contents/Info.plist
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "$BUNDLE_ID" ]
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "$VERSION" ]
+          codesign -dv build/Nevermore.app 2>&1 | grep -qx "TeamIdentifier=$APPLE_TEAM_ID"
+          test -s "build/Nevermore-$VERSION-macos-universal.dmg"
+          test -s "build/Nevermore-$VERSION-macos-universal.dmg.sha256"
+
+      # v3.2.1, the version Forgejo's artifact service speaks.
+      - uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5
+        with:
+          name: macos-dmg
+          path: |
+            build/Nevermore-*-macos-universal.dmg
+            build/Nevermore-*-macos-universal.dmg.sha256
+          if-no-files-found: error
+
+      # After success, failure and cancellation alike: no credential, keychain
+      # or build tree may stay on the shared Mac.
+      - name: Remove signing material and build output
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${SAVED_KEYCHAIN_LIST:-}" ] && [ -f "$SAVED_KEYCHAIN_LIST" ]; then
+            originals=()
+            while IFS= read -r line; do
+              line="$(printf '%s' "$line" | tr -d '"' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+              [ -n "$line" ] && originals+=("$line")
+            done < "$SAVED_KEYCHAIN_LIST"
+            [ ${#originals[@]} -gt 0 ] && security list-keychains -d user -s "${originals[@]}" || true
+          fi
+          if [ -n "${RELEASE_KEYCHAIN:-}" ] && [ -f "$RELEASE_KEYCHAIN" ]; then
+            security delete-keychain "$RELEASE_KEYCHAIN" || true
+          fi
+          rm -f "$RUNNER_TEMP/nevermore-signing.p12" "$RUNNER_TEMP/nevermore-notary.p8" \
+            "${SAVED_KEYCHAIN_LIST:-/dev/null/none}"
+          rm -rf .build build
+
+  # Runs after the site publish. The site never replaces a published
+  # version's files, and a re-run of the whole workflow rebuilds the DMG with
+  # a new signature and notarization ticket, so it is a different file. The
+  # site then refuses it, this job does not run, and the forge keeps the
+  # build the site serves. Re-run only the failed jobs of a release run.
+  forge-release:
+    name: Attach the DMG to the forge release
+    needs: [macos-app, apps-site]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Read the release notes from the tag
+        run: scripts/apps-site-release.sh notes "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-notes.txt"
+
+      # v3.0.2, the version Forgejo's artifact service speaks.
+      - uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a
+        with:
+          name: macos-dmg
+          path: dist/release
+
+      # Pinned to v2.13.4's commit: this step holds a token that can write
+      # releases. Every input is explicit, and `override` lets a re-run
+      # replace this tag's release (or a half-finished draft) instead of
+      # failing; the ordering above keeps that to the site's build.
+      - name: Attach to the release
+        uses: https://code.forgejo.org/actions/forgejo-release@98265452477dafb3f0f27ba9c462c90b18cb44fd # v2.13.4
+        with:
+          direction: upload
+          url: ${{ github.server_url }}
+          repo: ${{ github.repository }}
+          tag: ${{ github.ref_name }}
+          sha: ${{ github.sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release-dir: dist/release
+          release-notes-file: ${{ runner.temp }}/release-notes.txt
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          override: true
+          verbose: true
+
+  apps-site:
+    name: Publish to apps.goodvantage.cloud
+    needs: macos-app
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      APPS_SITE_URL: ${{ vars.APPS_SITE_URL || 'https://apps.goodvantage.cloud' }}
+    steps:
+      # Skip rather than fail while the site has no token for Nevermore, so
+      # the forge release, which waits for this job, still goes out.
+      - name: Check the publishing token
+        id: site
+        env:
+          APPS_SITE_TOKEN: ${{ secrets.APPS_SITE_TOKEN }}
+        run: |
+          if [ -z "$APPS_SITE_TOKEN" ]; then
+            echo "::notice::Not publishing to apps.goodvantage.cloud: the APPS_SITE_TOKEN secret is not set (CICD.md, Releases)."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        if: steps.site.outputs.configured == 'true'
+
+      # v3.0.2
+      - uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a
+        if: steps.site.outputs.configured == 'true'
+        with:
+          name: macos-dmg
+          path: artifacts
+
+      - name: Read the release notes from the tag
+        if: steps.site.outputs.configured == 'true'
+        run: scripts/apps-site-release.sh notes "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-notes.txt"
+
+      # Uploads the DMG and its release.json, registers Nevermore in the
+      # site's app list, and moves the channel manifest last, so the page and
+      # any client never see a version whose file is missing.
+      - name: Publish
+        if: steps.site.outputs.configured == 'true'
+        env:
+          APPS_SITE_TOKEN: ${{ secrets.APPS_SITE_TOKEN }}
+        run: scripts/apps-site-release.sh publish "$GITHUB_REF_NAME" artifacts "$RUNNER_TEMP/release-notes.txt"

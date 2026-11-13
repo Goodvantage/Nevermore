@@ -1,0 +1,22 @@
+/* Connection/outbox localization only; other app UI remains English. */
+"connection.connecting" = "Verbindung wird hergestellt…";
+"connection.reconnecting" = "Verbindung wird wiederhergestellt…";
+"connection.demo" = "Demo · nur lokale Daten";
+"connection.cached_connecting" = "Zwischengespeichert · Verbindung wird hergestellt…";
+"connection.maintenance" = "Wartung · nur lesbar";
+"connection.live" = "Echtzeit verbunden";
+"connection.http_only" = "Verbunden · HTTP; Echtzeit nicht verfügbar";
+"connection.realtime_unavailable" = "Echtzeit nicht verfügbar · HTTP-Abgleich aktiv";
+"outbox.state.queued" = "In Warteschlange";
+"outbox.state.uploading" = "Wird hochgeladen";
+"outbox.state.sending" = "Wird gesendet";
+"outbox.state.acknowledged" = "Gesendet";
+"outbox.state.retryable" = "Bereit für erneuten Versuch";
+"outbox.state.needs_review" = "Überprüfung erforderlich";
+"outbox.state.rejected" = "Abgelehnt";
+"outbox.state.cancelled" = "Abgebrochen";
+"error.protocol.transport" = "Die Website ist nicht erreichbar. Prüfe deine Netzwerkverbindung und die Adresse der Website.";
+"error.protocol.unauthorized" = "Die Zugangsdaten dieses Kontos werden nicht mehr akzeptiert. Melde dich erneut an, um die Verbindung wiederherzustellen.";
+"error.protocol.invalid_response" = "Die Website hat eine Antwort zurückgegeben, die Nevermore nicht verarbeiten konnte.";
+"error.protocol.keychain" = "Sicheres Speichern der Zugangsdaten fehlgeschlagen (Schlüsselbundfehler %@).";
+"error.store.staging_budget" = "Das Limit von %lld Bytes für vorgemerkte Anhänge wurde überschritten. Entferne Anhänge, bevor du weitere hinzufügst.";

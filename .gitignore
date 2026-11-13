@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+build/
+.DS_Store
+*.xcuserstate
+.env
+__pycache__/
+*.pyc
+
+# Local Claude Code approvals can contain secrets.
+**/.claude/settings.local.json
