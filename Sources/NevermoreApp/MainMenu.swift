@@ -105,6 +105,9 @@ import AppKit
         item(find, "Search Messages…", #selector(ConversationWindow.findMessages(_:)), "f", [.command, .option])
         item(find, "Search This Account…", #selector(ConversationWindow.searchAccount(_:)), "f", [.command, .shift])
         item(find, "Search with Filters…", #selector(ConversationWindow.advancedSearch(_:)))
+        item(find, "Save Search…", #selector(ConversationWindow.saveSearch(_:)))
+        let saved = submenu(find, "Saved Searches")
+        saved.delegate = SavedSearchMenu.shared
         let spelling = submenu(edit, "Spelling and Grammar")
         item(spelling, "Show Spelling and Grammar", #selector(NSTextView.showGuessPanel(_:)), ":")
         item(spelling, "Check Document Now", #selector(NSTextView.checkSpelling(_:)), ";")
@@ -142,6 +145,7 @@ import AppKit
         let themes = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
         themes.submenu = ThemeMenuController.shared.makeMenu()
         view.addItem(themes)
+        item(view, "Customize Home…", #selector(ConversationWindow.customizeHome(_:)))
         view.addItem(.separator())
         item(view, "Make Text Bigger", #selector(ConversationWindow.largerText(_:)), "+")
         item(view, "Make Text Normal Size", #selector(ConversationWindow.actualTextSize(_:)), "0")
@@ -150,6 +154,7 @@ import AppKit
         item(view, "Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control])
 
         let go = menu("Go")
+        item(go, "Home", #selector(ConversationWindow.goHome(_:)), "h", [.command, .shift])
         item(go, "Back", #selector(ConversationWindow.goBack), "[")
         item(go, "Forward", #selector(ConversationWindow.goForward), "]")
         go.addItem(.separator())
@@ -188,6 +193,7 @@ import AppKit
         item(conversation, "Leave Channel…", #selector(ConversationWindow.leaveChannel(_:)))
         conversation.addItem(.separator())
         item(conversation, "Create Poll…", #selector(ConversationWindow.createPoll(_:)))
+        item(conversation, "Send GIF…", #selector(ConversationWindow.sendGIF(_:)), "g", [.command, .control])
         item(conversation, "Schedule Message…", #selector(ConversationWindow.schedule(_:)))
         conversation.addItem(.separator())
         item(conversation, "Open Raven in Browser", #selector(ConversationWindow.openBrowser(_:)))

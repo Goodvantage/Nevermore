@@ -70,7 +70,7 @@ import RavenProtocol
         let controller = ConversationWindow(app: app, session: sidebarSession)
         defer { controller.close() }
         controller.window?.contentView?.layoutSubtreeIfNeeded()
-        if let row = controller.sidebarItems.firstIndex(where: { $0.1?.id == "sidebar-dm" }),
+        if let row = controller.sidebarItems.firstIndex(where: { $0.channel?.id == "sidebar-dm" }),
            let cell = controller.sidebar.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarConversationCell {
             let loaded = try await wait { sidebarSession.avatars["sidebar-only"] != nil && sidebarSession.avatarRequests.isEmpty }
             results.append(("a visible DM loads and displays its peer photo without opening a conversation", loaded && controller.channel == nil && cell.imageView?.image === sidebarSession.avatars["sidebar-only"]))

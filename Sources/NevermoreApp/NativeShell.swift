@@ -22,6 +22,7 @@ extension AppDelegate {
         controller.showWindow(nil)
         body(controller)
     }
+    @objc func goHome(_ sender: Any?) { forward { $0.window?.makeKeyAndOrderFront(nil); $0.showHome() } }
     @objc func inbox() { forward { $0.inbox() } }
     @objc func threads() { forward { $0.threads() } }
     @objc func outbox() { forward { $0.outbox() } }
@@ -31,7 +32,7 @@ extension AppDelegate {
     @objc func chooseConversation(_ sender: Any?) { forward { $0.window?.makeKeyAndOrderFront(nil); $0.chooseConversation(sender) } }
     @objc func newConversationTab(_ sender: Any?) { forward { $0.window?.makeKeyAndOrderFront(nil); $0.newConversationTab(sender) } }
     @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        let forwarded: [Selector] = [#selector(inbox), #selector(threads), #selector(outbox), #selector(showSavedMessages(_:)), #selector(showReminders(_:)), #selector(showScheduledMessages(_:)), #selector(chooseConversation(_:)), #selector(newConversationTab(_:))]
+        let forwarded: [Selector] = [#selector(goHome(_:)), #selector(inbox), #selector(threads), #selector(outbox), #selector(showSavedMessages(_:)), #selector(showReminders(_:)), #selector(showScheduledMessages(_:)), #selector(chooseConversation(_:)), #selector(newConversationTab(_:))]
         if let action = item.action, forwarded.contains(action) { return activeConversationWindow != nil }
         if item.action == #selector(showThemeEditor(_:)) { return !ThemeManager.shared.current.isClassic }
         return true

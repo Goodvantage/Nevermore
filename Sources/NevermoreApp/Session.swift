@@ -95,6 +95,20 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     var thumbnails: [String: NSImage] = [:]
     var thumbnailOrder: [String] = []
     var thumbnailRequests = Set<String>()
+    /// Frames of animated images (GIF uploads and GIFs embedded in message
+    /// bodies), by `AnimatedImageKey`. Thumbnails keep the first frame.
+    let animatedImages = AnimatedImageCache()
+    /// Where each animated image came from, so one the cache let go can be
+    /// decoded again when it is shown.
+    var animatedSources: [String: URL] = [:]
+    var animatedRequests = Set<String>()
+    /// Fetches GIFs embedded in message bodies from GIF services, without
+    /// Raven credentials. Self-checks substitute a fixture.
+    var gifMedia: any GIFMediaLoading = LinkPreviewLoader()
+    /// When an animated image last failed to load, by key; it is retried
+    /// after a while. A GIF embedded in a message shows its text meanwhile,
+    /// an uploaded one its still.
+    var inlineImageFailures: [String: Date] = [:]
     /// Profile photos by user ID; absent until loaded, then drawn in place
     /// of generated ravens. `avatarFailures` stops retrying broken images until
     /// the connection returns or the user directory changes.
@@ -120,6 +134,8 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     }()
     var memoryMessages: [String: [RavenMessage]] = [:]
     let quickReactionUsage = QuickReactionUsage()
+    /// Home's server modules; see `HomeFeed`.
+    lazy var home = HomeFeed(session: self)
     /// Every window shares message snapshots, so refresh coverage must include
     /// toggles accepted from any window, not only the one asking for a reload.
     private(set) var reactionsAccepted = 0
@@ -128,7 +144,8 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     var refreshTask: Task<Void, Never>?
     var reconciliationTask: Task<Void, Never>?
     var reconcileRequested = false
-    private var lastLiveRefresh = Date()
+    /// Internal rather than private so the self-check can pin the live tick.
+    var lastLiveRefresh = Date()
     var notificationChannels = Set<String>()
     var notifiedIDs = Set<String>()
     var unread: JSONValue = .null
@@ -290,15 +307,21 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(15))
                 guard !Task.isCancelled, let self, !self.stopped else { break }
-                self.reconciliationTick(now: Date(), isActive: NSApp.isActive)
+                self.reconciliationTick(now: Date())
             }
         }
     }
-    func reconciliationTick(now: Date, isActive: Bool) {
+    func reconciliationTick(now: Date) {
         guard !demo, !stopped else { return }
+        guard !interests.isEmpty || !notificationChannels.isEmpty else { return }
         if !realtimeLive {
-            if !interests.isEmpty { requestReconciliation() }
-        } else if isActive, now.timeIntervalSince(lastLiveRefresh) >= 60 {
+            requestReconciliation()
+        } else if now.timeIntervalSince(lastLiveRefresh) >= 60 {
+            // A "live" socket can silently stop delivering (a rejected room
+            // join emits nothing, and a wedged transport may not fault).
+            // Reconcile open conversations and notification state every
+            // minute regardless of app focus so state can never go stale
+            // indefinitely.
             requestReconciliation()
             lastLiveRefresh = now
         }
@@ -334,7 +357,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         let revoked = Set(channels.map(\.id)).subtracting(allowed)
         revokedChannels.formUnion(revoked); revokedChannels.subtract(allowed)
         for id in revoked { memoryMessages.removeValue(forKey: id) }
-        if !revoked.isEmpty { generation += 1; thumbnails.removeAll(); thumbnailOrder.removeAll() }
+        if !revoked.isEmpty { generation += 1; thumbnails.removeAll(); thumbnailOrder.removeAll(); forgetAnimatedImages() }
         try await store.removeRevokedChannels(allowed: allowed.union(threads))
         try await store.cacheChannels(items)
         channels = items.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
@@ -461,7 +484,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         } catch {
             // An authoritative access denial invalidates private cached content.
             if let e = error as? RavenError, e.isPermissionDenied {
-                revokedChannels.insert(channelID); memoryMessages.removeValue(forKey: channelID); thumbnails.removeAll(); updateRooms()
+                revokedChannels.insert(channelID); memoryMessages.removeValue(forKey: channelID); thumbnails.removeAll(); forgetAnimatedImages(); updateRooms()
                 let rows = try await store.messages(channelID: channelID, limit: 5000)
                 try await store.deleteMessages(ids: rows.map(\.id)); notify()
             }
@@ -509,6 +532,65 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         if let demoWire { demoWire.deliver() } else { Task { await flush() } }
         return accepted
     }
+    /// Sends a GIF picked in a conversation as its own message, through the
+    /// outbox like a typed message, so it survives a lost connection and
+    /// shows at once. The conversation's draft stays as it is.
+    @discardableResult func sendGIF(_ item: GIFItem, channelID: String, replyTo: String?, sendSilently: Bool = false) async throws -> SendOperation {
+        guard !stopped else { throw AppError.message("This account is no longer active.") }
+        guard !demo || demoWire != nil else { throw AppError.message("Demo mode does not send messages. Add a Raven account to chat.") }
+        guard !readOnly, !ChannelPolicy.isRevoked(channelID: channelID, revoked: revokedChannels, threadParents: threadParents) else { throw AppError.message("This conversation is read only or access changed.") }
+        guard !ChannelPolicy.isArchived(channelID: channelID, channels: channels, threadParents: threadParents) else { throw OutboxTargetError.archived }
+        let accepted = try await store.acceptGIF(channelID: channelID, html: GIFMessage.html(for: item), replyTo: replyTo, sendSilently: sendSilently)
+        notify()
+        if let demoWire { demoWire.deliver() } else { Task { await flush() } }
+        return accepted
+    }
+    /// Raven's idempotent send refuses a body without text, so a GIF goes
+    /// through `send_message`, which has no client ID. A first attempt
+    /// sends; a later one first looks for the GIF an unanswered attempt may
+    /// have posted, so a lost answer does not post it twice.
+    private func deliverGIF(_ operation: SendOperation) async throws -> RavenMessage? {
+        if operation.attempts > 1, let posted = try await postedGIF(operation) { return posted }
+        var args: [String: JSONValue] = ["channel_id": .string(operation.channelID), "text": .string(operation.html)]
+        if operation.sendSilently == true { args["send_silently"] = .bool(true) }
+        if let reply = operation.replyTo { args["is_reply"] = .bool(true); args["linked_message"] = .string(reply) }
+        let row = Self.gifRow(try await client.rpc("raven.api.raven_message.send_message", arguments: args, mutation: true))
+        guard !row.id.isEmpty, row.channelID == operation.channelID, row.owner == account.user, GIFMessage.source(in: row.html) == GIFMessage.source(in: operation.html) else { return nil }
+        return row
+    }
+    /// The reader's message carrying this operation's GIF, posted since the
+    /// operation was accepted, if the conversation's latest page has one.
+    /// A message another send already delivered is not it, so the same GIF
+    /// sent twice in a row is not taken for one.
+    private func postedGIF(_ operation: SendOperation) async throws -> RavenMessage? {
+        guard let source = GIFMessage.source(in: operation.html) else { return nil }
+        let result = try await client.rpc("raven.api.chat_stream.get_messages", arguments: ["channel_id": .string(operation.channelID), "limit": .number(50), "update_last_visit": .bool(false)])
+        // Sends older than a day wait for approval, so a week covers all but rare approved ones.
+        let delivered = try await store.deliveredMessageIDs(channelID: operation.channelID, since: operation.createdAt.addingTimeInterval(-7 * 86400))
+        // Clocks differ between this Mac and the site; a minute of slack.
+        let earliest = operation.createdAt.addingTimeInterval(-60)
+        return result["messages"].array.map(Self.gifRow).first { row in
+            !delivered.contains(row.id) && row.channelID == operation.channelID && row.owner == account.user
+                && row.raw["linked_message"].string.flatMap({ $0.isEmpty ? nil : $0 }) == operation.replyTo
+                && GIFMessage.source(in: row.html) == source && (messageDate(row.creation).map { $0 >= earliest } ?? false)
+        }
+    }
+    /// A message from `send_message` or the history. These sends have no
+    /// batch, and an empty batch field would read as another send's.
+    private static func gifRow(_ value: JSONValue) -> RavenMessage {
+        var fields = value.object
+        if fields["message_batch_id"]?.string?.isEmpty == true { fields.removeValue(forKey: "message_batch_id") }
+        return RavenMessage(raw: .object(fields))
+    }
+    /// Cancels a queued GIF that was never attempted. A GIF never was the
+    /// draft, so the composer and its draft stay as they are. Nil when the
+    /// GIF has already left.
+    func takeBackGIF(id: UUID) async throws -> SendOperation? {
+        guard !stopped else { throw AppError.message("This account is no longer active.") }
+        guard let taken = try await store.takeBack(id: id) else { return nil }
+        notify()
+        return taken
+    }
     /// Reserves the original shared composer before any suspension. Saves,
     /// sends and file receipts must settle first; the store then compares
     /// the persisted draft and restores/cancels atomically.
@@ -537,6 +619,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         case .unavailable: return nil
         case .draftChanged: throw AppError.message("This shared draft changed. Review it before taking a message back.")
         case .restored(let restored): operation = restored
+        case .cancelled(let cancelled): return cancelled
         }
         guard !stopped else { return operation }
         // UI edits are disabled while reserved. Preserve even a programmatic
@@ -578,6 +661,20 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
                         if ChannelPolicy.isArchived(channelID: op.channelID, channels: channels, threadParents: threadParents) { throw OutboxTargetError.archived }
                         op.attachments[i].uploaded = try await client.upload(file: URL(fileURLWithPath: op.attachments[i].localPath), filename: op.attachments[i].filename)
                         try await store.updateOperation(op)
+                    }
+                    if op.isGIF {
+                        try await verifySendTarget(op.channelID)
+                        guard !stopped else { return }
+                        op.state = .sending; try await store.updateOperation(op); notify()
+                        guard !readOnly else { throw AppError.message("The site is read only. Your queued send is preserved.") }
+                        if ChannelPolicy.isRevoked(channelID: op.channelID, revoked: revokedChannels, threadParents: threadParents) { throw OutboxTargetError.accessChanged }
+                        if ChannelPolicy.isArchived(channelID: op.channelID, channels: channels, threadParents: threadParents) { throw OutboxTargetError.archived }
+                        guard let row = try await deliverGIF(op) else {
+                            op.state = .needsReview; op.error = StatusLocalization.text(.outboxAcknowledgementReview); try await store.updateOperation(op); continue
+                        }
+                        try await store.acknowledge(id: op.id, messages: [row])
+                        if !retainHistory { memoryMessages[op.channelID, default: []].append(row); try await store.clearHistory(); clearMessageDocuments() }
+                        continue
                     }
                     var args: [String: JSONValue] = ["channel_id": .string(op.channelID), "content": .string(op.html), "files": .array(op.attachments.compactMap(\.uploaded)), "client_id": .string(op.id.uuidString)]
                     if op.sendSilently == true { args["send_silently"] = .bool(true) }
@@ -683,23 +780,105 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
               let path = message.raw["file"].string, let url = try? RavenAttachmentURL.resolve(path, origin: account.origin),
               SiteOrigin.sameOrigin(url, account.origin), !demo, !stopped else { return }
         thumbnailRequests.insert(message.id)
+        let generation = self.generation
         Task {
             defer { thumbnailRequests.remove(message.id) }
             do {
-                let data = try await client.download(url, maximumBytes: 32 * 1024 * 1024)
-                let cgImage = await Task.detached(priority: .utility) { () -> CGImage? in
-                    guard data.count <= 32 * 1024 * 1024, let source = CGImageSourceCreateWithData(data as CFData, nil),
+                let data = try await client.download(url, maximumBytes: Self.imageDownloadBytes)
+                let decoded = await Task.detached(priority: .utility) { () -> (CGImage, AnimatedImage?)? in
+                    guard data.count <= Self.imageDownloadBytes, let source = CGImageSourceCreateWithData(data as CFData, nil),
                           let metadata = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
                           let width = metadata[kCGImagePropertyPixelWidth] as? Int, let height = metadata[kCGImagePropertyPixelHeight] as? Int,
-                          width > 0, height > 0, width <= 20000, height <= 20000, width * height <= 40_000_000 else { return nil }
-                    return CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 512, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
+                          width > 0, height > 0, width <= 20000, height <= 20000, width * height <= 40_000_000,
+                          let still = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 512, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { return nil }
+                    // Only an image with several frames keeps them all.
+                    let animated = CGImageSourceGetCount(source) > 1 ? Self.decodeAnimated(data) : nil
+                    return (still, animated)
                 }.value
-                guard !stopped, let cgImage else { return }
-                thumbnails[message.id] = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height)); thumbnailOrder.append(message.id)
+                // A conversation whose access was lost keeps none of its images.
+                guard !stopped, let (still, animated) = decoded,
+                      !ChannelPolicy.isRevoked(channelID: message.channelID, revoked: revokedChannels, threadParents: threadParents) else { return }
+                thumbnails[message.id] = NSImage(cgImage: still, size: NSSize(width: still.width, height: still.height)); thumbnailOrder.append(message.id)
                 while thumbnailOrder.count > 20 { thumbnails.removeValue(forKey: thumbnailOrder.removeFirst()) }
+                if let animated, self.generation == generation {
+                    let key = AnimatedImageKey.message(message.id)
+                    animatedSources[key] = url
+                    animatedImages.insert(animated, for: key)
+                }
                 notify()
             } catch { /* The named file/Quick Look fallback remains visible. */ }
         }
+    }
+    nonisolated static let imageDownloadBytes = 32 * 1024 * 1024
+    /// Animated frames are decoded for the transcript's largest image, 320
+    /// points, on a Retina display.
+    nonisolated static let animatedPixelSide = 640
+    nonisolated static func decodeAnimated(_ data: Data) -> AnimatedImage? {
+        var limits = AnimatedImageDecoder.Limits.standard
+        limits.encodedBytes = imageDownloadBytes
+        guard let image = AnimatedImageDecoder.decode(data, maxPixelSide: animatedPixelSide, limits: limits), image.isAnimated else { return nil }
+        return image
+    }
+    /// Decodes an animated image again after the cache let it go, when the
+    /// transcript shows it.
+    func requestAnimatedImage(_ key: String) {
+        guard let url = animatedSources[key] else { return }
+        if key == AnimatedImageKey.remote(url) { requestInlineImage(url); return }
+        // A file that failed is not asked for again on every scroll; its still stays.
+        guard !animatedImages.contains(key), !animatedRequests.contains(key), animatedRequests.count < 2, !demo, !stopped,
+              inlineImageFailures[key].map({ Date().timeIntervalSince($0) >= Self.inlineImageRetryDelay }) ?? true else { return }
+        animatedRequests.insert(key)
+        let generation = self.generation
+        Task {
+            defer { animatedRequests.remove(key) }
+            let data = try? await client.download(url, maximumBytes: Self.imageDownloadBytes)
+            let image = await Task.detached(priority: .utility) { data.flatMap(Self.decodeAnimated) }.value
+            // Sources forgotten meanwhile, as when access is lost, take
+            // what was fetched for them along.
+            guard !stopped, self.generation == generation, animatedSources[key] == url else { return }
+            guard let image else { inlineImageFailures[key] = Date(); return }
+            inlineImageFailures.removeValue(forKey: key)
+            animatedImages.insert(image, for: key)
+            notify()
+        }
+    }
+    /// Drops decoded GIFs and their addresses; fetches still under way
+    /// then keep nothing.
+    func forgetAnimatedImages() { animatedImages.removeAll(); animatedSources.removeAll(); inlineImageFailures.removeAll() }
+    static let inlineImageRetryDelay: TimeInterval = 300
+    /// Whether a GIF embedded in a message failed recently; it then shows
+    /// its text fallback.
+    func inlineImageFailed(_ url: URL) -> Bool {
+        inlineImageFailures[AnimatedImageKey.remote(url)].map { Date().timeIntervalSince($0) < Self.inlineImageRetryDelay } ?? false
+    }
+    /// Names the address of a GIF embedded in a message body, so the
+    /// transcript can ask for it by key once it comes into view.
+    func noteInlineImage(_ url: URL) { animatedSources[AnimatedImageKey.remote(url)] = url }
+    /// Loads a GIF embedded in a message body. The address must be a GIF
+    /// service's (`GIFMediaPolicy`); the request carries no Raven
+    /// credentials and goes through the link preview transport's checks.
+    private func requestInlineImage(_ url: URL) {
+        let key = AnimatedImageKey.remote(url)
+        guard GIFMediaPolicy.isServiceMedia(url), !animatedImages.contains(key), !animatedRequests.contains(key), animatedRequests.count < 4,
+              !inlineImageFailed(url), !stopped else { return }
+        animatedRequests.insert(key)
+        animatedSources[key] = url
+        let generation = self.generation, loader = gifMedia
+        Task {
+            defer { animatedRequests.remove(key) }
+            let data = await loader.mediaData(for: url)
+            let image = await Task.detached(priority: .utility) { data.flatMap(Self.decodeInlineImage) }.value
+            guard !stopped, self.generation == generation, animatedSources[key] == url else { return }
+            if let image { animatedImages.insert(image, for: key); inlineImageFailures.removeValue(forKey: key) }
+            else { inlineImageFailures[key] = Date() }
+            notify()
+        }
+    }
+    /// A still GIF decodes to one frame and is shown like any other.
+    nonisolated static func decodeInlineImage(_ data: Data) -> AnimatedImage? {
+        var limits = AnimatedImageDecoder.Limits.standard
+        limits.encodedBytes = GIFMediaPolicy.maximumMediaBytes
+        return AnimatedImageDecoder.decode(data, maxPixelSide: animatedPixelSide, limits: limits)
     }
     /// Shared by the sidebar and transcript. Use the canonical Raven username,
     /// not a display label (notably "You"), so directory refreshes cannot change
@@ -788,7 +967,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         guard !stopped, !Task.isCancelled, !(error is CancellationError) else { return }
         state = StatusLocalization.errorDescription(error); setStatusAttention(.accountAttention); notify()
     }
-    func stop() { stopped = true; sentLinkPreviews.reset(); transcriptChannelState.removeAll(); clearMessageDocuments(); timestampEnvironmentObservation = nil; setStatusAttention(nil); threadParents.removeAll(); roles.removeAll(); unreadNotificationIDs.removeAll(); (NSApp.delegate as? AppDelegate)?.updateDockBadge(); pendingFileReceipts.removeAll(); userPreferences = nil; directory.removeAll(); userNames.removeAll(); activeUsers.removeAll(); workingHours = nil; thumbnails.removeAll(); avatars.removeAll(); generatedAvatars.removeAllObjects(); generatedChannelAvatars.removeAllObjects(); avatarLastUse.removeAll(); avatarQueue.removeAll(); avatarRequests.removeAll(); avatarWorker?.cancel(); memoryMessages.removeAll(); generation += 1; refreshTask?.cancel(); reconciliationTask?.cancel(); realtime?.disconnect(); realtime = nil }
+    func stop() { stopped = true; home.cancel(); sentLinkPreviews.reset(); transcriptChannelState.removeAll(); clearMessageDocuments(); timestampEnvironmentObservation = nil; setStatusAttention(nil); threadParents.removeAll(); roles.removeAll(); unreadNotificationIDs.removeAll(); (NSApp.delegate as? AppDelegate)?.updateDockBadge(); pendingFileReceipts.removeAll(); userPreferences = nil; directory.removeAll(); userNames.removeAll(); activeUsers.removeAll(); workingHours = nil; thumbnails.removeAll(); forgetAnimatedImages(); avatars.removeAll(); generatedAvatars.removeAllObjects(); generatedChannelAvatars.removeAllObjects(); avatarLastUse.removeAll(); avatarQueue.removeAll(); avatarRequests.removeAll(); avatarWorker?.cancel(); memoryMessages.removeAll(); generation += 1; refreshTask?.cancel(); reconciliationTask?.cancel(); realtime?.disconnect(); realtime = nil }
     private func shouldDeliverNotification(channelID: String) -> Bool {
         guard !stopped, !revokedChannels.contains(channelID),
               let channel = channels.first(where: { $0.id == channelID }),

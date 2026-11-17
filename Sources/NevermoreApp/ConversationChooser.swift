@@ -20,17 +20,21 @@ import NevermoreCore
     var onPick: ((MentionCandidate, Bool) -> Void)?
     var onClose: (() -> Void)?
     private var finished = false
-    init(session: AccountSession) {
-        candidates = session.channels.filter { !session.revokedChannels.contains($0.id) }.map { MentionCandidate(kind: .channel, serverID: $0.id, title: $0.title, detail: $0.isDM ? "Direct message" : $0.workspace) } + session.userNames.map { MentionCandidate(kind: .person, serverID: $0.key, title: $0.value, detail: "Direct message · \($0.key)") }
+    /// `only` limits the list to conversations or to people, for picking
+    /// a search filter rather than opening something.
+    init(session: AccountSession, only: MentionCandidate.Kind? = nil) {
+        let all = session.channels.filter { !session.revokedChannels.contains($0.id) }.map { MentionCandidate(kind: .channel, serverID: $0.id, title: $0.title, detail: $0.isDM ? "Direct message" : $0.workspace) } + session.userNames.map { MentionCandidate(kind: .person, serverID: $0.key, title: $0.value, detail: only == .person ? $0.key : "Direct message · \($0.key)") }
+        candidates = only.map { kind in all.filter { $0.kind == kind } } ?? all
         let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 580, height: 410), styleMask: [.titled,.closable], backing: .buffered, defer: false)
-        super.init(window: window); window.title = "Open Conversation · \(session.account.user)"; window.delegate = self
+        super.init(window: window); window.delegate = self
+        window.title = only == .person ? "Search Messages From" : only == .channel ? "Search In" : "Open Conversation · \(session.account.user)"
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("destination")); table.addTableColumn(column); table.headerView = nil; table.rowHeight = 42; table.delegate = self; table.dataSource = self; table.target = self; table.doubleAction = #selector(chooseSelected)
-        table.onPick = { [weak self] in self?.chooseSelected() }; table.onCancel = { [weak self] in self?.cancel() }; table.setAccessibilityLabel("Matching conversations and people")
+        table.onPick = { [weak self] in self?.chooseSelected() }; table.onCancel = { [weak self] in self?.cancel() }; table.setAccessibilityLabel(only == .person ? "Matching people" : only == .channel ? "Matching conversations" : "Matching conversations and people")
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
-        search.placeholderString = "Search conversations or people · # channels · @ people"; search.delegate = self; search.setAccessibilityLabel("Find a conversation or person")
-        let note = NSTextField(labelWithString: "Return opens · Option-Return opens a new window · Escape cancels"); note.textColor = .secondaryLabelColor; note.font = .systemFont(ofSize: 11)
+        search.placeholderString = only == .person ? "Search people" : only == .channel ? "Search conversations" : "Search conversations or people · # channels · @ people"; search.delegate = self; search.setAccessibilityLabel(only == .person ? "Find a person" : only == .channel ? "Find a conversation" : "Find a conversation or person")
+        let note = NSTextField(labelWithString: only == nil ? "Return opens · Option-Return opens a new window · Escape cancels" : "Return chooses · Escape cancels"); note.textColor = .secondaryLabelColor; note.font = .systemFont(ofSize: 11)
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
-        let open = NSButton(title: "Open", target: self, action: #selector(chooseSelected)); open.keyEquivalent = "\r"
+        let open = NSButton(title: only == nil ? "Open" : "Choose", target: self, action: #selector(chooseSelected)); open.keyEquivalent = "\r"
         let buttons = NSStackView(views: [note, NSView(), cancel, open]); buttons.orientation = .horizontal; buttons.spacing = 8
         let stack = NSStackView(views: [search, scroll, buttons]); stack.orientation = .vertical; stack.spacing = 10; stack.translatesAutoresizingMaskIntoConstraints = false; window.contentView?.addSubview(stack)
         if let view = window.contentView { NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14), stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14), stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 14), stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14), search.widthAnchor.constraint(equalTo: stack.widthAnchor), scroll.widthAnchor.constraint(equalTo: stack.widthAnchor), buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)]) }

@@ -79,6 +79,36 @@ import Synchronization
             try await Task.sleep(for: .milliseconds(10))
         }
         results.append(("closed attachment windows detach their Quick Look source", QLPreviewPanel.shared()?.dataSource == nil))
+        // A click previews in Quick Look over the conversation alone: the
+        // file actions window used to open beside it.
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        NSApp.activate(ignoringOtherApps: true); host.makeKeyAndOrderFront(nil)
+        for _ in 0..<100 { if host.isKeyWindow { break }; try await Task.sleep(for: .milliseconds(10)) }
+        let hostNext = host.nextResponder
+        var previewEnded = false
+        var overHost: AttachmentWindow? = AttachmentWindow(attachment: try await client.download(origin.appendingPathComponent("fixture.txt"), to: root), messageLink: nil, presentation: .quickLook(over: host), active: { true }, reportError: { failures.append($0); print("Attachment fixture error: \($0.localizedDescription)"); fflush(nil) })
+        overHost?.didClose = { previewEnded = true }
+        overHost?.present(save: false)
+        results.append(("a preview opens Quick Look over the clicked window without a second window", QLPreviewPanel.shared()?.isVisible == true && (QLPreviewPanel.shared()?.dataSource as AnyObject?) === overHost && overHost?.window?.isVisible == false))
+        QLPreviewPanel.shared()?.close()
+        for _ in 0..<200 { if previewEnded { break }; try await Task.sleep(for: .milliseconds(10)) }
+        results.append(("closing Quick Look ends a preview over a window and restores its responder chain", previewEnded && host.nextResponder === hostNext && QLPreviewPanel.shared()?.dataSource == nil))
+        overHost = nil; host.close()
+        // When Quick Look declines the file, the file actions window opens
+        // instead. Its responder chain once looped, and the next key press
+        // there walked the loop until the app ran out of memory.
+        let claimed = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+        claimed.isReleasedWhenClosed = false
+        let claimant = QuickLookClaimingView(frame: claimed.contentLayoutRect); claimed.contentView?.addSubview(claimant)
+        claimed.makeKeyAndOrderFront(nil); claimed.makeFirstResponder(claimant)
+        for _ in 0..<100 { if claimed.isKeyWindow { break }; try await Task.sleep(for: .milliseconds(10)) }
+        let claimedNext = claimed.nextResponder
+        let declined = AttachmentWindow(attachment: try await client.download(origin.appendingPathComponent("fixture.txt"), to: root), messageLink: nil, presentation: .quickLook(over: claimed), active: { true }, reportError: { failures.append($0); print("Attachment fixture error: \($0.localizedDescription)"); fflush(nil) })
+        declined.present(save: false)
+        results.append(("a preview Quick Look declines opens the file actions with a finite responder chain", declined.showsOwnWindow && declined.window?.isVisible == true && chainEnds(from: declined.window) && claimed.nextResponder === claimedNext))
+        QLPreviewPanel.shared()?.close(); declined.close(); claimed.close()
+        for _ in 0..<100 { if QLPreviewPanel.shared()?.isVisible != true { break }; try await Task.sleep(for: .milliseconds(10)) }
         let destination = root.appendingPathComponent("exported.txt")
         let completion = Mutex((count: 0, failed: false))
         provider.delegate?.filePromiseProvider(provider, writePromiseTo: destination, completionHandler: { error in completion.withLock { $0.count += 1; $0.failed = error != nil } })
@@ -104,4 +134,23 @@ import Synchronization
         results.append(("native attachment fixture completed", failures.isEmpty))
         return results
     }
+
+    /// Whether a responder chain reaches its end instead of looping.
+    private static func chainEnds(from start: NSResponder?) -> Bool {
+        var seen = Set<ObjectIdentifier>(), responder = start
+        while let current = responder {
+            guard seen.insert(ObjectIdentifier(current)).inserted else { return false }
+            responder = current.nextResponder
+        }
+        return true
+    }
+}
+
+/// Takes Quick Look before any responder after it in its window, so a
+/// preview over that window falls back to the file actions window.
+private final class QuickLookClaimingView: NSView {
+    override var acceptsFirstResponder: Bool { true }
+    override nonisolated func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
+    override nonisolated func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {}
+    override nonisolated func endPreviewPanelControl(_ panel: QLPreviewPanel!) {}
 }

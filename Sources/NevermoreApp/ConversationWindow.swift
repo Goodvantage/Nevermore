@@ -400,6 +400,13 @@ import NevermoreCore
             copy.tailIndent = 0; centered.append((range, copy))
         }
         for (range, style) in centered { output.addAttribute(.paragraphStyle, value: style, range: range) }
+        // Internal command links open previews here; an export keeps the text.
+        var deadLinks: [NSRange] = []
+        output.enumerateAttribute(.link, in: NSRange(location: 0, length: output.length)) { value, range, _ in
+            let url = (value as? URL) ?? (value as? String).flatMap { URL(string: $0) }
+            if url?.scheme?.hasPrefix("nevermore-") == true { deadLinks.append(range) }
+        }
+        for range in deadLinks { output.removeAttribute(.link, range: range) }
         var privateKeys = Set<NSAttributedString.Key>([.nevermoreReadingControl, .toolTip])
         output.enumerateAttributes(in: NSRange(location: 0, length: output.length)) { attributes, _, _ in
             for key in attributes.keys where key.rawValue.hasPrefix("Nevermore.") { privateKeys.insert(key) }
@@ -457,7 +464,7 @@ import NevermoreCore
     var channel: RavenChannel?
     let accountPicker = NSPopUpButton()
     let workspacePicker = NSPopUpButton()
-    var sidebarItems: [(String, RavenChannel?)] = []
+    var sidebarItems: [SidebarItem] = []
     let sidebar = SidebarTableView()
     let sidebarScroll = NSScrollView()
     /// Mail/Messages structure: a glass sidebar, the conversation, and a
@@ -468,7 +475,6 @@ import NevermoreCore
     var contentController: LayoutReportingViewController!
     var threadInspector: ThreadInspector?
     var conversationChooser: ConversationChooser?
-    var searchWindow: SearchWindow?
     var outboxWindow: OutboxWindow?
     let transcript = TranscriptView()
     let transcriptScroll = NSScrollView()
@@ -543,6 +549,11 @@ import NevermoreCore
     var pollWindows: [PollWindow] = []
     var pollCreationTask: Task<Void, Never>?
     var emojiSelectionTask: Task<Void, Never>?
+    /// The GIF picker while it is open.
+    var gifSelectionTask: Task<Void, Never>?
+    /// Fixture services for self-checks; nil uses the reader's settings.
+    var gifSourcesOverride: GIFPickerSheet.Sources?
+    let gifButton = NSButton(title: "GIF", target: nil, action: nil)
     /// Reaction toggles on their way to the server, by message. Choosing a
     /// reaction is the commitment, so unlike `emojiSelectionTask` these are
     /// not cancelled when the user switches conversations or closes the
@@ -568,6 +579,8 @@ import NevermoreCore
     /// pane then says nothing about the reader, so it changes neither
     /// `isFollowing` nor the read position, and offers no hover actions.
     var isUpdatingTranscript = false { didSet { viewportKeeper.isReplacingText = isUpdatingTranscript } }
+    /// A render found the transcript under a press and waits for its end.
+    private var renderAfterPress = false
     private var latestAuthorizedMessageID: String?
     var latestReadTask: Task<Void, Never>?
     var latestReadAttempt = UUID()
@@ -588,6 +601,28 @@ import NevermoreCore
     lazy var unkindness = UnkindnessController(owner: self)
     /// Reactions carried, thrown and peeled as stickers.
     lazy var stickers = StickerController(owner: self)
+    /// Plays the GIFs in view over their first frames in the transcript.
+    lazy var animatedImages: AnimatedImageOverlay = {
+        let overlay = AnimatedImageOverlay(textView: transcript, scrollView: transcriptScroll) { [weak self] key in
+            guard let session = self?.session else { return nil }
+            if let image = session.animatedImages[key] { return image }
+            session.requestAnimatedImage(key)
+            return nil
+        }
+        return overlay
+    }()
+    /// Shown in the conversation pane whenever no conversation is open.
+    lazy var home = HomeView(owner: self)
+    /// The search results screen, shown in the conversation pane instead
+    /// of Home while `isSearching`.
+    lazy var searchView = SearchView(owner: self)
+    var isSearching = false
+    /// Set while a search result opens, so the toolbar field keeps the
+    /// query that found it; any other navigation clears the field.
+    var openingSearchResult = false
+    /// The search whose result this conversation is; editing the query
+    /// here refines that search.
+    var resultOfSearch: SearchCriteria?
     init(app: AppDelegate, session: AccountSession?, windowID: UUID = UUID(), lastFrameAutosaveName: String? = ConversationWindow.defaultFrameAutosaveName) {
         self.app = app; self.session = session; self.windowID = windowID
         self.lastFrameAutosaveName = lastFrameAutosaveName
@@ -664,8 +699,8 @@ import NevermoreCore
         statusAnnouncements.invalidate()
         cancelEmojiPicker()
         closePollWindows()
-        searchWindow?.close(); searchWindow = nil
         outboxWindow?.close(); outboxWindow = nil
+        isSearching = false; searchView.reset(session: session); search.stringValue = ""
         transcriptAccessibility.clear(); hideHoverBar(); transcript.highlightRect = nil; transcript.caretMessageLocation = nil; autoEarlierFirstID = nil
         ink.reset(); unkindness.reset(); stickers.reset()
         inlineComposer.load(nil)
@@ -673,7 +708,7 @@ import NevermoreCore
         self.session?.attach(window: windowID, channelID: nil)
         conversationChooser?.cancel(); conversationChooser = nil; closeThreadInspector(); mentionPopover.reset(); clearPreview(); closeCodeReaders()
         for collection in collectionWindows { collection.records.removeAll(); collection.table.reloadData(); collection.close() }; collectionWindows.removeAll()
-        loadTask?.cancel(); renderTask?.cancel(); self.session = session; composer.sharedUndoManager = nil; composer.useTextStorage(NSTextStorage()); channel = nil; messages = []; messageRanges = []; transcript.string = ""; isUpdatingTranscript = false; composer.string = ""; attachments = []; replyTo = nil; editing = nil
+        loadTask?.cancel(); renderTask?.cancel(); self.session = session; composer.sharedUndoManager = nil; composer.useTextStorage(NSTextStorage()); channel = nil; messages = []; messageRanges = []; transcript.clearText(); animatedImages.removeAll(); isUpdatingTranscript = false; composer.string = ""; attachments = []; replyTo = nil; editing = nil
         navigation = NavigationHistory(); threadContextTask?.cancel(); threadRoot = nil; pendingRestoration = nil; restoreInspectorTask?.cancel(); updateAccounts(); refreshSidebar(); updateWindowTitle(); updateContext()
     }
     @objc func switchAccount(_ sender: NSMenuItem) {
@@ -694,34 +729,42 @@ import NevermoreCore
         // A single workspace needs no filter; keep the control for restoration.
         workspacePicker.isHidden = workspaces.count < 2 && workspacePicker.indexOfSelectedItem <= 0
         let filter = workspacePicker.titleOfSelectedItem ?? "All Workspaces"
-        sidebarItems = []
+        // Home leads the list whenever there is an account to show it for.
+        sidebarItems = session == nil ? [] : [.home]
         let favorites = rows.filter { session?.favoriteIDs.contains($0.id) == true && (filter == "All Workspaces" || $0.isDM || $0.workspace == filter) }
         let favoriteIDs = Set(favorites.map(\.id))
-        if !favorites.isEmpty { sidebarItems.append(("Favorites", nil)); sidebarItems += favorites.map { ($0.title, $0) } }
+        if !favorites.isEmpty { sidebarItems.append(.header("Favorites")); sidebarItems += favorites.map(SidebarItem.conversation) }
         for workspace in Set(rows.filter { !$0.isDM && !favoriteIDs.contains($0.id) && (filter == "All Workspaces" || $0.workspace == filter) }.map(\.workspace)).sorted() {
-            sidebarItems.append((workspace.isEmpty ? "Channels" : workspace, nil))
-            sidebarItems += rows.filter { !$0.isDM && !favoriteIDs.contains($0.id) && $0.workspace == workspace }.map { ($0.title, $0) }
+            sidebarItems.append(.header(workspace.isEmpty ? "Channels" : workspace))
+            sidebarItems += rows.filter { !$0.isDM && !favoriteIDs.contains($0.id) && $0.workspace == workspace }.map(SidebarItem.conversation)
         }
         let dms = rows.filter { $0.isDM && !favoriteIDs.contains($0.id) }
-        if !dms.isEmpty { sidebarItems.append(("Direct Messages", nil)); sidebarItems += dms.map { ($0.title, $0) } }
+        if !dms.isEmpty { sidebarItems.append(.header("Direct Messages")); sidebarItems += dms.map(SidebarItem.conversation) }
         if let current = channel, let refreshed = session?.channels.first(where: { $0.id == current.id }) { channel = refreshed }
         updateWindowTitle()
         sidebar.reloadData(); status.stringValue = session?.state ?? "Add an account to get started"
         connectionFooter.update(session: session)
-        if let channel, let index = sidebarItems.firstIndex(where: { $0.1?.id == channel.id }) { sidebar.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+        if let channel, let index = sidebarItems.firstIndex(where: { $0.channel?.id == channel.id }) { sidebar.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+        else if channel == nil, !isSearching, let index = sidebarItems.firstIndex(where: \.isHome) { sidebar.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+        else if isSearching { sidebar.deselectAll(nil) }
         unkindness.sidebarDidReload()
         sendButton.isEnabled = composer.isEditable && channel != nil && !isArchivedConversation && (session?.pendingFileReceipts.values.contains(channel?.id ?? "") != true) && !isAcceptingSend && session?.readOnly != true && !(session?.revokedChannels.contains(channel?.id ?? "") ?? false) && !(channel?.raw["parent_channel_id"].string.flatMap { session?.revokedChannels.contains($0) } ?? false)
         if let channel, session?.revokedChannels.contains(channel.id) == true { context.stringValue = "Access changed · unsent text remains recoverable" }
     }
     func numberOfRows(in tableView: NSTableView) -> Int { sidebarItems.count }
-    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool { sidebarItems[row].1 == nil }
-    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { sidebarItems[row].1 != nil }
+    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool { sidebarItems[row].isHeader }
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { !sidebarItems[row].isHeader }
     @objc func workspaceChanged() { refreshSidebar() }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard sidebarItems.indices.contains(row) else { return nil }
-        guard let channel = sidebarItems[row].1 else {
+        if sidebarItems[row].isHome {
+            let cell = tableView.makeView(withIdentifier: SidebarConversationCell.identifier, owner: self) as? SidebarConversationCell ?? SidebarConversationCell()
+            cell.configure(.home, fontSize: sidebarFontSize)
+            return cell
+        }
+        guard let channel = sidebarItems[row].channel else {
             let header = tableView.makeView(withIdentifier: SidebarHeaderCell.identifier, owner: self) as? SidebarHeaderCell ?? SidebarHeaderCell()
-            header.textField?.stringValue = sidebarItems[row].0
+            header.textField?.stringValue = sidebarItems[row].title
             return header
         }
         let cell = tableView.makeView(withIdentifier: SidebarConversationCell.identifier, owner: self) as? SidebarConversationCell ?? SidebarConversationCell()
@@ -730,12 +773,22 @@ import NevermoreCore
         cell.configure(sidebarModel(for: channel, unread: unreadCount(channel.id)), fontSize: sidebarFontSize)
         return cell
     }
-    @objc func selectedSidebar() { guard sidebarItems.indices.contains(sidebar.selectedRow), let item = sidebarItems[sidebar.selectedRow].1 else { return }; select(item) }
+    @objc func selectedSidebar() {
+        guard sidebarItems.indices.contains(sidebar.selectedRow) else { return }
+        if sidebarItems[sidebar.selectedRow].isHome { showHome(); return }
+        guard let item = sidebarItems[sidebar.selectedRow].channel else { return }
+        select(item)
+    }
     func select(_ channel: RavenChannel, anchor: String? = nil, record: Bool = true) {
-        if self.channel?.id != channel.id { stickers.reset() }
+        if self.channel?.id != channel.id {
+            if window?.isVisible == true { app.interfaceSounds.play(.selection) }
+            stickers.reset()
+        }
         clearReadPosition(); latestAuthorizedMessageID = nil
         if self.channel?.id != channel.id { statusAnnouncements.resetContext(); cancelEmojiPicker() }
         if let parent = channel.raw["parent_channel_id"].string { session?.threadParents[channel.id] = parent }
+        if isSearching { isSearching = false; searchView.attachments.cancel() }
+        if !openingSearchResult { resultOfSearch = nil; if record { search.stringValue = "" } }
         transcriptAccessibility.clear()
         inlineComposer.load(nil)
         cancelPromisedFiles(); navigationGeneration += 1
@@ -762,11 +815,45 @@ import NevermoreCore
         // what the window shows: a send or Jump to Latest may have left it.
         loadTask = Task { [weak self] in do { try await session.load(channelID: channel.id, anchor: anchor); guard !Task.isCancelled, self?.navigationGeneration == navigationID, self?.isCurrent(session, channelID: channel.id) == true else { return }; await self?.renderTask?.value; guard !Task.isCancelled, self?.navigationGeneration == navigationID else { return }; if let anchor, self?.requestedAnchor == anchor { self?.scrollTo(anchor) } } catch { if error is CancellationError || Task.isCancelled { return }; if self?.channel?.id == channel.id { self?.status.stringValue = error.localizedDescription } } }
     }
+    /// Leaves the open conversation for Home. Drafts are saved as they are
+    /// typed, so leaving loses nothing; Back returns to the conversation.
+    func showHome() {
+        guard session != nil else { return }
+        if isSearching { isSearching = false; searchView.attachments.cancel(); search.stringValue = "" }
+        guard channel != nil else { refreshSidebar(); updateWindowTitle(); home.reloadNow(); return }
+        if window?.isVisible == true { app.interfaceSounds.play(.selection) }
+        leaveConversation()
+        refreshSidebar(); updateContext(); updateAttachmentChips()
+        home.reloadNow()
+        window?.makeFirstResponder(sidebar)
+    }
+    /// Takes the open conversation out of the pane, for Home or search.
+    /// Drafts are saved as they are typed, so leaving loses nothing.
+    func leaveConversation() {
+        guard channel != nil else { return }
+        captureNavigation()
+        stickers.reset(); ink.reset()
+        clearReadPosition(); latestAuthorizedMessageID = nil
+        statusAnnouncements.resetContext(); cancelEmojiPicker()
+        transcriptAccessibility.clear()
+        inlineComposer.load(nil)
+        cancelPromisedFiles(); navigationGeneration += 1
+        threadContextTask?.cancel(); threadRoot = nil; codeCommands.removeAll(); expandedCode.removeAll()
+        restoreInspectorTask?.cancel(); restoreLocationTask?.cancel(); closeThreadInspector(); mentionPopover.reset(); loadTask?.cancel(); renderTask?.cancel()
+        hideHoverBar(); transcript.highlightRect = nil; transcript.caretMessageLocation = nil; autoEarlierFirstID = nil
+        channel = nil; messages = []; messageRanges = []; transcript.clearText(); animatedImages.removeAll(); isUpdatingTranscript = false
+        // A fresh storage: typing can no longer reach the conversation's draft.
+        composer.sharedUndoManager = nil; composer.useTextStorage(NSTextStorage())
+        editing = nil; replyTo = nil; attachments = []; displayedHTML = ""; context.stringValue = ""
+        historyUpperID = nil; requestedAnchor = nil; requestedPlacement = nil
+        clearPreview()
+        session?.attach(window: windowID, channelID: nil)
+    }
     func currentLocation() -> ConversationLocation? {
         guard let channel else { return nil }
         let origin = transcriptScroll.contentView.bounds.minY
         let anchor = messageRanges.first { rect(for: $0.0).maxY >= origin }
-        return ConversationLocation(channelID: channel.id, anchorMessageID: isFollowing ? nil : anchor?.1.id, pixelOffset: anchor.map { Double(rect(for: $0.0).minY - origin) } ?? 0, searchText: search.stringValue, threadParentChannelID: channel.raw["parent_channel_id"].string)
+        return ConversationLocation(channelID: channel.id, anchorMessageID: isFollowing ? nil : anchor?.1.id, pixelOffset: anchor.map { Double(rect(for: $0.0).minY - origin) } ?? 0, threadParentChannelID: channel.raw["parent_channel_id"].string)
     }
     func captureNavigation() { if let location = currentLocation() { navigation.capture(location) } }
     func restoreLocation(_ location: ConversationLocation) {
@@ -774,7 +861,9 @@ import NevermoreCore
         var fields: [String: JSONValue] = ["name": .string(location.channelID), "channel_name": .string(location.threadParentChannelID == nil ? location.channelID : "Thread")]
         if let parent = location.threadParentChannelID { fields["is_thread"] = .bool(true); fields["parent_channel_id"] = .string(parent) }
         let channel = session.channels.first { $0.id == location.channelID } ?? RavenChannel(raw: .object(fields))
-        select(channel, anchor: location.anchorMessageID, record: false); search.stringValue = location.searchText
+        // The toolbar field belongs to search now; a restored conversation
+        // starts with it empty.
+        select(channel, anchor: location.anchorMessageID, record: false); search.stringValue = ""
         if location.anchorMessageID != nil { requestedPlacement = .belowTop(location.pixelOffset) }
         let navigationID = navigationGeneration
         restoreLocationTask?.cancel()
@@ -786,8 +875,23 @@ import NevermoreCore
             self.transcriptScroll.reflectScrolledClipView(self.transcriptScroll.contentView)
         }
     }
-    @objc func goBack() { captureNavigation(); if let location = navigation.back() { restoreLocation(location) } }
-    @objc func goForward() { captureNavigation(); if let location = navigation.forward() { restoreLocation(location) } }
+    /// From Home, Back returns to where Home was opened from: a
+    /// conversation, or the search results.
+    @objc func goBack() {
+        if channel == nil, !isSearching, let entry = navigation.currentEntry { restore(entry); return }
+        captureNavigation(); if let entry = navigation.back() { restore(entry) }
+    }
+    @objc func goForward() { captureNavigation(); if let entry = navigation.forward() { restore(entry) } }
+    func restore(_ entry: NavigationEntry) {
+        switch entry {
+        case .conversation(let location): restoreLocation(location)
+        case .search(let criteria): showSearch(criteria, record: false, immediately: true)
+        }
+    }
+    func renderAfterPressIfNeeded() {
+        guard renderAfterPress else { return }
+        renderAfterPress = false; render()
+    }
     func render() {
         guard let session, let channel else { isUpdatingTranscript = false; return }
         if session.stopped || session.revokedChannels.contains(channel.id) || channel.raw["parent_channel_id"].string.map(session.revokedChannels.contains) == true || session.deletedIDs.contains(channel.id) {
@@ -795,7 +899,7 @@ import NevermoreCore
             renderTask?.cancel(); threadContextTask?.cancel(); threadRoot = nil; cancelPromisedFiles()
             clearReadPosition(); latestAuthorizedMessageID = nil; ink.reset(); stickers.reset()
             transcriptAccessibility.clear(); hideHoverBar(); transcript.highlightRect = nil
-            messages = []; messageRanges = []; codeCommands.removeAll(); transcript.string = ""; clearPreview()
+            messages = []; messageRanges = []; codeCommands.removeAll(); transcript.clearText(); animatedImages.removeAll(); clearPreview()
             isUpdatingTranscript = false
             context.stringValue = "Access changed · unsent text remains recoverable"; return
         }
@@ -814,6 +918,9 @@ import NevermoreCore
                       !ChannelPolicy.isRevoked(channelID: channel.id, revoked: session.revokedChannels, threadParents: session.threadParents),
                       channel.raw["parent_channel_id"].string.map(session.revokedChannels.contains) != true,
                       !session.deletedIDs.contains(channel.id) else { return }
+                // Replacing the text under a press would free the link
+                // AppKit is about to deliver; render once the press ends.
+                if self.transcript.isTrackingPress { self.renderAfterPress = true; return }
                 // Only authoritative deletion releases a navigation cursor.
                 // An initially uncached context target must keep its intent.
                 if let cursor = self.requestedAnchor, session.deletedIDs.contains(cursor) {
@@ -930,8 +1037,9 @@ import NevermoreCore
                     let inkStart = output.length
                     let pendingSend = pendingSends[message.id]
                     if !message.html.isEmpty, case .parsed(let doc) = session.messageDocument(for: message) { let presented = CodePresentation.render(doc, message: message, fontSize: size, expanded: self.expandedCode, parentChannelID: channel.raw["parent_channel_id"].string)
-                        output.append(presented.text); commands.merge(presented.commands) { _, new in new }; visibleCode.formUnion(presented.references.map(\.key))
-                        if !doc.canEdit { output.append(NSAttributedString(string: "\nNative formatting fallback · edit in Raven", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.themeSecondaryText])) } }
+                        output.append(InlineImagePresentation.embed(presented.text, session: session)); commands.merge(presented.commands) { _, new in new }; visibleCode.formUnion(presented.references.map(\.key))
+                        // A GIF message is read only by nature, so it needs no note.
+                        if !doc.canEdit, GIFMessage.source(in: doc) == nil { output.append(NSAttributedString(string: "\nNative formatting fallback · edit in Raven", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.themeSecondaryText])) } }
                     else if !message.html.isEmpty { output.append(NSAttributedString(string: "[Message cannot be safely rendered · open Raven for the full content]", attributes: [.font: ThemeFonts.readingBody(ofSize: size), .foregroundColor: NSColor.themeText])) }
                     else if message.messageType == "Poll" { output.append(NSAttributedString(string: "Poll: \(message.raw["content"].string ?? "Choose View / Vote in Poll from Conversation.")", attributes: [.font: ThemeFonts.readingBody(ofSize: size), .foregroundColor: NSColor.themeText])) }
                     else if message.messageType != "File" && message.messageType != "Image" { output.append(NSAttributedString(string: message.raw["content"].string.map { String($0.prefix(4096)) } ?? "[\(message.messageType) message — open in Raven for details]", attributes: [.font: ThemeFonts.readingBody(ofSize: size), .foregroundColor: NSColor.themeText])) }
@@ -943,16 +1051,21 @@ import NevermoreCore
                             }
                         }
                     }
+                    let attachmentLink = TranscriptStyle.attachmentLink(for: message.id)
                     if let image = session.thumbnails[message.id] {
                         let attachment = NSTextAttachment(); attachment.image = image
                         let scale = min(1, 320 / max(image.size.width, image.size.height)); attachment.bounds = NSRect(origin: .zero, size: NSSize(width: image.size.width * scale, height: image.size.height * scale))
                         // Below a caption; an image-only message starts at the body.
                         if output.length > bodyStart, (output.string as NSString).character(at: output.length - 1) != 10 { output.append(NSAttributedString(string: "\n")) }
-                        output.append(NSAttributedString(attachment: attachment))
+                        var imageAttributes: [NSAttributedString.Key: Any] = attachmentLink.map { [.link: $0] } ?? [:]
+                        // A GIF plays over its first frame while it is in view.
+                        let animatedKey = AnimatedImageKey.message(message.id)
+                        if session.animatedSources[animatedKey] != nil || session.animatedImages.contains(animatedKey) { imageAttributes[.nevermoreAnimatedImage] = animatedKey }
+                        output.append(NSAttributedString(attachment: attachment, attributes: imageAttributes))
                     }
                     if let file = message.raw["file"].string {
                         let filename = URL(string: file)?.lastPathComponent ?? "Attachment"
-                        output.append(TranscriptStyle.attachmentLine(filename: filename, size: size))
+                        output.append(TranscriptStyle.attachmentLine(filename: filename, size: size, link: attachmentLink))
                     }
                     if let doctype = message.raw["link_doctype"].string, !doctype.isEmpty { output.append(NSAttributedString(string: "\nLinked document: \(doctype) · \(message.raw["link_document"].string ?? "")", attributes: [.foregroundColor: NSColor.themeSecondaryText])) }
                     for attachment in pendingSend?.attachments ?? [] { output.append(TranscriptStyle.pendingAttachmentLine(filename: attachment.filename, size: size, first: output.length == inkStart)) }
@@ -998,6 +1111,7 @@ import NevermoreCore
                 self.isUpdatingTranscript = false
                 self.ink.didRender(pending: inkPending, bodies: inkBodies, messages: self.messages, following: following, previousOrigin: oldOrigin)
                 self.stickers.didRender()
+                self.animatedImages.update()
                 self.repositionQuickReactions()
                 self.seenVisible(); self.viewportKeeper.capture(); self.restorePendingInspector()
             } catch {
@@ -1041,13 +1155,13 @@ import NevermoreCore
         guard let message = visibleMessageForReadReceipt else { return }
         Task { await session.markSeen(channelID: channel.id, timestamp: message.creation) }
     }
-    func windowDidBecomeKey(_ notification: Notification) { seenVisible(); if channel != nil { session?.requestReconciliation() } }
+    func windowDidBecomeKey(_ notification: Notification) { seenVisible(); if channel != nil { session?.requestReconciliation() } else { home.refreshIfShown() } }
     /// Keep the toolbar (search, navigation, collections) in full screen, as
     /// Mail and Safari do by default; only the menu bar hides.
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
         proposedOptions.subtracting(.autoHideToolbar).union([.fullScreen, .autoHideMenuBar])
     }
-    func windowWillClose(_ notification: Notification) { inlineComposer.tearDown(); ComposerEditorLifetime.cancel(attachedTo: window); rememberWindowFrame(); linkPreview.cancel(); ink.detach(); unkindness.reset(); stickers.detach(); clearReadPosition(); latestAuthorizedMessageID = nil; transcriptAccessibility.clear(); statusAnnouncements.invalidate(); cancelEmojiPicker(); closePollWindows(); searchWindow?.close(); searchWindow = nil; outboxWindow?.close(); outboxWindow = nil; isClosed = true; cancelPromisedFiles(); threadContextTask?.cancel(); threadRoot = nil; closeCodeReaders(); restoreInspectorTask?.cancel(); conversationChooser?.cancel(); conversationChooser = nil; closeThreadInspector(); mentionPopover.reset(); for collection in collectionWindows { collection.close() }; collectionWindows.removeAll(); clearPreview(); session?.attach(window: windowID, channelID: nil); loadTask?.cancel(); renderTask?.cancel(); viewportKeeper.invalidate(); for token in observerTokens { NotificationCenter.default.removeObserver(token) }; app.windows.removeAll { $0 === self } }
+    func windowWillClose(_ notification: Notification) { inlineComposer.tearDown(); ComposerEditorLifetime.cancel(attachedTo: window); rememberWindowFrame(); linkPreview.cancel(); ink.detach(); unkindness.reset(); stickers.detach(); clearReadPosition(); latestAuthorizedMessageID = nil; transcriptAccessibility.clear(); statusAnnouncements.invalidate(); cancelEmojiPicker(); gifSelectionTask?.cancel(); closePollWindows(); searchView.reset(session: nil); outboxWindow?.close(); outboxWindow = nil; isClosed = true; cancelPromisedFiles(); threadContextTask?.cancel(); threadRoot = nil; closeCodeReaders(); restoreInspectorTask?.cancel(); conversationChooser?.cancel(); conversationChooser = nil; closeThreadInspector(); mentionPopover.reset(); for collection in collectionWindows { collection.close() }; collectionWindows.removeAll(); clearPreview(); session?.attach(window: windowID, channelID: nil); loadTask?.cancel(); renderTask?.cancel(); viewportKeeper.invalidate(); animatedImages.invalidate(); for token in observerTokens { NotificationCenter.default.removeObserver(token) }; app.windows.removeAll { $0 === self } }
     func restorePendingInspector() {
         guard let state = pendingRestoration, let rootID = state.threadRootID, let session, channel?.id == state.location.channelID, session.account.id == state.accountID else { return }
         pendingRestoration?.threadRootID = nil
@@ -1248,6 +1362,7 @@ import NevermoreCore
     func updateComposerAvailability() {
         composer.isEditable = !isClosed && channel != nil && session?.stopped == false && !app.isPreparingToQuit && !isAcceptingSend && !(channel.map { (session?.acceptingChannels.contains($0.id) == true || session?.preparingChannels.contains($0.id) == true) } ?? false)
         composerFormatting.isEnabled = composer.isEditable
+        gifButton.isEnabled = composer.isEditable && gifSelectionTask == nil
         inlineComposer.configureSource()
         if !composer.isEditable { mentionPopover.close() }
     }
@@ -1527,7 +1642,7 @@ import NevermoreCore
     /// ⌥⌘F: focus the toolbar search, showing the toolbar if it is hidden.
     @objc func findMessages(_ sender: Any?) {
         if window?.toolbar?.isVisible == false { window?.toolbar?.isVisible = true }
-        if let item = window?.toolbar?.items.first(where: { $0.itemIdentifier == .nevermoreSearch }) as? NSSearchToolbarItem { item.beginSearchInteraction() }
+        if window?.toolbar?.items.contains(where: { $0.itemIdentifier == .nevermoreSearch }) == true { focusSearchField() }
         else { searchAccount(sender) }
     }
     /// ⌘F: the native find bar over the loaded transcript, like Mail's Find.
@@ -1564,14 +1679,18 @@ import NevermoreCore
     @objc func openBrowser(_ sender: Any?) { guard let session else { return }; NSWorkspace.shared.open(session.account.origin.appendingPathComponent("raven")) }
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
         if let url = link as? URL, url.scheme == "nevermore-code" { if let command = codeCommands[url] { executeCode(command) }; return true }
+        if let url = link as? URL, url.scheme == "nevermore-attachment", let id = url.pathComponents.last, let message = messages.first(where: { $0.id == id }) { previewAttachment(for: message); return true }
         guard let raw = (link as? URL)?.relativeString ?? link as? String, let url = URL(string: raw, relativeTo: session?.account.origin)?.absoluteURL, ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? ""), url.user == nil, url.password == nil else { return true }
         NSWorkspace.shared.open(url); return true
     }
     @objc func quickLook(_ sender: Any?) { previewAttachment() }
     @objc func saveAttachment(_ sender: Any?) { fetchAttachment(save: true) }
     func previewAttachment() { fetchAttachment(save: false) }
-    func fetchAttachment(save: Bool) {
-        guard let session, let message = selectedMessage, let file = message.raw["file"].string, !file.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    /// A click on an attachment line or thumbnail previews that message's
+    /// file; the click does not move the caret, so the message comes along.
+    func previewAttachment(for message: RavenMessage) { fetchAttachment(save: false, message: message) }
+    func fetchAttachment(save: Bool, message: RavenMessage? = nil) {
+        guard let session, let message = message ?? selectedMessage, let file = message.raw["file"].string, !file.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         attachmentDownload?.cancel(); attachmentAttempt = UUID(); let attempt = attachmentAttempt
         status.stringValue = "Downloading attachment…"
         attachmentDownload = Task { [weak self] in
@@ -1584,14 +1703,16 @@ import NevermoreCore
                 var allowed = CharacterSet.urlPathAllowed; allowed.remove(charactersIn: "/?#%")
                 let link = message.id.addingPercentEncoding(withAllowedCharacters: allowed).flatMap { URL(string: "/raven/message/" + $0, relativeTo: session.account.origin)?.absoluteURL }
                 let attachmentChannel = message.channelID
-                let controller = AttachmentWindow(attachment: file, messageLink: link, active: { [weak self, weak sourceSession = session] in
+                // A preview is Quick Look alone; saving shows the file actions.
+                let presentation: AttachmentPresentation = save ? .window : self.window.map { .quickLook(over: $0) } ?? .window
+                let controller = AttachmentWindow(attachment: file, messageLink: link, presentation: presentation, active: { [weak self, weak sourceSession = session] in
                     guard let self, let sourceSession else { return false }
                     return self.isCurrent(sourceSession) && !ChannelPolicy.isRevoked(channelID: attachmentChannel, revoked: sourceSession.revokedChannels, threadParents: sourceSession.threadParents)
                 }, reportError: { [weak self] error in self?.app.showError(error) })
                 controller.didClose = { [weak self, weak controller] in self?.attachmentWindows.removeAll { $0 === controller } }
+                for previous in self.attachmentWindows where !previous.showsOwnWindow { previous.close() }
                 if self.attachmentWindows.count >= 4 { self.attachmentWindows.removeFirst().close() }
-                self.attachmentWindows.append(controller); controller.showWindow(nil)
-                if save { controller.saveAs() } else { controller.previewDownloadedFile() }
+                self.attachmentWindows.append(controller); controller.present(save: save)
             } catch {
                 if !(error is CancellationError), self.attachmentAttempt == attempt, self.isCurrent(session) { self.app.showError(error) }
             }
@@ -1626,6 +1747,7 @@ import NevermoreCore
 
         if [#selector(code(_:)), #selector(insertLink(_:)), #selector(mention(_:)), #selector(insertCustomEmoji(_:)), #selector(reply(_:)), #selector(editMessage(_:)), #selector(attachFiles(_:)), #selector(clearAttachments)].contains(menuItem.action), !composer.isEditable { return false }
         if menuItem.action == #selector(insertCustomEmoji(_:)), composer.hasMarkedText() || !NativeRichText.canAuthorSpoiler(composer.typingAttributes) { return false }
+        if menuItem.action == #selector(sendGIF(_:)) { return canSendGIF }
         if menuItem.action == #selector(openCodeReader(_:)) { guard let message = selectedMessage, let doc = try? RichTextCodec.parse(message.html) else { return false }; return !CodeBlocks.extract(from: doc).isEmpty }
         if menuItem.action == #selector(cancelPromisedFiles(_:)) { return !promisedReceives.isEmpty }
         if [#selector(editMessage(_:)), #selector(deleteMessage(_:))].contains(menuItem.action) { return selectedMessage?.owner == session?.account.user && selectedMessage != nil }

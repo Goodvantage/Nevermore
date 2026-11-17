@@ -25,7 +25,6 @@ final class ThemeCustomizationTests: XCTestCase {
         XCTAssertEqual(applied.id, halloween.id)
         XCTAssertEqual(applied.name, halloween.name)
         XCTAssertEqual(applied.tagline, halloween.tagline)
-        XCTAssertEqual(applied.emptyDetail, halloween.emptyDetail)
 
         XCTAssertEqual(applied.tone, .light)
         XCTAssertEqual(palette.gradient, custom.gradient)
@@ -46,8 +45,6 @@ final class ThemeCustomizationTests: XCTestCase {
         XCTAssertEqual(applied.wallpaper.density, .dense)
         XCTAssertEqual(applied.wallpaper.opacity, 0.42)
         XCTAssertEqual(applied.wallpaper.ornaments, custom.ornaments)
-        XCTAssertEqual(applied.emptyTitle, "A custom empty title")
-        XCTAssertEqual(applied.emptyMotif, .ghost)
         XCTAssertEqual(applied.celebration, .stars)
 
         // The preset values really are different, so each assertion above is a replacement.
@@ -180,14 +177,15 @@ final class ThemeCustomizationTests: XCTestCase {
         XCTAssertEqual(customization.sanitized.ornaments, Array(manyOrnaments.prefix(6)))
     }
 
-    func testSanitizedTrimsAndTruncatesEmptyTitle() {
-        var customization = ThemeCustomization()
-        customization.emptyTitle = "   \n\t  "
-        XCTAssertNil(customization.sanitized.emptyTitle)
-        customization.emptyTitle = "  Spaced out  "
-        XCTAssertEqual(customization.sanitized.emptyTitle, "Spaced out")
-        customization.emptyTitle = String(repeating: "x", count: 100)
-        XCTAssertEqual(customization.sanitized.emptyTitle, String(repeating: "x", count: 80))
+    /// Earlier versions stored an empty-window title and art per theme.
+    /// Home replaced that pane, so the fields are gone; a stored
+    /// customization that still has them keeps everything else.
+    func testRetiredEmptyStateFieldsAreIgnored() throws {
+        let json = ##"{"emptyTitle":"ＡＥＳＴＨＥＴＩＣ ＳＩＬＥＮＣＥ","emptyMotif":"ghost","link":"#112233"}"##
+        let decoded = try JSONDecoder().decode(ThemeCustomization.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.link, ThemeColor(0x112233))
+        let encoded = String(decoding: try JSONEncoder().encode(decoded), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("empty"))
     }
 
     // MARK: Normalizing
@@ -215,8 +213,6 @@ final class ThemeCustomizationTests: XCTestCase {
         customization.density = memphis.wallpaper.density
         customization.motifOpacity = memphis.wallpaper.opacity
         customization.ornaments = memphis.wallpaper.ornaments
-        customization.emptyTitle = memphis.emptyTitle
-        customization.emptyMotif = memphis.emptyMotif
         customization.celebration = memphis.celebration
 
         XCTAssertTrue(customization.normalized(for: memphis).isEmpty, "every field repeats the preset")
@@ -269,7 +265,6 @@ final class ThemeCustomizationTests: XCTestCase {
         let decoded = try JSONDecoder().decode(ThemeCustomization.self, from: Data(json.utf8))
         XCTAssertNil(decoded.accent)
         XCTAssertEqual(decoded.link, ThemeColor(0x112233))
-        XCTAssertNil(decoded.emptyMotif)
         XCTAssertNil(decoded.motifs)
         XCTAssertEqual(decoded.density, .dense)
     }
@@ -323,9 +318,6 @@ final class ThemeCustomizationTests: XCTestCase {
         XCTAssertEqual(faded.id, halloween.id)
         XCTAssertEqual(faded.name, halloween.name)
         XCTAssertEqual(faded.tagline, halloween.tagline)
-        XCTAssertEqual(faded.emptyTitle, halloween.emptyTitle)
-        XCTAssertEqual(faded.emptyDetail, halloween.emptyDetail)
-        XCTAssertEqual(faded.emptyMotif, halloween.emptyMotif)
         XCTAssertEqual(faded.celebration, halloween.celebration)
         XCTAssertEqual(faded.typography, halloween.typography)
     }
@@ -413,8 +405,6 @@ private func fullCustomization() -> ThemeCustomization {
     customization.density = .dense
     customization.motifOpacity = 0.42
     customization.ornaments = [OrnamentSpec(.moonLarge, .top, [ThemeColor(0xDDDDDD)], opacity: 0.33)]
-    customization.emptyTitle = "A custom empty title"
-    customization.emptyMotif = .ghost
     customization.celebration = .stars
     return customization
 }

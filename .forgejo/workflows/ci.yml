@@ -94,6 +94,10 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Release build
         run: swift build --disable-keychain -c release --triple "$(uname -m)-apple-macosx26.0"
+      - name: Check synthesized interface audio
+        run: |
+          binary_path="$(swift build --disable-keychain -c release --triple "$(uname -m)-apple-macosx26.0" --show-bin-path)"
+          "$binary_path/Nevermore" --check-ui-sounds
       - name: Check native attachment integration
         id: native
         run: |

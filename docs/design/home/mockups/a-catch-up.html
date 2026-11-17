@@ -1,0 +1,140 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>A · Catch Up</title>
+<link rel="stylesheet" href="base.css">
+<script src="chrome.js"></script>
+<style>
+  .col { width: 700px; margin: 0 auto; padding: 18px 0 0; }
+  .hello { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 18px; }
+  .hello h1 { font-family: var(--display); font-weight: var(--display-weight); letter-spacing: var(--display-spacing); font-size: 30px; margin: 0; line-height: 1.1; }
+  .hello p { margin: 6px 0 0; color: var(--text2); font-size: 13.5px; }
+  .hello .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .seg { display: flex; padding: 3px; gap: 2px; border-radius: 999px; }
+  .seg span { font-family: var(--sys); font-size: 12px; font-weight: 550; padding: 4px 11px; border-radius: 999px; color: var(--text2); }
+  .seg span.on { background: var(--accent); color: var(--accent-ink); }
+  .group { margin-top: 16px; }
+  .group .sec-title { margin: 0 4px 8px; }
+  .item { display: flex; gap: 12px; padding: 12px 14px; position: relative; }
+  .item + .item { border-top: 0.5px solid var(--card-edge); }
+  .item .body { flex: 1; min-width: 0; }
+  .item .meta { display: flex; align-items: baseline; gap: 6px; font-family: var(--sys); font-size: 12.5px; }
+  .item .meta b { font-weight: 650; }
+  .item .meta .when { margin-left: auto; color: var(--text3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .item .text { margin-top: 3px; font-size: 13.5px; line-height: 1.42; }
+  .item.focus { background: var(--hover); border-radius: 13px; box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .actions { position: absolute; right: 12px; top: -12px; display: flex; gap: 2px; padding: 3px; }
+  .actions span { font-family: var(--sys); font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px; color: var(--text); display: flex; gap: 5px; align-items: center; }
+  .actions span .kbd { height: 15px; min-width: 15px; font-size: 9.5px; padding: 0 3px; }
+  .chan-row { display: flex; align-items: center; gap: 11px; padding: 9px 14px; }
+  .chan-row + .chan-row { border-top: 0.5px solid var(--card-edge); }
+  .chan-row .chan { width: 30px; height: 30px; font-size: 15px; }
+  .chan-row .what { flex: 1; min-width: 0; }
+  .chan-row .what .top { display: flex; align-items: baseline; gap: 8px; font-family: var(--sys); }
+  .chan-row .what .top b { font-size: 13px; }
+  .chan-row .what .teaser { color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; margin-top: 1px; }
+  .chan-row .faces { display: flex; }
+  .chan-row .faces .av { box-shadow: 0 0 0 2px var(--card); margin-left: -5px; }
+  .chan-row .new { font-family: var(--sys); font-size: 11px; font-weight: 700; color: var(--accent-ink); background: var(--accent); border-radius: 999px; padding: 1px 7px; }
+  .chan-row .when { color: var(--text3); font-size: 11.5px; width: 38px; text-align: right; font-family: var(--sys); font-variant-numeric: tabular-nums; }
+  .chan-row.mutedrow { color: var(--text3); }
+  .chan-row.mutedrow .chan { opacity: .6; }
+  .later { display: flex; gap: 10px; }
+  .later .card { flex: 1; padding: 11px 14px; display: flex; gap: 10px; align-items: center; }
+  .later .clock { width: 30px; height: 30px; border-radius: 9px; display: flex; align-items: center; justify-content: center; background: var(--hover); color: var(--accent); font-size: 15px; flex: none; }
+  .later .t1 { font-weight: 600; font-family: var(--sys); font-size: 12.5px; }
+  .later .t2 { color: var(--text2); font-size: 12px; font-family: var(--sys); }
+  .hintbar { position: absolute; left: 50%; transform: translateX(-50%); bottom: 16px; display: flex; gap: 14px; padding: 7px 14px; font-family: var(--sys); font-size: 11.5px; color: var(--text2); }
+  .hintbar span { display: flex; gap: 5px; align-items: center; }
+  .thread-ico { font-family: var(--sys); }
+</style></head>
+<body data-theme="vaporwave">
+<div class="window">
+  <div class="wallpaper"></div>
+  <aside class="sidebar"></aside>
+  <section class="pane">
+    <div class="toolbar"></div>
+    <div class="content">
+      <div class="col">
+        <div class="hello">
+          <div>
+            <h1>Good afternoon</h1>
+            <p>Since 09:12 · 2 mentions, 1 reply, 4 channels with news</p>
+          </div>
+          <div class="right">
+            <div class="glass seg"><span class="on">Everything</span><span>Only me</span></div>
+            <div class="glass btn">Mark All Read</div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="sec-title">Waiting on you <span class="more">Open Inbox ⌘1</span></div>
+          <div class="card">
+            <div class="item focus">
+              <div class="glass actions"><span>Reply <i class="kbd">R</i></span><span>Mark Read <i class="kbd">E</i></span><span>Later <i class="kbd">L</i></span></div>
+              <script>document.write(avatar("mara", 36))</script>
+              <div class="body">
+                <div class="meta"><b class="name-0">Mara Lindqvist</b><span class="muted">in # design</span><span class="tag">@ mentioned you</span><span class="when">11:48</span></div>
+                <div class="text"><span class="mention">@you</span> could you look at the new onboarding illustrations before 3? I think the second one is too busy next to the sign-in button.</div>
+              </div>
+            </div>
+            <div class="item">
+              <script>document.write(avatar("tomas", 36))</script>
+              <div class="body">
+                <div class="meta"><b class="name-1">Tomás Ferreira</b><span class="muted">direct message</span><span class="when">13:05</span></div>
+                <div class="text">Got a minute to pair on the reconnect bug? It only happens after the Mac wakes from sleep.</div>
+              </div>
+            </div>
+            <div class="item">
+              <script>document.write(avatar("priya", 36))</script>
+              <div class="body">
+                <div class="meta"><b class="name-4">Priya Raman</b><span class="muted">replied in “Launch checklist” · # releases</span><span class="tag">Thread</span><span class="when">12:20</span></div>
+                <div class="text">Added the notarization step. Can you confirm which key we sign the appcast with?</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="sec-title">New in your channels <span class="more">Mark these read</span></div>
+          <div class="card">
+            <div class="chan-row">
+              <span class="chan">#</span>
+              <div class="what"><div class="top"><b>releases</b><span class="new">5 new</span></div>
+                <div class="teaser"><b class="name-3">Jonas:</b> 2.4.1 is tagged. Notarization is running, the DMG should be up in ten minutes.</div></div>
+              <div class="faces"><script>document.write(avatar("jonas", 18, {dot:false})+avatar("priya", 18, {dot:false}))</script></div>
+              <span class="when">13:32</span>
+            </div>
+            <div class="chan-row">
+              <span class="chan">#</span>
+              <div class="what"><div class="top"><b>design</b><span class="new">3 new</span></div>
+                <div class="teaser"><b class="name-2">Aiko:</b> 🖼 4 images · “Onboarding, round two”</div></div>
+              <div class="faces"><script>document.write(avatar("aiko", 18, {dot:false})+avatar("mara", 18, {dot:false}))</script></div>
+              <span class="when">12:02</span>
+            </div>
+            <div class="chan-row">
+              <span class="chan">#</span>
+              <div class="what"><div class="top"><b>general</b><span class="new">1 new</span></div>
+                <div class="teaser"><b class="name-5">Léa:</b> Lunch at the Thai place on Thursday? 🍜</div></div>
+              <div class="faces"><script>document.write(avatar("lea", 18, {dot:false}))</script></div>
+              <span class="when">10:15</span>
+            </div>
+            <div class="chan-row mutedrow">
+              <span class="chan">#</span>
+              <div class="what"><div class="top"><b style="font-weight:550">support</b><span>🔕 muted · 12 new</span></div></div>
+              <span class="when">13:40</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="sec-title">Later today</div>
+          <div class="later">
+            <div class="card"><span class="clock">⏰</span><div><div class="t1">Review onboarding copy</div><div class="t2">Reminder · 15:00 · from Mara in # design</div></div></div>
+            <div class="card"><span class="clock">🕔</span><div><div class="t1">Weekly update to # general</div><div class="t2">Scheduled · sends at 17:00</div></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="glass hintbar"><span><i class="kbd">↑</i><i class="kbd">↓</i> move</span><span><i class="kbd">↩</i> open</span><span><i class="kbd">E</i> mark read</span><span><i class="kbd">L</i> later</span><span><i class="kbd">⌘0</i> Home</span></div>
+    </div>
+  </section>
+</div>
+</body></html>

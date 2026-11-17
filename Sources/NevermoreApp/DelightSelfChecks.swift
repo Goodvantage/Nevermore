@@ -41,7 +41,7 @@ import RavenProtocol
         var checks: [(String, Bool)] = []
         func check(_ label: String, _ value: Bool) { checks.append((label, value)) }
         func cell(_ channel: RavenChannel) -> SidebarConversationCell? {
-            guard let row = controller.sidebarItems.firstIndex(where: { $0.1?.id == channel.id }) else { return nil }
+            guard let row = controller.sidebarItems.firstIndex(where: { $0.channel?.id == channel.id }) else { return nil }
             let cell = controller.sidebar.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarConversationCell
             cell?.layoutSubtreeIfNeeded()
             return cell

@@ -1,0 +1,142 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>B · Start Page</title>
+<link rel="stylesheet" href="base.css">
+<script src="chrome.js"></script>
+<style>
+  .grid { position: absolute; inset: 4px 26px 20px 26px; display: grid; grid-template-columns: 1.25fr 1fr; grid-auto-rows: min-content; gap: 14px; align-content: start; }
+  .full { grid-column: 1 / -1; }
+  .mod { padding: 13px 15px 14px; }
+  .mod .sec-title { margin-bottom: 10px; }
+  .favs { display: flex; gap: 14px; padding: 2px 4px 0; }
+  .fav { width: 86px; text-align: center; font-family: var(--sys); font-size: 11.5px; position: relative; }
+  .fav .tile { width: 56px; height: 56px; margin: 0 auto 6px; border-radius: 15px; display: flex; align-items: center; justify-content: center; background: var(--well); font-size: 24px; font-weight: 700; color: var(--text2); position: relative; }
+  .fav .tile .av { width: 56px; height: 56px; font-size: 19px; }
+  .fav .badge { position: absolute; top: -5px; right: -7px; min-width: 20px; height: 20px; border-radius: 10px; padding: 0 6px; background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px var(--card); }
+  .fav .lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fav.add .tile { background: none; border: 1.5px dashed var(--card-edge); color: var(--text3); font-weight: 400; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; }
+  .row + .row { border-top: 0.5px solid var(--card-edge); }
+  .row .main { flex: 1; min-width: 0; }
+  .row .main .l1 { font-family: var(--sys); font-weight: 600; display: flex; gap: 6px; align-items: baseline; }
+  .row .main .l2 { color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; }
+  .row .t { color: var(--text3); font-size: 11.5px; font-family: var(--sys); font-variant-numeric: tabular-nums; }
+  .row .chan { width: 28px; height: 28px; font-size: 14px; border-radius: 8px; }
+  .row .n { font-family: var(--sys); font-size: 11px; font-weight: 700; color: var(--accent); }
+  .people { display: flex; gap: 6px; justify-content: space-between; }
+  .person { width: 74px; text-align: center; font-family: var(--sys); }
+  .person .nm { font-size: 11.5px; font-weight: 600; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .person .st { font-size: 10.5px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tiles { display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 12px; }
+  .stat .lab { font-family: var(--sys); font-size: 11.5px; color: var(--text2); }
+  .stat .val { font-family: var(--sys); font-size: 22px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .stat .delta { font-family: var(--sys); font-size: 11px; color: var(--text2); }
+  .spark { display: flex; align-items: flex-end; gap: 3px; height: 30px; margin-top: 6px; }
+  .spark i { flex: 1; background: rgba(var(--heat), .28); border-radius: 3px 3px 0 0; }
+  .spark i.now { background: rgb(var(--heat)); }
+  .emo { font-size: 20px; letter-spacing: 4px; margin-top: 4px; }
+  .private { font-family: var(--sys); font-size: 10.5px; color: var(--text3); margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 500; }
+  .show-pop .customize { background: var(--select); }
+  .customize { position: absolute; right: 26px; bottom: 16px; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; }
+  .pop { display: none; }
+  .show-pop .pop { display: block; }
+  .pop { position: absolute; right: 18px; bottom: 60px; width: 250px; padding: 12px 14px; border-radius: 14px; font-family: var(--sys); font-size: 12.5px; z-index: 5;
+         background: rgba(250,250,252,.96); border: .5px solid rgba(0,0,0,.12); box-shadow: 0 18px 50px rgba(0,0,0,.22); color: #1d1d1f; }
+  body[data-theme="nevermore"] .pop, body[data-theme="synthwave"] .pop { background: rgba(44,38,56,.97); color: #f0eaf8; border-color: rgba(255,255,255,.12); }
+  .pop h4 { margin: 0 0 8px; font-size: 12.5px; }
+  .pop label { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+  .pop .cb { width: 14px; height: 14px; border-radius: 4px; background: var(--accent); color: var(--accent-ink); display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; }
+  .pop .cb.off { background: transparent; box-shadow: inset 0 0 0 1px rgba(127,127,127,.6); }
+  .pop .grip { margin-left: auto; color: rgba(127,127,127,.7); letter-spacing: -1px; }
+  .pop hr { border: 0; border-top: .5px solid rgba(127,127,127,.3); margin: 8px 0; }
+  .pop .note { color: rgba(127,127,127,1); font-size: 11px; }
+</style></head>
+<body data-theme="classic">
+<div class="window">
+  <div class="wallpaper"></div>
+  <aside class="sidebar"></aside>
+  <section class="pane">
+    <div class="toolbar"></div>
+    <div class="content">
+      <div class="grid">
+        <div class="card mod full">
+          <div class="sec-title">Favorites</div>
+          <div class="favs">
+            <div class="fav"><div class="tile">#<span class="badge">3</span></div><div class="lbl">design</div></div>
+            <div class="fav"><div class="tile"><script>document.write(avatar("mara",56))</script><span class="badge">2</span></div><div class="lbl">Mara</div></div>
+            <div class="fav"><div class="tile">#<span class="badge">5</span></div><div class="lbl">releases</div></div>
+            <div class="fav"><div class="tile"><script>document.write(avatar("tomas",56))</script><span class="badge">1</span></div><div class="lbl">Tomás</div></div>
+            <div class="fav"><div class="tile">#</div><div class="lbl">general</div></div>
+            <div class="fav"><div class="tile"><script>document.write(avatar("aiko",56))</script></div><div class="lbl">Aiko</div></div>
+            <div class="fav"><div class="tile"><script>document.write(avatar("priya",56))</script></div><div class="lbl">Priya</div></div>
+            <div class="fav add"><div class="tile">+</div><div class="lbl faint">Add</div></div>
+          </div>
+        </div>
+
+        <div class="card mod">
+          <div class="sec-title">Unread <span class="more">Mark All Read</span></div>
+          <div class="row"><span class="chan">#</span><div class="main"><div class="l1">releases <span class="n">5 new</span></div><div class="l2"><b class="name-3">Jonas:</b> 2.4.1 is tagged. Notarization is running…</div></div><span class="t">13:32</span></div>
+          <div class="row"><script>document.write(avatar("tomas",28))</script><div class="main"><div class="l1">Tomás Ferreira <span class="n">1 new</span></div><div class="l2">Got a minute to pair on the reconnect bug?</div></div><span class="t">13:05</span></div>
+          <div class="row"><span class="chan">#</span><div class="main"><div class="l1">design <span class="n">3 new · @you</span></div><div class="l2"><b class="name-0">Mara:</b> <span class="mention">@you</span> could you look at the new onboarding…</div></div><span class="t">12:02</span></div>
+          <div class="row"><span class="chan">#</span><div class="main"><div class="l1">general <span class="n">1 new</span></div><div class="l2"><b class="name-5">Léa:</b> Lunch at the Thai place on Thursday? 🍜</div></div><span class="t">10:15</span></div>
+        </div>
+
+        <div class="card mod">
+          <div class="sec-title">Later <span class="more">Open Later</span></div>
+          <div class="row"><span class="chan" style="color:var(--accent)">⏰</span><div class="main"><div class="l1">Review onboarding copy</div><div class="l2">Today 15:00 · Mara in # design</div></div></div>
+          <div class="row"><span class="chan">🔖</span><div class="main"><div class="l1">Sparkle key rotation notes</div><div class="l2">Saved · Jonas in # releases</div></div></div>
+          <div class="row"><span class="chan">✎</span><div class="main"><div class="l1">2 drafts</div><div class="l2"># design · Priya Raman</div></div></div>
+          <div class="row"><span class="chan" style="color:var(--alert)">!</span><div class="main"><div class="l1">1 message not sent</div><div class="l2">Outbox · will retry when the server answers</div></div></div>
+        </div>
+
+        <div class="card mod">
+          <div class="sec-title">You talk with most <span class="private">From your own messages</span></div>
+          <div class="people">
+            <div class="person"><script>document.write(avatar("mara",44))</script><div class="nm">Mara</div><div class="st">🎨 In design review</div></div>
+            <div class="person"><script>document.write(avatar("tomas",44))</script><div class="nm">Tomás</div><div class="st">Active</div></div>
+            <div class="person"><script>document.write(avatar("priya",44))</script><div class="nm">Priya</div><div class="st">🚀 Release week</div></div>
+            <div class="person"><script>document.write(avatar("jonas",44))</script><div class="nm">Jonas</div><div class="st">Offline</div></div>
+            <div class="person"><script>document.write(avatar("lea",44))</script><div class="nm">Léa</div><div class="st">🌴 Away until Mon</div></div>
+          </div>
+        </div>
+
+        <div class="card mod">
+          <div class="sec-title">Your week <span class="private">🔒 Only on this Mac</span></div>
+          <div class="tiles">
+            <div class="stat"><div class="lab">Messages sent</div><div class="val">142</div><div class="delta">+18 vs last week</div>
+              <div class="spark"><i style="height:55%"></i><i style="height:80%"></i><i style="height:62%"></i><i style="height:100%"></i><i style="height:70%"></i><i style="height:12%"></i><i class="now" style="height:30%"></i></div></div>
+            <div class="stat"><div class="lab">Busiest hour</div><div class="val">10–11</div><div class="delta">31 messages</div></div>
+            <div class="stat"><div class="lab">Your reactions</div><div class="emo">👍🎉👀</div><div class="delta">Most used, 3 months</div></div>
+          </div>
+        </div>
+        <div class="card mod">
+          <div class="sec-title">Threads you follow <span class="more">Open Threads ⌘2</span></div>
+          <div class="row"><script>document.write(avatar("priya",28,{dot:false}))</script><div class="main"><div class="l1">Launch checklist <span class="n">2 new replies</span></div><div class="l2"># releases · <b class="name-4">Priya:</b> Added the notarization step. Can you confirm…</div></div><span class="t">12:20</span></div>
+          <div class="row"><script>document.write(avatar("aiko",28,{dot:false}))</script><div class="main"><div class="l1">Icon refresh</div><div class="l2"># design · 14 replies · last from Aiko yesterday</div></div><span class="t">Fri</span></div>
+        </div>
+
+        <div class="card mod">
+          <div class="sec-title">Shared today</div>
+          <div class="row"><span class="chan">🖼</span><div class="main"><div class="l1">onboarding-round-2.png <span class="faint" style="font-weight:400">+3</span></div><div class="l2">Aiko in # design · 2.4 MB</div></div><span class="t">12:02</span></div>
+          <div class="row"><span class="chan">📄</span><div class="main"><div class="l1">Release notes 2.4.1.pdf</div><div class="l2">Jonas in # releases · 180 KB</div></div><span class="t">11:10</span></div>
+        </div>
+      </div>
+
+      <div class="glass customize"><svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 6h9M15 6h2M3 14h2M8 14h9"/><circle cx="13.5" cy="6" r="1.7"/><circle cx="6.5" cy="14" r="1.7"/></svg></div>
+      <div class="pop">
+        <h4>Customize Home</h4>
+        <label><span class="cb">✓</span>Favorites<span class="grip">⋮⋮</span></label>
+        <label><span class="cb">✓</span>Unread<span class="grip">⋮⋮</span></label>
+        <label><span class="cb">✓</span>Threads You Follow<span class="grip">⋮⋮</span></label>
+        <label><span class="cb">✓</span>Later, Drafts and Outbox<span class="grip">⋮⋮</span></label>
+        <label><span class="cb">✓</span>People You Talk With Most<span class="grip">⋮⋮</span></label>
+        <label><span class="cb off"></span>Around Now<span class="grip">⋮⋮</span></label>
+        <label><span class="cb">✓</span>Your Week<span class="grip">⋮⋮</span></label>
+        <label><span class="cb">✓</span>Shared Today<span class="grip">⋮⋮</span></label>
+        <hr>
+        <label><span class="cb">✓</span>Theme backdrop</label>
+        <div class="note">Drag to reorder. Statistics are computed on this Mac and never sent anywhere.</div>
+      </div>
+    </div>
+  </section>
+</div>
+</body></html>

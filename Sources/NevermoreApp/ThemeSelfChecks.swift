@@ -34,8 +34,8 @@ import NevermoreCore
 
         check("Classic keeps the system appearance, opaque transcript and plain glass",
               NSApp.appearance == nil && owner.themeBackdrop.isHidden && owner.sidebarBackdrop.isHidden && owner.transcriptScroll.drawsBackground && owner.composerGlass.tintColor == nil)
-        check("Classic keeps the original empty-state text",
-              (owner.emptyConversation.views.first as? NSTextField)?.stringValue == "No Conversation Selected")
+        check("the empty state names no theme",
+              (owner.emptyConversation.views.first as? NSTextField)?.stringValue == ConversationWindow.noAccountTitle)
         check("Classic keeps the original empty-state layout", hasClassicEmptyLayout(owner))
         if let header = firstHeader(owner) {
             check("Classic sender names keep the label color", resolved(header.nameColor, in: owner) == resolved(.labelColor, in: owner))
@@ -74,9 +74,7 @@ import NevermoreCore
             if let body = firstBodyColor(owner) {
                 check("\(tag) colors message text from its palette", sameColor(resolved(body, in: owner), NSColor(theme: palette.text)))
             } else { check("\(tag) transcript has body text to inspect", false) }
-            if theme.emptyMotif != nil {
-                check("\(tag) puts its art in the empty state", owner.emptyConversation.views.first is NSImageView)
-            }
+            check("\(tag) keeps the empty state's words", (owner.emptyConversation.views.first as? NSTextField)?.stringValue == ConversationWindow.noAccountTitle)
         }
 
         // Two light themes in a row change no appearance; the dynamic

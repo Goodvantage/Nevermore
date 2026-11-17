@@ -18,7 +18,6 @@ public struct ThemeCustomization: Sendable, Equatable, Codable {
         public static let motifs = 12
         public static let ornaments = 6
         public static let fontNameLength = 128
-        public static let emptyTitleLength = 80
     }
 
     /// Light or dark only: a palette theme cannot follow the system.
@@ -43,8 +42,6 @@ public struct ThemeCustomization: Sendable, Equatable, Codable {
     public var density: ThemeDensity?
     public var motifOpacity: Double?
     public var ornaments: [OrnamentSpec]?
-    public var emptyTitle: String?
-    public var emptyMotif: ThemeMotif?
     public var celebration: ThemeCelebration?
 
     public init() {}
@@ -84,8 +81,6 @@ public struct ThemeCustomization: Sendable, Equatable, Codable {
         density = value(.density)
         motifOpacity = value(.motifOpacity)
         ornaments = entries(.ornaments)
-        emptyTitle = value(.emptyTitle)
-        emptyMotif = value(.emptyMotif)
         celebration = value(.celebration)
     }
 
@@ -110,10 +105,6 @@ public struct ThemeCustomization: Sendable, Equatable, Codable {
             let kept = specs.filter { !$0.colors.isEmpty && $0.opacity.isFinite }.prefix(Limit.ornaments)
                 .map { OrnamentSpec($0.kind, $0.anchor, Array($0.colors.prefix(Limit.colorsPerShape.upperBound)), opacity: $0.opacity) }
             return Self.usable(kept, of: specs.count)
-        }
-        result.emptyTitle = emptyTitle.flatMap { title in
-            let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : String(trimmed.prefix(Limit.emptyTitleLength))
         }
         return result
     }
@@ -146,8 +137,6 @@ public struct ThemeCustomization: Sendable, Equatable, Codable {
         prune(\.density, preset.wallpaper.density)
         prune(\.motifOpacity, preset.wallpaper.opacity)
         prune(\.ornaments, preset.wallpaper.ornaments)
-        prune(\.emptyTitle, preset.emptyTitle)
-        if let motif = preset.emptyMotif { prune(\.emptyMotif, motif) }
         prune(\.celebration, preset.celebration)
         return result
     }
@@ -237,7 +226,6 @@ extension Theme {
             typography: ThemeTypography(displayFont: displayFont, bodyDesign: custom.bodyDesign ?? typography.bodyDesign),
             wallpaper: ThemeWallpaper(motifs: custom.motifs ?? wallpaper.motifs, density: custom.density ?? wallpaper.density,
                                       opacity: custom.motifOpacity ?? wallpaper.opacity, ornaments: custom.ornaments ?? wallpaper.ornaments),
-            emptyTitle: custom.emptyTitle ?? emptyTitle, emptyDetail: emptyDetail, emptyMotif: custom.emptyMotif ?? emptyMotif,
             celebration: custom.celebration ?? celebration)
     }
 
@@ -259,7 +247,7 @@ extension Theme {
             motifs: wallpaper.motifs, density: wallpaper.density, opacity: wallpaper.opacity * alpha,
             ornaments: wallpaper.ornaments.map { OrnamentSpec($0.kind, $0.anchor, $0.colors, opacity: $0.opacity * alpha) })
         return Theme(id: id, name: name, tagline: tagline, tone: tone, palette: faded, typography: typography, wallpaper: art,
-                     emptyTitle: emptyTitle, emptyDetail: emptyDetail, emptyMotif: emptyMotif, celebration: celebration)
+                     celebration: celebration)
     }
 }
 

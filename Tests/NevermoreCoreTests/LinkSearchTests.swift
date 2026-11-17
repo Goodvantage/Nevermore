@@ -8,7 +8,11 @@ struct LinkSearchTests {
         let criteria = SearchCriteria(query: "meeting", scope: .conversation("room"), kind: .links, author: "person", savedOnly: true, mentionsMe: true)
         let source = try LinkSearch.source(criteria)
         #expect(source.method == "raven.api.search.search_links")
-        #expect(source.arguments == ["search_text": .string("meeting"), "channel_id": .string("room"), "owner": .string("person"), "saved": .number(1), "mentions_me": .number(1)])
+        // Thread replies are included by default: the server resolves them
+        // to their parent conversation.
+        #expect(source.arguments == ["search_text": .string("meeting"), "parent_channel_id": .string("room"), "owner": .string("person"), "saved": .number(1), "mentions_me": .number(1)])
+        var withoutThreads = criteria; withoutThreads.includeThreads = false; withoutThreads.attribute = .reactions
+        #expect(try LinkSearch.source(withoutThreads).arguments == ["search_text": .string("meeting"), "channel_id": .string("room"), "owner": .string("person"), "saved": .number(1), "mentions_me": .number(1), "has_reactions": .number(1)])
         let arguments = CollectionPaging.pageArguments(source, offset: 50)
         #expect(arguments["start_after"] == .number(50))
         #expect(arguments["limit"] == .number(50))
@@ -30,9 +34,13 @@ struct LinkSearchTests {
         #expect(pager.records.count == 2 && pager.nextOffset == 3 && !pager.hasMore)
     }
     @Test func scopeAndPreviewDoNotBroadenOrRevealSpoilers() throws {
-        let source = try LinkSearch.source(SearchCriteria(scope: .conversation("room"), kind: .links))
-        let rows: [JSONValue] = [.object(["channel_id": .string("room")]), .object(["channel_id": .string("other")])]
+        let source = try LinkSearch.source(SearchCriteria(scope: .conversation("room"), kind: .links, includeThreads: false))
+        let rows: [JSONValue] = [.object(["channel_id": .string("room")]), .object(["channel_id": .string("other")]), .object(["channel_id": .string("thread"), "parent_channel_id": .string("room")])]
         #expect(CollectionPaging.scopedSearchRows(rows, source: source) == [rows[0]])
+        // With threads, a reply in the conversation's thread stays and a
+        // row from elsewhere is still dropped.
+        let threaded = try LinkSearch.source(SearchCriteria(scope: .conversation("room"), kind: .links))
+        #expect(CollectionPaging.scopedSearchRows(rows + [.object(["channel_id": .string("thread2"), "parent_channel_id": .string("other")])], source: threaded) == [rows[0], rows[2]])
         let preview = LinkSearch.preview(.object(["title": .string("Title"), "content": .string("public content"), "url": .string("javascript:alert(1)")]))
         #expect(preview.contains("public content"))
         // URLs remain inert text. No URL request or browser action belongs to this helper.

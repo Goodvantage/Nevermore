@@ -156,6 +156,10 @@ import UserNotifications
     let markdownShortcuts = NSButton(checkboxWithTitle: "Format Markdown shortcuts as you type", target: nil, action: nil)
     let linkPreviews = NSButton(checkboxWithTitle: "Preview links while you write", target: nil, action: nil)
     let inkSounds = NSButton(checkboxWithTitle: "Play sounds for sending, delivery and reactions", target: nil, action: nil)
+    let interfaceSounds = NSButton(checkboxWithTitle: "Play menu, window and navigation sounds", target: nil, action: nil)
+    let interfaceSoundVolume = NSSlider(value: InterfaceSoundPreferences.defaultVolume, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let interfaceSoundVolumeLabel = NSTextField(labelWithString: "35%")
+    let interfaceSoundPreview = NSButton(title: "Preview", target: nil, action: nil)
     let badgeMode = NSPopUpButton()
     let retention = NSButton(checkboxWithTitle: "Keep received history on this Mac", target: nil, action: nil)
     let loginItem = LoginItemPreferences(frame: .zero)
@@ -167,6 +171,9 @@ import UserNotifications
     let fontSize = NSSlider(value: 14, minValue: 11, maxValue: 30, target: nil, action: nil)
     let fontLabel = NSTextField(labelWithString: "14 pt")
     private(set) var themeSettings: ThemeSettingsView!
+    let gifSettings = GIFSettings()
+    private var tabs: NSTabViewController?
+    private var gifPane: NSViewController?
     private let accountTable = NSTableView()
     private let accountSegments = NSSegmentedControl()
     private let accountPreferencesButton = NSButton(title: "Account Preferences…", target: nil, action: nil)
@@ -194,6 +201,11 @@ import UserNotifications
         markdownShortcuts.state = ComposerPreferences.formatsMarkdownShortcuts ? .on : .off
         linkPreviews.state = ComposerPreferences.showsLinkPreviews ? .on : .off
         inkSounds.state = InkSounds.isEnabled ? .on : .off
+        interfaceSoundVolume.isContinuous = false
+        interfaceSoundVolume.widthAnchor.constraint(equalToConstant: Self.textSizeSliderWidth).isActive = true
+        interfaceSoundVolume.setAccessibilityLabel("Interface sound volume")
+        interfaceSoundPreview.setAccessibilityLabel("Preview interface sound")
+        interfaceSoundVolumeLabel.textColor = .secondaryLabelColor
         for icon in MenuBarIcon.allCases {
             menuBarIcon.addItem(withTitle: MenuBarIconArt.title(for: icon))
             menuBarIcon.lastItem?.image = MenuBarIconArt.image(for: icon, size: MenuBarIconArt.menuItemSize)
@@ -220,12 +232,17 @@ import UserNotifications
         accountTable.usesAlternatingRowBackgroundColors = false
         accountTable.setAccessibilityLabel("Accounts")
         Self.configureSegments(accountSegments)
+        let interfaceSoundControls = NSStackView(views: [interfaceSoundVolume, interfaceSoundVolumeLabel, interfaceSoundPreview])
+        interfaceSoundControls.orientation = .horizontal
+        interfaceSoundControls.spacing = 8
         let general = SettingsPaneController(title: "General", symbol: "gearshape", grid: Self.makeGrid([
             [Self.label("Menu bar:"), menuBar],
             [Self.label("Menu bar icon:"), menuBarIcon],
             [Self.label("Login:"), loginItem],
             [Self.label("Sending:"), sendKey],
             [NSGridCell.emptyContentView, inkSounds],
+            [Self.label("Interface:"), interfaceSounds],
+            [NSGridCell.emptyContentView, interfaceSoundControls],
             [Self.label("Writing:"), markdownShortcuts],
             [Self.label(""), Self.note("Start a line with > for a quote, - or 1. for a list, or ``` for code. Wrap text in **bold**, *italic*, `code`, ~~strikethrough~~ or ||spoiler||. Undo brings back what you typed.")],
             [Self.label(""), linkPreviews],
@@ -256,6 +273,7 @@ import UserNotifications
             [Self.label(""), Self.makeAccountScrollView(table: accountTable)],
             [Self.label(""), Self.makeAccountControls(segments: accountSegments, preferences: accountPreferencesButton, reconnect: reconnectButton)],
         ]))
+        let gifs = SettingsPaneController(title: "GIFs", symbol: "photo.stack", grid: Self.makeGrid(gifSettings.rows(label: Self.label, note: Self.note)))
         let privacy = SettingsPaneController(title: "Privacy", symbol: "hand.raised", grid: Self.makeGrid([
             [Self.label("History:"), retention],
             [Self.label(""), clearHistoryButton],
@@ -263,7 +281,7 @@ import UserNotifications
         ]))
         let tabController = NSTabViewController()
         tabController.tabStyle = .toolbar
-        for pane in [general, notificationsPane, reading, appearance, accounts, privacy] {
+        for pane in [general, notificationsPane, reading, gifs, appearance, accounts, privacy] {
             let item = NSTabViewItem(viewController: pane)
             item.label = pane.title ?? ""
             item.image = NSImage(systemSymbolName: pane.symbol, accessibilityDescription: nil)
@@ -276,12 +294,19 @@ import UserNotifications
         window.center()
         super.init(window: window)
         self.themeSettings = themeSettings
+        self.tabs = tabController; self.gifPane = gifs
+        gifSettings.onChange = { [weak app] in
+            for window in app?.windows ?? [] { window.render(); window.threadInspector?.render() }
+        }
         menuBar.target = self
         menuBar.action = #selector(changeMenuBar)
         menuBarIcon.target = self
         menuBarIcon.action = #selector(changeMenuBarIcon)
         sendKey.target = self
         sendKey.action = #selector(changeSendKey)
+        interfaceSounds.target = self; interfaceSounds.action = #selector(changeInterfaceSounds)
+        interfaceSoundVolume.target = self; interfaceSoundVolume.action = #selector(changeInterfaceSounds)
+        interfaceSoundPreview.target = self; interfaceSoundPreview.action = #selector(previewInterfaceSound)
         automaticUpdates.target = self; automaticUpdates.action = #selector(changeAutomaticUpdates)
         updateCheck.target = app; updateCheck.action = #selector(AppDelegate.checkForUpdates)
         NotificationCenter.default.addObserver(self, selector: #selector(reloadUpdateControls), name: .appUpdateChanged, object: app.updates)
@@ -313,6 +338,13 @@ import UserNotifications
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Brings a pane to the front, as its toolbar item would.
+    func select(_ pane: SettingsPane) {
+        guard let tabs, let target = gifPane, let index = tabs.tabViewItems.firstIndex(where: { $0.viewController === target }) else { return }
+        switch pane { case .gifs: tabs.selectedTabViewItemIndex = index }
+        window?.title = target.title ?? ""
+    }
+
     @objc func changeMenuBar() {
         UserDefaults.standard.set(menuBar.state == .on, forKey: "showMenuBarItem")
         menuBarIcon.isEnabled = menuBar.state == .on
@@ -341,7 +373,22 @@ import UserNotifications
         menuBarIcon.isEnabled = menuBar.state == .on
         let key = ComposerSendKey(returnInsertsNewline: defaults.bool(forKey: ComposerSendKey.defaultsKey))
         sendKey.selectItem(at: ComposerSendKey.allCases.firstIndex(of: key) ?? 0)
+        let sounds = app.interfaceSounds.preferences
+        interfaceSounds.state = sounds.isEnabled ? .on : .off
+        interfaceSoundVolume.doubleValue = sounds.volume
+        interfaceSoundVolumeLabel.stringValue = "\(Int((sounds.volume * 100).rounded()))%"
+        interfaceSoundPreview.isEnabled = sounds.volume > 0
     }
+
+    @objc func changeInterfaceSounds() {
+        let sounds = InterfaceSoundPreferences(enabled: interfaceSounds.state == .on, volume: interfaceSoundVolume.doubleValue)
+        UserDefaults.standard.set(sounds.isEnabled, forKey: InterfaceSoundPreferences.enabledKey)
+        UserDefaults.standard.set(sounds.volume, forKey: InterfaceSoundPreferences.volumeKey)
+        app.interfaceSounds.configure()
+        reloadGeneralControls()
+    }
+
+    @objc private func previewInterfaceSound() { app.interfaceSounds.preview() }
 
     @objc private func reloadUpdateControls() {
         automaticUpdates.state = app.updates.checksAutomatically ? .on : .off

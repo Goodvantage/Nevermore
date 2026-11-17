@@ -20,13 +20,10 @@ public enum ThemeCatalog {
         rawValue.flatMap(ThemeID.init(rawValue:)).map(theme(_:)) ?? classic
     }
 
-    private static let guidance = "Choose a conversation in the sidebar, or press ⌘O."
-
     // MARK: Classic
 
     public static let classic = Theme(
-        id: .classic, name: "Classic", tagline: "The native Mac look", tone: .system, palette: nil,
-        emptyTitle: "No Conversation Selected", emptyDetail: guidance)
+        id: .classic, name: "Classic", tagline: "The native Mac look", tone: .system, palette: nil)
 
     // MARK: Memphis — the family's Memphis Group print (Invoque, Zap, Jetty)
 
@@ -53,7 +50,7 @@ public enum ThemeCatalog {
     public static let memphis = Theme(
         id: .memphis, name: "Memphis", tagline: "Loud geometry on cream paper", tone: .light, palette: memphisPalette,
         typography: ThemeTypography(displayFont: "Futura-Bold"), wallpaper: memphisWallpaper,
-        emptyTitle: "Blank canvas, big ideas", emptyDetail: guidance, emptyMotif: .triangle, celebration: .confetti)
+        celebration: .confetti)
 
     // MARK: Halloween
 
@@ -82,7 +79,7 @@ public enum ThemeCatalog {
     public static let halloween = Theme(
         id: .halloween, name: "Halloween", tagline: "Cute-spooky pumpkin night", tone: .dark, palette: halloweenPalette,
         typography: ThemeTypography(displayFont: "Chalkduster"), wallpaper: halloweenWallpaper,
-        emptyTitle: "Something wicked this way chats", emptyDetail: guidance, emptyMotif: .pumpkin, celebration: .bats)
+        celebration: .bats)
 
     // MARK: Neon Fun
 
@@ -113,7 +110,7 @@ public enum ThemeCatalog {
     public static let neonFun = Theme(
         id: .neonFun, name: "Neon Fun", tagline: "Glow sticks at midnight", tone: .dark, palette: neonPalette,
         typography: ThemeTypography(displayFont: "AvenirNext-Heavy"), wallpaper: neonWallpaper,
-        emptyTitle: "Insert conversation to continue", emptyDetail: guidance, emptyMotif: .bolt, celebration: .sparkles)
+        celebration: .sparkles)
 
     // MARK: Bubblegum
 
@@ -141,7 +138,7 @@ public enum ThemeCatalog {
     public static let bubblegum = Theme(
         id: .bubblegum, name: "Bubblegum", tagline: "Pastel hearts and sparkles", tone: .light, palette: bubblegumPalette,
         typography: ThemeTypography(bodyDesign: .rounded), wallpaper: bubblegumWallpaper,
-        emptyTitle: "So sweet, so empty", emptyDetail: guidance, emptyMotif: .heart, celebration: .hearts)
+        celebration: .hearts)
 
     // MARK: Nevermore — the app's namesake: Poe's raven at midnight
 
@@ -165,7 +162,7 @@ public enum ThemeCatalog {
     public static let nevermore = Theme(
         id: .nevermore, name: "Nevermore", tagline: "Ravens, candlelight and midnight ink", tone: .dark, palette: nevermorePalette,
         typography: ThemeTypography(displayFont: "Didot-Bold", bodyDesign: .serif), wallpaper: nevermoreWallpaper,
-        emptyTitle: "Quoth the raven…", emptyDetail: "…choose a conversation in the sidebar, or press ⌘O.", emptyMotif: .raven, celebration: .ravens)
+        celebration: .ravens)
 
     // MARK: Synthwave — the family's outrun sunset
 
@@ -192,7 +189,7 @@ public enum ThemeCatalog {
     public static let synthwave = Theme(
         id: .synthwave, name: "Synthwave", tagline: "Outrun sunset on a neon grid", tone: .dark, palette: synthwavePalette,
         typography: ThemeTypography(displayFont: "Futura-CondensedExtraBold"), wallpaper: synthwaveWallpaper,
-        emptyTitle: "Cruising, no destination", emptyDetail: guidance, emptyMotif: .sun, celebration: .stars)
+        celebration: .stars)
 
     // MARK: Vaporwave
 
@@ -219,7 +216,7 @@ public enum ThemeCatalog {
     public static let vaporwave = Theme(
         id: .vaporwave, name: "Vaporwave", tagline: "Pastel dreams and endless grids", tone: .light, palette: vaporwavePalette,
         typography: ThemeTypography(displayFont: "Futura-Bold"), wallpaper: vaporwaveWallpaper,
-        emptyTitle: "ＡＥＳＴＨＥＴＩＣ ＳＩＬＥＮＣＥ", emptyDetail: guidance, emptyMotif: .diamond, celebration: .notes)
+        celebration: .notes)
 
     // MARK: Under the Sea
 
@@ -244,7 +241,7 @@ public enum ThemeCatalog {
     public static let underTheSea = Theme(
         id: .underTheSea, name: "Under the Sea", tagline: "Bubbles, fish and sea glass", tone: .light, palette: seaPalette,
         typography: ThemeTypography(displayFont: "ChalkboardSE-Bold", bodyDesign: .rounded), wallpaper: seaWallpaper,
-        emptyTitle: "Low tide, no chats", emptyDetail: guidance, emptyMotif: .fish, celebration: .bubbles)
+        celebration: .bubbles)
 
     // MARK: Meadow
 
@@ -271,7 +268,7 @@ public enum ThemeCatalog {
     public static let meadow = Theme(
         id: .meadow, name: "Meadow", tagline: "Wildflowers, mushrooms and sunshine", tone: .light, palette: meadowPalette,
         typography: ThemeTypography(displayFont: "Noteworthy-Bold", bodyDesign: .serif), wallpaper: meadowWallpaper,
-        emptyTitle: "Quiet as a meadow", emptyDetail: guidance, emptyMotif: .mushroom, celebration: .leaves)
+        celebration: .leaves)
 
     // MARK: Cosmic Sprinkles
 
@@ -297,7 +294,7 @@ public enum ThemeCatalog {
     public static let cosmic = Theme(
         id: .cosmic, name: "Cosmic Sprinkles", tagline: "Planets, rockets and stardust", tone: .dark, palette: cosmicPalette,
         typography: ThemeTypography(displayFont: "AvenirNext-Heavy", bodyDesign: .rounded), wallpaper: cosmicWallpaper,
-        emptyTitle: "Nothing orbiting yet", emptyDetail: guidance, emptyMotif: .rocket, celebration: .stars)
+        celebration: .stars)
 
     // MARK: Aurora
 
@@ -325,7 +322,7 @@ public enum ThemeCatalog {
     public static let aurora = Theme(
         id: .aurora, name: "Aurora", tagline: "Northern lights over snowy peaks", tone: .dark, palette: auroraPalette,
         typography: ThemeTypography(displayFont: "Optima-Bold"), wallpaper: auroraWallpaper,
-        emptyTitle: "Quiet under the northern lights", emptyDetail: guidance, emptyMotif: .snowflake, celebration: .snow)
+        celebration: .snow)
 
     // MARK: Lemonade
 
@@ -350,7 +347,7 @@ public enum ThemeCatalog {
     public static let lemonade = Theme(
         id: .lemonade, name: "Lemonade", tagline: "Citrus slices and summer sun", tone: .light, palette: lemonadePalette,
         typography: ThemeTypography(displayFont: "MarkerFelt-Wide", bodyDesign: .rounded), wallpaper: lemonadeWallpaper,
-        emptyTitle: "Squeeze the day", emptyDetail: guidance, emptyMotif: .lemon, celebration: .confetti)
+        celebration: .confetti)
 
     // MARK: Peppermint
 
@@ -374,7 +371,7 @@ public enum ThemeCatalog {
     public static let peppermint = Theme(
         id: .peppermint, name: "Peppermint", tagline: "Snowflakes and candy stripes", tone: .light, palette: peppermintPalette,
         typography: ThemeTypography(displayFont: "SnellRoundhand-Bold"), wallpaper: peppermintWallpaper,
-        emptyTitle: "Snowed in, cozy and quiet", emptyDetail: guidance, emptyMotif: .snowflake, celebration: .snow)
+        celebration: .snow)
 
     // MARK: Midnight Cocoa
 
@@ -398,7 +395,7 @@ public enum ThemeCatalog {
     public static let midnightCocoa = Theme(
         id: .midnightCocoa, name: "Midnight Cocoa", tagline: "Marshmallows and quiet midnights", tone: .dark, palette: cocoaPalette,
         typography: ThemeTypography(displayFont: "AmericanTypewriter-Bold", bodyDesign: .serif), wallpaper: cocoaWallpaper,
-        emptyTitle: "One cocoa, hold the noise", emptyDetail: guidance, emptyMotif: .heart, celebration: .hearts)
+        celebration: .hearts)
 
     // MARK: Phosphor — green-screen terminal
 
@@ -422,5 +419,5 @@ public enum ThemeCatalog {
     public static let phosphor = Theme(
         id: .phosphor, name: "Phosphor", tagline: "Green-screen glow, scanlines included", tone: .dark, palette: phosphorPalette,
         typography: ThemeTypography(displayFont: "Menlo-Bold", bodyDesign: .monospaced), wallpaper: phosphorWallpaper,
-        emptyTitle: "READY_", emptyDetail: guidance, emptyMotif: .pixelHeart, celebration: .stars)
+        celebration: .stars)
 }

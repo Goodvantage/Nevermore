@@ -135,7 +135,7 @@ private struct SemanticMark: Codable {
         output.enumerateAttributes(in: full) { attrs, _, _ in
             privateKeys.formUnion(attrs.keys.filter { $0.rawValue.hasPrefix("Nevermore.") })
         }
-        for key in privateKeys { output.removeAttribute(key, range: full) }
+        for key in privateKeys where key != .nevermoreBodyQuote && key != .nevermoreInlineImage { output.removeAttribute(key, range: full) }
         return output
     }
 
@@ -167,7 +167,7 @@ private struct SemanticMark: Codable {
         func lineStart(_ attrs: [NSAttributedString.Key: Any]) { if output.length > 0 && !output.string.hasSuffix("\n") { append("\n", attrs) } }
         func beginPara(_ attributes: [NSAttributedString.Key: Any], meta input: ParaMeta) -> [NSAttributedString.Key: Any] {
             var meta = input
-            meta.mk = (meta.q != nil ? "│ " : "") + meta.mk
+            meta.mk = (meta.q != nil && !reading ? "│ " : "") + meta.mk
             var attrs = attributes
             attrs[.paraContext] = paragraphContext(meta)
             attrs[.blockKind] = meta.b
@@ -293,6 +293,13 @@ private struct SemanticMark: Codable {
                     }
                     let parent = state.quote; let qid = state.nextID("q"); state.quote = qid
                     var quoted = attrs
+                    if reading {
+                        let style = (attrs[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
+                        style.firstLineHeadIndent += 12
+                        style.headIndent += 12
+                        quoted[.paragraphStyle] = style
+                        quoted[.nevermoreBodyQuote] = UUID().uuidString
+                    }
                     var markerContext = ParaMeta(b: "p", q: qid); markerContext.mk = "│ "
                     quoted[.paraContext] = paragraphContext(ParaMeta(b: "p", q: qid))
                     quoted[.blockKind] = "p"
@@ -301,7 +308,7 @@ private struct SemanticMark: Codable {
                         if case .element(let childTag, _, _) = child, ["p", "ul", "ol", "pre", "blockquote"].contains(childTag) {
                             render(child, attributes: quoted, depth: depth + 1)
                         } else {
-                            if output.length > 0 && output.string.hasSuffix("\n") {
+                            if !reading && output.length > 0 && output.string.hasSuffix("\n") {
                                 var marker = quoted; marker[.generated] = true
                                 if case .element(let childTag, _, _) = child, childTag == "hr" || childTag == "br" {
                                     marker[.paraContext] = paragraphContext(ParaMeta(b: childTag, q: qid, mk: "│ "))
@@ -353,6 +360,8 @@ private struct SemanticMark: Codable {
                 default:
                     if tag == "img" {
                         attrs[.semantic] = encoded(node)
+                        // The transcript may show a GIF in place of the text.
+                        if reading, metadata["data-type"] != "customEmoji", let src = metadata["src"] { attrs[.nevermoreInlineImage] = InlineImageSource(src) }
                         append(metadata["alt"] ?? metadata["data-name"].map { ":\($0):" } ?? "[Image]", attrs)
                     } else if tag == "br" || tag == "hr" {
                         if tag == "hr" || attrs[.paraContext] == nil {

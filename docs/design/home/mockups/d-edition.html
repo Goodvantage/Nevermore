@@ -1,0 +1,125 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>D · Morning Edition</title>
+<link rel="stylesheet" href="base.css">
+<script src="chrome.js"></script>
+<style>
+  .paper { position: absolute; inset: 0 34px 18px 34px; }
+  .mast { text-align: center; border-bottom: 2px solid var(--text); padding-bottom: 6px; }
+  .mast .name { font-family: var(--display); font-weight: var(--display-weight); font-size: 40px; letter-spacing: .02em; line-height: 1; }
+  .mast .line { display: flex; justify-content: space-between; font-family: var(--sys); font-size: 11px; color: var(--text2); border-top: .5px solid var(--card-edge); margin-top: 8px; padding-top: 5px; letter-spacing: .05em; text-transform: uppercase; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr 0.86fr; gap: 0; margin-top: 14px; }
+  .cols > div { padding: 0 18px; }
+  .cols > div + div { border-left: .5px solid var(--card-edge); }
+  .cols > div:first-child { padding-left: 0; }
+  .cols > div:last-child { padding-right: 0; }
+  .kick { font-family: var(--sys); font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  .lead h2 { font-family: var(--display); font-weight: var(--display-weight); font-size: 27px; line-height: 1.12; margin: 6px 0 8px; }
+  .lead .by { display: flex; align-items: center; gap: 8px; font-family: var(--sys); font-size: 12px; color: var(--text2); margin-bottom: 8px; }
+  .lead p { font-size: 15px; line-height: 1.5; margin: 0 0 10px; }
+  body[data-theme="nevermore"] .lead p::first-letter { font-family: var(--display); font-size: 40px; float: left; line-height: .9; padding: 4px 6px 0 0; color: var(--accent); }
+  .lead .go { font-family: var(--sys); font-size: 12px; color: var(--link); font-weight: 600; }
+  .story { padding: 10px 0; border-top: .5px solid var(--card-edge); }
+  .story:first-of-type { border-top: 0; padding-top: 0; }
+  .story h3 { font-family: var(--display); font-weight: var(--display-weight); font-size: 17px; margin: 3px 0 4px; line-height: 1.2; }
+  .story p { margin: 0; font-size: 13.5px; line-height: 1.45; color: var(--text); }
+  .story .meta { font-family: var(--sys); font-size: 11px; color: var(--text3); margin-top: 4px; }
+  .box { border: .5px solid var(--card-edge); background: var(--card); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+  .box h4 { margin: 0 0 7px; font-family: var(--display); font-weight: var(--display-weight); font-size: 15px; }
+  .faces { display: flex; flex-wrap: wrap; gap: 6px 10px; font-family: var(--sys); font-size: 11.5px; }
+  .faces span.p { display: flex; align-items: center; gap: 6px; }
+  .nums { display: grid; grid-template-columns: 1fr 1fr 1fr; text-align: center; font-family: var(--sys); }
+  .nums b { display: block; font-family: var(--display); font-size: 24px; font-weight: var(--display-weight); }
+  .nums span { font-size: 10.5px; color: var(--text2); }
+  .agenda { font-family: var(--sys); font-size: 12px; }
+  .agenda div { display: flex; gap: 10px; padding: 3px 0; }
+  .agenda div b { width: 42px; font-variant-numeric: tabular-nums; color: var(--accent); }
+  .foot { position: absolute; left: 0; right: 0; bottom: 0; text-align: center; font-family: var(--sys); font-size: 11.5px; color: var(--text2); border-top: .5px solid var(--card-edge); padding-top: 7px; }
+</style></head>
+<body data-theme="nevermore" data-home="Today">
+<div class="window">
+  <div class="wallpaper"></div>
+  <aside class="sidebar"></aside>
+  <section class="pane">
+    <div class="toolbar"></div>
+    <div class="content">
+      <div class="paper">
+        <div class="mast">
+          <div class="name" id="mast">The Afternoon Raven</div>
+          <div class="line"><span>Sunday, 15 November</span><span>Studio · since you last looked at 09:12</span><span>8 stories · 2 for you</span></div>
+        </div>
+        <div class="cols">
+          <div class="lead">
+            <div class="kick">For you · # design</div>
+            <h2>Mara Lindqvist mentioned you in # design</h2>
+            <div class="by"><script>document.write(avatar("mara",22))</script>11:48 · 2 replies since</div>
+            <p>Could you look at the new onboarding illustrations before 3? I think the second one is too busy next to the sign-in button.</p>
+            <div class="go">Reply · Open conversation ↩</div>
+            <div class="story" style="margin-top:14px;border-top:.5px solid var(--card-edge);padding-top:10px">
+              <div class="kick">For you · Direct message</div>
+              <h3>Tomás Ferreira wrote to you</h3>
+              <p>Got a minute to pair on the reconnect bug? It only happens after the Mac wakes from sleep.</p>
+              <div class="meta">13:05</div>
+            </div>
+          </div>
+          <div>
+            <div class="story">
+              <div class="kick"># releases · 5 new</div>
+              <h3>Jonas, Priya and 1 other in # releases</h3>
+              <p>2.4.1 is tagged. Notarization is running, the DMG should be up in ten minutes.</p>
+              <div class="meta">Latest 13:32 · thread “Launch checklist” has 2 new replies</div>
+            </div>
+            <div class="story">
+              <div class="kick"># design · 3 new</div>
+              <h3>Aiko shared 4 images</h3>
+              <p>“Onboarding, round two.” Mara and Aiko are discussing the second screen.</p>
+              <div class="meta">Latest 12:02</div>
+            </div>
+            <div class="story">
+              <div class="kick"># general · 1 new</div>
+              <h3>Léa Martin in # general</h3>
+              <p>Lunch at the Thai place on Thursday? 🍜</p>
+              <div class="meta">10:15</div>
+            </div>
+            <div class="story">
+              <div class="kick" style="color:var(--text3)"># support · muted</div>
+              <p class="muted" style="font-size:12.5px">12 new messages you chose not to follow closely.</p>
+            </div>
+          </div>
+          <div>
+            <div class="box">
+              <h4>Around the office</h4>
+              <div class="faces">
+                <span class="p"><script>document.write(avatar("mara",22))</script>Mara</span>
+                <span class="p"><script>document.write(avatar("aiko",22))</script>Aiko</span>
+                <span class="p"><script>document.write(avatar("priya",22))</script>Priya</span>
+                <span class="p"><script>document.write(avatar("tomas",22))</script>Tomás</span>
+              </div>
+              <div style="font-family:var(--sys);font-size:11.5px;color:var(--text2);margin-top:8px">Léa: 🌴 away until Monday</div>
+            </div>
+            <div class="box">
+              <h4>Your week in numbers</h4>
+              <div class="nums"><div><b>142</b><span>sent</span></div><div><b>31</b><span>reactions</span></div><div><b>6</b><span>threads</span></div></div>
+              <div style="font-family:var(--sys);font-size:10.5px;color:var(--text3);margin-top:6px;text-align:center">Counted on this Mac. Only you see this.</div>
+            </div>
+            <div class="box">
+              <h4>Coming up</h4>
+              <div class="agenda">
+                <div><b>15:00</b>Review onboarding copy</div>
+                <div><b>17:00</b>Weekly update to # general sends</div>
+                <div><b>Mon</b>Poll closes: “Offsite dates”</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="foot">That is everything since 09:12. The full record is in Inbox ⌘1 and Threads ⌘2.</div>
+      </div>
+    </div>
+  </section>
+</div>
+<script>
+  // One masthead in every theme, named for the time of day.
+  document.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("mast").innerHTML = `${raven({ ink: "var(--text)", eye: "var(--bg1)", w: 44, style: "vertical-align:-1px;margin-right:10px" })}The Afternoon Raven`;
+  });
+</script>
+</body></html>

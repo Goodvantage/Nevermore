@@ -15,12 +15,30 @@ import RavenProtocol
         session.attach(window: secondWindow, channelID: "channel")
         var results: [(String, Bool)] = []
         session.realtimeLive = true
-        session.reconciliationTick(now: Date().addingTimeInterval(120), isActive: false)
-        results.append(("live background sessions skip periodic refresh", session.reconciliationTask == nil))
+        session.lastLiveRefresh = Date()
+        session.reconciliationTick(now: Date())
+        results.append(("live sessions wait out the refresh interval", session.reconciliationTask == nil && !session.reconcileRequested))
+        session.reconciliationTick(now: Date().addingTimeInterval(120))
+        let liveWorker = session.reconciliationTask
+        results.append(("live background sessions still reconcile periodically", liveWorker != nil))
+        liveWorker?.cancel(); await liveWorker?.value
+        // Window-independent state (unread badge, notification channels) must
+        // still refresh while live even when no window is attached.
+        session.interests.removeAll()
+        session.notificationChannels = ["channel"]
+        session.reconcileRequested = false
+        session.lastLiveRefresh = Date()
+        session.reconciliationTick(now: Date().addingTimeInterval(120))
+        let badgeWorker = session.reconciliationTask
+        results.append(("live sessions with notification state reconcile without open windows", badgeWorker?.isCancelled == false))
+        badgeWorker?.cancel(); await badgeWorker?.value
+        session.notificationChannels.removeAll()
+        session.reconcileRequested = false
+        session.interests[firstWindow] = "channel"
         session.realtimeLive = false
-        session.reconciliationTick(now: Date(), isActive: false)
+        session.reconciliationTick(now: Date())
         let worker = session.reconciliationTask
-        results.append(("offline background sessions schedule catch-up for open windows", worker != nil && Set(session.interests.values) == ["channel"]))
+        results.append(("offline background sessions schedule catch-up for open windows", worker?.isCancelled == false && Set(session.interests.values) == ["channel"]))
         try await Task.sleep(for: .milliseconds(20))
         session.requestReconciliation(); session.requestReconciliation()
         results.append(("concurrent catch-up requests share a worker and request another pass", session.reconciliationTask != nil && session.reconcileRequested))

@@ -56,8 +56,10 @@ public enum CollectionPaging {
     /// returns a broader candidate set. Used for first loads and refreshes.
     public static func scopedSearchRows(_ rows: [JSONValue], source: CollectionSource) -> [JSONValue] {
         if source.method == LinkSearch.method {
-            guard let id = source.arguments["channel_id"]?.string else { return rows }
-            return rows.filter { $0["channel_id"].string == id }
+            if let id = source.arguments["channel_id"]?.string { return rows.filter { $0["channel_id"].string == id } }
+            // A conversation with its threads: replies carry the parent.
+            if let id = source.arguments["parent_channel_id"]?.string { return rows.filter { $0["channel_id"].string == id || $0["parent_channel_id"].string == id } }
+            return rows
         }
         guard source.method == "raven.api.search.sqlite_search" else { return rows }
         let filter = source.arguments["filters"]?.nested["channel_id"] ?? .null

@@ -120,55 +120,33 @@ extension ConversationWindow {
         sendButton.contentTintColor = .themeAccent
         transcript.linkTextAttributes = Self.transcriptLinkAttributes
         updateEmptyState(for: theme)
+        home.applyTheme()
         // Switching between two light (or two dark) themes changes no
         // appearance, so nothing invalidates views that resolved a dynamic
         // theme color; redraw them explicitly.
         window?.contentView?.markThemeSubtreeNeedsDisplay()
     }
 
+    /// The pane without an account; with one, Home takes its place. The
+    /// words are the same in every theme: a theme never puts its own
+    /// phrase where the reader expects an instruction.
     private func updateEmptyState(for theme: Theme) {
-        let title = NSTextField(labelWithString: theme.emptyTitle)
-        guard !theme.isClassic else {
-            // Exactly the empty state Nevermore had before themes.
-            title.font = .preferredFont(forTextStyle: .title2)
-            title.textColor = .tertiaryLabelColor
-            let detail = NSTextField(labelWithString: theme.emptyDetail)
-            detail.textColor = .tertiaryLabelColor
-            emptyConversation.setViews([title, detail], in: .center)
-            return
-        }
-        let detail = NSTextField(wrappingLabelWithString: theme.emptyDetail)
-        detail.alignment = .center
-        detail.preferredMaxLayoutWidth = 320
-        let titleSize = NSFont.preferredFont(forTextStyle: .title2).pointSize + 2
-        title.font = ThemeFonts.senderName(ofSize: titleSize, weight: .bold)
-        title.textColor = .themeText
-        detail.textColor = .themeSecondaryText
-        var views: [NSView] = [title, detail]
-        if let motif = theme.emptyMotif {
-            let art = NSImageView(image: MotifArt.image(motif, colors: Self.emptyMotifColors(theme, motif), style: Self.emptyMotifStyle(theme, motif), size: 84))
-            art.imageScaling = .scaleProportionallyUpOrDown
-            art.setAccessibilityElement(false)
-            views.insert(art, at: 0)
-        }
-        emptyConversation.setViews(views, in: .center)
-        emptyConversation.setCustomSpacing(12, after: views[0])
+        let color: NSColor = theme.isClassic ? .tertiaryLabelColor : .themeSecondaryText
+        let title = NSTextField(labelWithString: ConversationWindow.noAccountTitle)
+        title.font = .preferredFont(forTextStyle: .title2)
+        title.textColor = color
+        let detail = NSTextField(labelWithString: ConversationWindow.noAccountDetail)
+        detail.textColor = color
+        emptyConversation.setViews([title, detail], in: .center)
     }
+
+    static let noAccountTitle = "No Account"
+    static let noAccountDetail = "Add an account to read your conversations."
 
     static var transcriptLinkAttributes: [NSAttributedString.Key: Any] {
         [.foregroundColor: NSColor.themeLink, .underlineStyle: NSUnderlineStyle.single.rawValue, .cursor: NSCursor.pointingHand]
     }
 
-    /// The empty-state motif in the colors the wallpaper gives it.
-    private static func emptyMotifColors(_ theme: Theme, _ motif: ThemeMotif) -> [ThemeColor] {
-        if let spec = theme.wallpaper.motifs.first(where: { $0.motif == motif }) { return spec.colors }
-        guard let palette = theme.palette else { return [] }
-        return [palette.accent] + palette.nameColors
-    }
-
-    private static func emptyMotifStyle(_ theme: Theme, _ motif: ThemeMotif) -> MotifStyle {
-        theme.wallpaper.motifs.first { $0.motif == motif }?.style == .glow ? .glow : .fill
-    }
 }
 
 extension NSView {

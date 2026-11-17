@@ -27,7 +27,7 @@ import NevermoreCore
         ]
 
         // MARK: Keyboard dispatch (injected callbacks avoid real windows/network)
-        let staticCollection = CollectionWindow(owner: owner, title: "Static self-check", records: rows, kind: .search, source: nil)
+        let staticCollection = CollectionWindow(owner: owner, title: "Static self-check", records: rows, kind: .messages, source: nil)
         check("collection tables reject stale row callbacks after data changes") { staticCollection.tableView(staticCollection.table, viewFor: nil, row: rows.count) == nil }
         staticCollection.findPrevious(nil)
         check("Find Previous starts from the last collection result") { staticCollection.table.selectedRow == rows.count - 1 }
@@ -59,7 +59,7 @@ import NevermoreCore
         check("Command-R without a source performs no refresh") { staticCollection.status.stringValue == beforeNoSource && !staticCollection.isLoading }
 
         // A real close must clear private rows and reject delayed results.
-        let escapeCollection = CollectionWindow(owner: owner, title: "Escape self-check", records: rows, kind: .search, source: nil)
+        let escapeCollection = CollectionWindow(owner: owner, title: "Escape self-check", records: rows, kind: .messages, source: nil)
         if let event = key(53, window: escapeCollection.window, characters: "\u{1b}") { escapeCollection.table.keyDown(with: event) }
         check("Escape closes the collection window and clears its rows") { escapeCollection.isClosed && escapeCollection.records.isEmpty && escapeCollection.selected == nil }
 
@@ -129,7 +129,7 @@ import NevermoreCore
         session.revokedChannels.remove("collection-beta")
 
         let windowsBeforeRevoked = owner.app.windows.count
-        let revokedCollection = CollectionWindow(owner: owner, title: "Revoked self-check", records: rows, kind: .search, source: nil)
+        let revokedCollection = CollectionWindow(owner: owner, title: "Revoked self-check", records: rows, kind: .messages, source: nil)
         session.revokedChannels.insert("collection-beta")
         revokedCollection.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         if let event = key(36, window: revokedCollection.window) { revokedCollection.table.keyDown(with: event) }
@@ -169,7 +169,7 @@ import NevermoreCore
         let originalOwnerClosed = owner.isClosed
         owner.isClosed = true
         defer { owner.isClosed = originalOwnerClosed }
-        let ownerClosed = CollectionWindow(owner: owner, title: "Owner closed self-check", records: rows, kind: .search, source: nil)
+        let ownerClosed = CollectionWindow(owner: owner, title: "Owner closed self-check", records: rows, kind: .messages, source: nil)
         let appliedOwnerClosed = ownerClosed.apply(rows: rows, generation: ownerClosed.pager.generation, refresh: true)
         check("a closed conversation owner rejects collection results") { !appliedOwnerClosed }
 

@@ -293,7 +293,7 @@ public struct ThemePalette: Sendable, Equatable {
 
 /// Fonts a theme asks for. Missing fonts fall back to the system font.
 public struct ThemeTypography: Sendable, Equatable {
-    /// PostScript name for sender names and the empty-state title.
+    /// PostScript name for sender names.
     public let displayFont: String?
     public let bodyDesign: ThemeBodyDesign
 
@@ -321,14 +321,10 @@ public struct Theme: Sendable, Identifiable, Equatable {
     public let palette: ThemePalette?
     public let typography: ThemeTypography
     public let wallpaper: ThemeWallpaper
-    public let emptyTitle: String
-    public let emptyDetail: String
-    /// Drawn large above the empty-state text; `nil` shows none.
-    public let emptyMotif: ThemeMotif?
     public let celebration: ThemeCelebration
 
     public init(id: ThemeID, name: String, tagline: String, tone: ThemeTone, palette: ThemePalette?, typography: ThemeTypography = .system,
-                wallpaper: ThemeWallpaper = .none, emptyTitle: String, emptyDetail: String, emptyMotif: ThemeMotif? = nil, celebration: ThemeCelebration = .none) {
+                wallpaper: ThemeWallpaper = .none, celebration: ThemeCelebration = .none) {
         self.id = id
         self.name = name
         self.tagline = tagline
@@ -336,9 +332,6 @@ public struct Theme: Sendable, Identifiable, Equatable {
         self.palette = palette
         self.typography = typography
         self.wallpaper = wallpaper
-        self.emptyTitle = emptyTitle
-        self.emptyDetail = emptyDetail
-        self.emptyMotif = emptyMotif
         self.celebration = celebration
     }
 

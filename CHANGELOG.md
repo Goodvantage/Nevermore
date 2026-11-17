@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Play GIFs in conversations. Uploaded GIFs and GIFs sent from Raven's
+  GIF picker (hosted by KLIPY, GIPHY or Tenor) animate while they are in
+  view and stay still under Reduce Motion. Settings ▸ GIFs turns loading
+  GIFs in messages off; other remote images are never loaded.
+- Send GIFs from KLIPY or GIPHY with Conversation ▸ Send GIF… (⌃⌘G) or
+  the GIF button beside the composer. Search needs your own key from the
+  service, kept in the Keychain. A GIF goes out as its own message, in the
+  form Raven's web client shows, and carries a reply you were writing.
+
 ## 0.1.0-beta.3
 
 - Add a compact message-formatting toolbar, including highlighting, inline

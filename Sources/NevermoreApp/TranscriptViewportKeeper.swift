@@ -168,6 +168,32 @@ import NevermoreCore
 @MainActor class LiveResizeTextView: NSTextView {
     var liveResizeWillEnd: (() -> Void)?
     var liveResizeDidEnd: (() -> Void)?
+    /// True while AppKit tracks a press: link clicks and selection drags
+    /// run a nested event loop inside `mouseDown`, where main-actor work
+    /// keeps running. AppKit reads the clicked link at the press and can
+    /// deliver it after that loop without having retained it, so replacing
+    /// the text there freed it: the delegate then crashed retaining the
+    /// link. Renders wait for `pressDidEnd` instead.
+    private(set) var isTrackingPress = false
+    var pressDidEnd: (() -> Void)?
+    /// The text `clearText()` replaced under a press, kept until it ends.
+    private var textUnderPress: NSAttributedString?
+
+    override func mouseDown(with event: NSEvent) {
+        isTrackingPress = true
+        super.mouseDown(with: event)
+        isTrackingPress = false
+        textUnderPress = nil
+        pressDidEnd?()
+    }
+
+    /// Empties the text at once, also under a press: what the owner may no
+    /// longer show must not wait for the press like a render does. The old
+    /// text, and with it the clicked link, lives on unseen until it ends.
+    func clearText() {
+        if isTrackingPress, textUnderPress == nil, let textStorage { textUnderPress = NSAttributedString(attributedString: textStorage) }
+        string = ""
+    }
 
     override func viewDidEndLiveResize() {
         liveResizeWillEnd?()

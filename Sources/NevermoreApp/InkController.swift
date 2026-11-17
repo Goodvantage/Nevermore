@@ -670,7 +670,8 @@ import NevermoreCore
     // MARK: Take back
 
     /// Returns a queued message to the composer: the reverse of a send.
-    private func takeBack(_ id: UUID) {
+    /// A GIF is only cancelled.
+    func takeBack(_ id: UUID) {
         guard let session = owner.session, let operation = pending.first(where: { $0.operation.id == id })?.operation else { return }
         takeBack(id, in: session, channelID: operation.channelID)
     }
@@ -685,6 +686,17 @@ import NevermoreCore
             if let target { target.status.stringValue = message }
             else { session.fail(AppError.message(message)) }
             NSSound.beep()
+        }
+        // A GIF never was the draft, so whatever the composer holds stays
+        // and nothing flies into it.
+        if pending.first(where: { $0.operation.id == id })?.operation.isGIF == true {
+            Task { @MainActor in
+                do {
+                    guard try await session.takeBackGIF(id: id) != nil else { report("That message has already left."); return }
+                    InkSounds.play(.takeBack)
+                } catch { report(error.localizedDescription) }
+            }
+            return
         }
         let composing = window.app.windows.contains { $0.isCurrent(session, channelID: channelID) && $0.composer.hasMarkedText() }
         if composing || (showing && (!window.composer.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !window.attachments.isEmpty || window.replyTo != nil || window.editing != nil || window.isAcceptingSend)) {

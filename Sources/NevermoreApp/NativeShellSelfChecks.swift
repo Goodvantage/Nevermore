@@ -141,6 +141,8 @@ import NevermoreCore
         let storesCommandReturn = defaults.bool(forKey: ComposerSendKey.defaultsKey)
         settings.sendKey.selectItem(at: 0); settings.changeSendKey()
         results.append(("the send key popup names both choices and stores the chosen one", listsBothKeys && storesCommandReturn && !defaults.bool(forKey: ComposerSendKey.defaultsKey)))
+
+        results += InterfaceSoundSelfChecks.checkSettings(settings)
         return results
     }
 

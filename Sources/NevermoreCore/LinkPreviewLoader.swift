@@ -70,11 +70,14 @@ private struct ProtocolClassBox: @unchecked Sendable {
 enum FetchKind: Sendable {
     case html
     case image
+    /// A GIF from a GIF service, shown in the transcript.
+    case media
 
     var maximumBytes: Int {
         switch self {
         case .html: return LinkPreviewPolicy.maximumHTMLBytes
         case .image: return LinkPreviewPolicy.maximumImageBytes
+        case .media: return GIFMediaPolicy.maximumMediaBytes
         }
     }
 
@@ -83,14 +86,14 @@ enum FetchKind: Sendable {
     var acceptsPartialData: Bool {
         switch self {
         case .html: return true
-        case .image: return false
+        case .image, .media: return false
         }
     }
 
     var stopsAtHeadEnd: Bool {
         switch self {
         case .html: return true
-        case .image: return false
+        case .image, .media: return false
         }
     }
 
@@ -98,6 +101,7 @@ enum FetchKind: Sendable {
         switch self {
         case .html: return "text/html,application/xhtml+xml;q=0.9"
         case .image: return "image/png,image/jpeg,image/gif,image/webp,image/avif,image/heic"
+        case .media: return "image/gif,image/webp;q=0.9,image/png;q=0.8"
         }
     }
 
@@ -105,7 +109,7 @@ enum FetchKind: Sendable {
         let contentType = response.value(forHTTPHeaderField: "Content-Type")
         switch self {
         case .html: return LinkPreviewPolicy.acceptsHTML(contentType: contentType)
-        case .image: return LinkPreviewPolicy.acceptsImage(contentType: contentType)
+        case .image, .media: return LinkPreviewPolicy.acceptsImage(contentType: contentType)
         }
     }
 }
@@ -208,6 +212,14 @@ public actor LinkPreviewLoader: LinkPreviewLoading {
         return data
     }
 
+    /// A GIF from a GIF service, through the same checked transport as
+    /// preview pictures but with a larger cap. Not cached here: the caller
+    /// keeps the decoded frames.
+    public func mediaData(for url: URL) async -> Data? {
+        guard GIFMediaPolicy.isServiceMedia(url), LinkPreviewPolicy.isEligible(url) else { return nil }
+        return await fetch(url, kind: .media)?.data
+    }
+
     // MARK: - Fetch pipeline
 
     private func fetchPreview(for url: URL) async -> LinkPreview? {
@@ -237,6 +249,8 @@ public actor LinkPreviewLoader: LinkPreviewLoading {
             // check before the next request leaves the app.
             guard let target = result.redirectTarget ?? locationTarget(response, from: current) else { return nil }
             guard LinkPreviewPolicy.isEligible(target) else { return nil }
+            // A GIF service may move its media between its own hosts only.
+            if kind == .media, !GIFMediaPolicy.isServiceMedia(target) { return nil }
             redirects += 1
             current = target
         }

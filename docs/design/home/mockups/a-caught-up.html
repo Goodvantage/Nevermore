@@ -1,0 +1,63 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>A · All caught up</title>
+<link rel="stylesheet" href="base.css">
+<script src="chrome.js"></script>
+<style>
+  .hero { position: absolute; left: 0; right: 0; top: 92px; text-align: center; }
+  .hero .wire { position: relative; width: 420px; height: 96px; margin: 0 auto; }
+  .hero .moon { position: absolute; left: 50%; top: -70px; width: 190px; height: 190px; margin-left: -95px; border-radius: 50%; background: var(--moon); box-shadow: 0 0 60px 6px var(--moon); opacity: .95; }
+  .hero .wire .line { position: absolute; left: 0; right: 0; bottom: -18px; width: 420px; height: 40px; }
+  .hero h1 { font-family: var(--display); font-weight: var(--display-weight); letter-spacing: var(--display-spacing); font-size: 34px; margin: 26px 0 8px; }
+  .hero p { font-size: 15px; color: var(--text2); margin: 0; }
+  .hero .since { font-size: 12.5px; color: var(--text3); margin-top: 6px; font-family: var(--sys); }
+  .strip { position: absolute; left: 50%; transform: translateX(-50%); top: 392px; width: 760px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .strip .card { padding: 13px 15px; min-height: 104px; }
+  .strip .k { font-family: var(--sys); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text2); margin-bottom: 7px; }
+  .strip .v { font-family: var(--sys); font-size: 13px; font-weight: 600; }
+  .strip .s { font-family: var(--sys); font-size: 12px; color: var(--text2); margin-top: 2px; }
+  .faces { display: flex; gap: 6px; margin-top: 6px; }
+  .acts { position: absolute; left: 50%; transform: translateX(-50%); top: 530px; display: flex; gap: 10px; }
+  .acts .btn { height: 32px; padding: 0 14px; }
+  .acts .kbd { margin-left: 2px; }
+</style></head>
+<body data-theme="vaporwave" data-caught-up>
+<div class="window">
+  <div class="wallpaper"></div>
+  <aside class="sidebar"></aside>
+  <section class="pane">
+    <div class="toolbar"></div>
+    <div class="content">
+      <div class="hero" id="hero"></div>
+      <div class="strip">
+        <div class="card"><div class="k">Next up</div><div class="v">Review onboarding copy</div><div class="s">Reminder at 15:00 · # design</div></div>
+        <div class="card"><div class="k">Unfinished</div><div class="v">2 drafts</div><div class="s">“I think we should drop the…” in # design<br>“Sounds good, I’ll…” to Priya</div></div>
+        <div class="card"><div class="k">Around now</div><div class="faces"><script>document.write(avatar("mara",28)+avatar("aiko",28)+avatar("priya",28)+avatar("tomas",28))</script></div><div class="s" style="margin-top:7px">Léa: 🌴 Away until Monday</div></div>
+      </div>
+      <div class="acts">
+        <div class="glass btn">New Message <span class="kbd">⌘N</span></div>
+        <div class="glass btn">Go to Conversation <span class="kbd">⌘O</span></div>
+        <div class="glass btn">Later <span class="kbd">3</span></div>
+      </div>
+    </div>
+  </section>
+</div>
+<script>
+  // The same raven art and line in every theme; only the colours change.
+  document.addEventListener("DOMContentLoaded", () => {
+    const ink = "var(--raven)", eye = "var(--moon)";
+    // Stand each bird's feet on the wire: y = 14 + 40t(1-t) in the wire's 420 x 40 box.
+    const perch = (x, glance, w) => {
+      const t = (x + w * 0.5) / 420, y = 14 + 40 * t * (1 - t), h = w * 14 / 16;
+      return raven({ ink, eye, glance, w, style: `position:absolute;left:${x}px;bottom:${(22 - y - h * 0.025).toFixed(1)}px` });
+    };
+    document.getElementById("hero").innerHTML = `
+      <div class="wire">
+        <div class="moon"></div>
+        <svg class="line" viewBox="0 0 420 40" preserveAspectRatio="none"><path d="M0 14 Q210 34 420 14" style="stroke:var(--text3);fill:none" stroke-width="1.5"/></svg>
+        ${perch(96, 0, 58)}${perch(180, -15, 64)}${perch(270, 15, 54)}
+      </div>
+      <h1>Nothing more.</h1><p>You’re all caught up. The ravens are resting.</p>
+      <div class="since">Last unread cleared at 13:41 in # releases</div>`;
+  });
+</script>
+</body></html>

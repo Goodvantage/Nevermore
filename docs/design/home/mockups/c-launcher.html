@@ -1,0 +1,69 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>C · Launcher</title>
+<link rel="stylesheet" href="base.css">
+<script src="chrome.js"></script>
+<style>
+  .stage { position: absolute; left: 50%; transform: translateX(-50%); top: 40px; width: 600px; }
+  .title { text-align: center; font-family: var(--display); font-weight: var(--display-weight); letter-spacing: var(--display-spacing); font-size: 26px; margin-bottom: 4px; }
+  .sub { text-align: center; font-family: var(--sys); font-size: 13px; color: var(--text2); margin-bottom: 18px; }
+  .sub b { color: var(--text); }
+  .field { display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 16px; border-radius: 16px; font-family: var(--sys); font-size: 16px; color: var(--text3); }
+  .field svg { width: 18px; height: 18px; color: var(--text2); }
+  .field .kbd { margin-left: auto; }
+  .field .caret { width: 1.5px; height: 20px; background: var(--accent); margin-left: -6px; }
+  .list { margin-top: 10px; padding: 6px; border-radius: 16px; }
+  .list .h { font-family: var(--sys); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text2); padding: 6px 10px 4px; }
+  .li { display: flex; align-items: center; gap: 11px; height: 44px; padding: 0 10px; border-radius: 10px; font-family: var(--sys); }
+  .li.sel { background: var(--select); box-shadow: inset 0 0 0 1px var(--accent); }
+  .li .chan { width: 28px; height: 28px; font-size: 14px; border-radius: 8px; }
+  .li .nm { font-weight: 600; font-size: 13.5px; white-space: nowrap; }
+  .li .tx { color: var(--text2); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+  .li .pill { font-size: 11px; font-weight: 700; color: var(--accent-ink); background: var(--accent); border-radius: 999px; padding: 1px 7px; }
+  .li .pill.soft { background: var(--well); color: var(--text2); }
+  .li .k { color: var(--text3); font-size: 11.5px; }
+  .acts { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .acts .btn { height: 30px; }
+  .acts .btn .kbd { height: 16px; font-size: 10px; }
+</style></head>
+<body data-theme="synthwave">
+<div class="window">
+  <div class="wallpaper"></div>
+  <aside class="sidebar"></aside>
+  <section class="pane">
+    <div class="toolbar"></div>
+    <div class="content">
+      <div class="stage">
+        <div class="title" id="title"></div>
+        <div class="sub"><b>2 mentions</b> · 4 conversations with news · next reminder at 15:00</div>
+        <div class="glass field" style="position:relative"><span id="perch" style="position:absolute;right:64px;top:-25px;line-height:0"></span>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
+          <span class="caret"></span><span>Go to a conversation, person or message…</span><span class="kbd">⌘O</span>
+        </div>
+        <div class="glass list">
+          <div class="h">Pick up where you left off</div>
+          <div class="li sel"><span class="chan">#</span><span class="nm">design</span><span class="tx"><b class="name-0">Mara</b> <span class="mention">@you</span> could you look at the new onboarding illustrations…</span><span class="pill">3</span><span class="kbd">↩</span></div>
+          <div class="li"><script>document.write(avatar("tomas",28))</script><span class="nm">Tomás Ferreira</span><span class="tx">Got a minute to pair on the reconnect bug?</span><span class="pill">1</span></div>
+          <div class="li"><span class="chan">#</span><span class="nm">releases</span><span class="tx"><b class="name-3">Jonas:</b> 2.4.1 is tagged. Notarization is running…</span><span class="pill">5</span></div>
+          <div class="li"><script>document.write(avatar("priya",28))</script><span class="nm">Priya Raman</span><span class="tx">✎ Draft: “Sounds good, I’ll switch the appcast key…”</span><span class="pill soft">Draft</span></div>
+          <div class="li"><script>document.write(avatar("mara",28))</script><span class="nm">Mara Lindqvist</span><span class="tx">You: Sending the copy deck after lunch</span><span class="pill">2</span></div>
+          <div class="li"><span class="chan">#</span><span class="nm">general</span><span class="tx"><b class="name-5">Léa:</b> Lunch at the Thai place on Thursday? 🍜</span><span class="pill">1</span></div>
+        </div>
+        <div class="acts">
+          <div class="glass btn">New Message <span class="kbd">⌘N</span></div>
+          <div class="glass btn">Inbox <span class="kbd">⌘1</span></div>
+          <div class="glass btn">Threads <span class="kbd">⌘2</span></div>
+          <div class="glass btn">Later</div>
+          <div class="glass btn">Set Status…</div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+<script>
+  // One title in every theme; a raven from the sidebar perches on the field.
+  document.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("title").textContent = "Where to?";
+    document.getElementById("perch").innerHTML = raven({ ink: "var(--text2)", eye: "var(--bg1)", glance: -15, w: 30 });
+  });
+</script>
+</body></html>

@@ -3,6 +3,16 @@ import QuickLookUI
 import NevermoreCore
 import RavenProtocol
 
+/// How an attachment appears once downloaded.
+enum AttachmentPresentation {
+    /// The attachment's own window with its file actions.
+    case window
+    /// Quick Look alone, over the window the user clicked in. The controller
+    /// joins that window's responder chain, where Quick Look looks for its
+    /// source, and closes when the preview ends.
+    case quickLook(over: NSWindow)
+}
+
 /// Owns the download throughout native preview/drag. External applications
 /// receive an explicit saved copy, whose lifetime is controlled by the user.
 @MainActor final class AttachmentWindow: NSWindowController, NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
@@ -23,18 +33,23 @@ import RavenProtocol
     private let save = NSButton(title: "Save As…", target: nil, action: nil)
     private let share = NSButton(title: "Share…", target: nil, action: nil)
     private let makeSavePanel: @MainActor () -> NSSavePanel
+    /// The window Quick Look shows over without this controller's own.
+    private weak var host: NSWindow?
+    /// Set once Quick Look has shown the file over `host`.
+    private var previewedOverHost = false
     var didClose: (() -> Void)?
+    var showsOwnWindow: Bool { host == nil }
 
-    init(attachment: DownloadedAttachment, messageLink: URL?, active: @escaping () -> Bool, reportError: @escaping (Error) -> Void, makeSavePanel: @escaping @MainActor () -> NSSavePanel = { NSSavePanel() }) {
+    init(attachment: DownloadedAttachment, messageLink: URL?, presentation: AttachmentPresentation = .window, active: @escaping () -> Bool, reportError: @escaping (Error) -> Void, makeSavePanel: @escaping @MainActor () -> NSSavePanel = { NSSavePanel() }) {
         self.makeSavePanel = makeSavePanel
         self.attachment = attachment; self.messageLink = messageLink; self.active = active; self.reportError = reportError
         previewKind = AttachmentPreviewPolicy.kind(filename: attachment.filename, mimeType: attachment.contentType)
         let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 260), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         panel.title = attachment.filename; panel.isReleasedWhenClosed = false
         super.init(window: panel); panel.delegate = self
-        // Quick Look searches the responder chain; standalone windows must
-        // include their controller explicitly. The link is non-owning.
-        if panel.nextResponder !== self { nextResponder = panel.nextResponder; panel.nextResponder = self }
+        if case .quickLook(let over) = presentation, previewKind != .unsupported {
+            host = over; nextResponder = over.nextResponder; over.nextResponder = self
+        } else { joinOwnWindow() }
         let drag = AttachmentDragView(attachment: attachment)
         let preview = NSButton(title: "Quick Look", target: self, action: #selector(previewDownloadedFile))
         preview.isEnabled = previewKind != .unsupported
@@ -60,15 +75,26 @@ import RavenProtocol
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Shows the file in its own window or over the host window.
+    func present(save: Bool) {
+        if host == nil { showWindow(nil) }
+        if save { saveAs() } else { previewDownloadedFile() }
+    }
     @objc func previewDownloadedFile() {
         guard !closed, active(), previewKind != .unsupported else { return }
-        window?.makeKeyAndOrderFront(nil)
+        if let host { host.makeKeyAndOrderFront(nil) } else { window?.makeKeyAndOrderFront(nil) }
         guard let panel = QLPreviewPanel.shared() else { return }
         panel.makeKeyAndOrderFront(nil); panel.updateController()
         guard (panel.currentController as AnyObject?) === self else {
+            if host != nil {
+                // Quick Look did not take the file, so show the file actions.
+                leaveHost(); joinOwnWindow()
+                showWindow(nil)
+            }
             detail.stringValue = "The file is ready. Select this window to preview it."
             return
         }
+        previewedOverHost = host != nil
         panel.reloadData()
     }
     // The SDK's NSObject Quick Look category is nonisolated. Decline any
@@ -89,6 +115,8 @@ import RavenProtocol
         MainActor.assumeIsolated {
             guard (panel.dataSource as AnyObject?) === self else { return }
             panel.dataSource = nil; panel.delegate = nil; panel.orderOut(nil)
+            // A preview without its own window ends with the panel.
+            if previewedOverHost { closeAfterPreview() }
         }
     }
     @objc func saveAs() { Task { _ = await saveCopy() } }
@@ -163,16 +191,53 @@ import RavenProtocol
             panel.dataSource = nil; panel.delegate = nil; panel.orderOut(nil)
         }
     }
+    /// Quick Look calls in while it tears the panel down; close afterwards.
+    /// The task keeps this controller alive, so it never leaves a dangling
+    /// unowned link in the host's responder chain.
+    private func closeAfterPreview() {
+        previewedOverHost = false
+        Task { @MainActor in self.close() }
+    }
+    /// Quick Look searches the responder chain; standalone windows must
+    /// include their controller explicitly. The link is non-owning.
+    /// NSWindowController normally links itself already, and linking it a
+    /// second time would make it its own next responder: AppKit's key event
+    /// routing then walks that loop until it runs out of memory.
+    private func joinOwnWindow() {
+        guard let window, window.nextResponder !== self else { return }
+        nextResponder = window.nextResponder; window.nextResponder = self
+    }
+    /// Leaves the host's responder chain; another preview may have joined
+    /// it after this one, so search rather than assume the position. The
+    /// host's successors stay behind, so they never follow the controller
+    /// into its own window's chain.
+    private func leaveHost() {
+        guard let host else { return }
+        self.host = nil
+        defer { nextResponder = nil }
+        var responder: NSResponder? = host
+        while let current = responder {
+            if current.nextResponder === self { current.nextResponder = nextResponder; return }
+            responder = current.nextResponder
+        }
+    }
     override func close() {
         let panel = savePanel; savePanel = nil
         panel?.cancel(nil)
         super.close()
     }
     func windowWillClose(_ notification: Notification) {
+        // As the panel's delegate, this also hears Quick Look closing.
+        guard notification.object as? NSWindow === window else {
+            if previewedOverHost { closeAfterPreview() }
+            return
+        }
+        guard !closed else { return }
         closed = true; sharingPicker = nil
         savePanel?.cancel(nil); savePanel = nil
         if let observer { NotificationCenter.default.removeObserver(observer); self.observer = nil }
         dismissOwnedPreview()
+        leaveHost()
         if window?.nextResponder === self { window?.nextResponder = nextResponder }; nextResponder = nil
         if QLPreviewPanel.sharedPreviewPanelExists() { QLPreviewPanel.shared()?.updateController() }
         didClose?(); didClose = nil

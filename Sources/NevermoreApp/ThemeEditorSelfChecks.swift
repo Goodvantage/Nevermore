@@ -31,7 +31,6 @@ import NevermoreCore
         custom.gradientAngle = 90
         custom.motifs = []
         custom.ornaments = []
-        custom.emptyTitle = "Boo"
         app.customizeTheme(.halloween, custom, transcripts: .now)
         await owner.renderTask?.value
         owner.window?.contentView?.layoutSubtreeIfNeeded()
@@ -40,7 +39,6 @@ import NevermoreCore
         if let header = ThemeSelfChecks.firstHeader(owner) {
             check("a customized theme can glow its sender names in the system font", header.shadow != nil && header.font?.fontName != preset.typography.displayFont)
         } else { check("the customized transcript has a sender header", false) }
-        check("a customized empty-window title is shown", owner.emptyConversation.views.contains { ($0 as? NSTextField)?.stringValue == "Boo" })
         check("a customization is stored under its preset",
               ThemeCustomizationArchive.decode(UserDefaults.standard.string(forKey: ThemeManager.DefaultsKey.customizations)) == [.halloween: manager.customization(for: .halloween)]
                 && manager.isCustomized(.halloween) && !manager.isCustomized(.memphis))
@@ -71,7 +69,7 @@ import NevermoreCore
         check("full backdrop opacity draws the preset unchanged", manager.current == ThemeCatalog.memphis && owner.themeBackdrop.isShowingDecorations)
         app.selectTheme(.halloween)
         await owner.renderTask?.value
-        check("returning to a customized preset restores its changes", manager.current.palette?.text == ink && manager.current.emptyTitle == "Boo")
+        check("returning to a customized preset restores its changes", manager.current.palette?.text == ink)
 
         // Edits from the editor reach the transcript once they pause.
         custom.bodyDesign = .monospaced
@@ -124,8 +122,8 @@ import NevermoreCore
         check("the editor opens on the active theme", editor.window?.title == "Customize Halloween" && editor.themeID == .halloween)
         check("the editor shows the theme's current values",
               (editor.control(labeled: "Message text") as? NSColorWell).flatMap { ThemeColor(nsColor: $0.color) } == ink
-                && (editor.control(labeled: "Message text design") as? NSPopUpButton)?.titleOfSelectedItem == "Monospaced"
-                && (editor.control(labeled: "Empty window title") as? NSTextField)?.stringValue == "Boo")
+                && (editor.control(labeled: "Message text design") as? NSPopUpButton)?.titleOfSelectedItem == "Monospaced")
+        check("the editor offers no empty-window title or art", editor.control(labeled: "Empty window title") == nil && editor.control(labeled: "Empty window art") == nil)
 
         func choose(_ label: String, _ color: ThemeColor) {
             guard let well = editor.control(labeled: label) as? NSColorWell else { return }

@@ -201,7 +201,7 @@ import NevermoreCore
         do { for (label, result) in try await PromisedFileBoundarySelfChecks.run(owner: first) { check(result, label) } }
         catch { check(false, "promised-file boundary checks: \(error.localizedDescription)") }
         for (label, result) in PerformanceButtonActionSelfChecks.run() { check(result, label) }
-        do { for (label, result) in try await CollectionAttachmentSelfChecks.run(owner: first) { check(result, label) } }
+        do { for (label, result) in try await SearchAttachmentSelfChecks.run(owner: first) { check(result, label) } }
         catch { check(false, "file search attachment checks: \(error.localizedDescription)") }
         do { for (label, result) in try await CollectionInteractionSelfChecks.run(owner: first) { check(result, label) } }
         catch { check(false, "collection keyboard checks: \(error.localizedDescription)") }
@@ -215,6 +215,10 @@ import NevermoreCore
         catch { check(false, "raven and sticker checks: \(error.localizedDescription)") }
         do { for (label, result) in try await TranscriptLayoutSelfChecks.run(app: app) { check(result, label) } }
         catch { check(false, "transcript layout checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await AnimatedImageSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "animated image checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await GIFPickerSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "GIF picker checks: \(error.localizedDescription)") }
         do { for (label, result) in try await TranscriptViewportSelfChecks.run(app: app) { check(result, label) } }
         catch { check(false, "transcript viewport checks: \(error.localizedDescription)") }
         do { for (label, result) in try await TranscriptPlacementSelfChecks.run(app: app) { check(result, label) } }
@@ -244,6 +248,10 @@ import NevermoreCore
         catch { check(false, "channel avatar fixture: \(error)") }
         do { for (label, result) in try SidebarAvatarSelfChecks.run(app: app) { check(result, label) } }
         catch { check(false, "sidebar profile photos: \(error.localizedDescription)") }
+        do { for (label, result) in try await HomeSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "home fixture: \(error.localizedDescription)") }
+        do { for (label, result) in try await SearchSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "search fixture: \(error.localizedDescription)") }
         for (label, result) in ConversationGeometrySelfChecks.run() { check(result, label) }
         for (label, result) in ComposerSizingSelfChecks.run(app: app) { check(result, label) }
         for (label, result) in await composerFormattingChecks(in: first) { check(result, label) }
@@ -282,7 +290,7 @@ import NevermoreCore
         catch { check(false, "browser authentication callback checks: \(error.localizedDescription)") }
         for (label, result) in OnboardingSelfChecks.run(app: app) { check(result, label) }
         for (label, result) in await ThemeSelfChecks.run(app: app, owner: first) { check(result, label) }
-        let collection = CollectionWindow(owner: first, title: "Privacy fixture", records: [.object(["channel_id": .string("revoked"), "content": .string("Private fixture")]), .object(["channel_id": .string(channel.id), "content": .string("Allowed fixture")])], kind: .search)
+        let collection = CollectionWindow(owner: first, title: "Privacy fixture", records: [.object(["channel_id": .string("revoked"), "content": .string("Private fixture")]), .object(["channel_id": .string(channel.id), "content": .string("Allowed fixture")])], kind: .messages)
         first.collectionWindows.append(collection)
         session.revokedChannels.insert("revoked"); collection.restrictRevoked()
         check(collection.records.count == 1, "collections remove known revoked conversation content")

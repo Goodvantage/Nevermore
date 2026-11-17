@@ -64,6 +64,9 @@ public struct SendOperation: Codable, Sendable, Equatable, Identifiable {
     /// Optional for compatibility with outbox records from earlier builds.
     /// Nil and false both mean a normal send. Frozen at acceptance, never recomputed on retry.
     public var sendSilently: Bool?
+    /// The Raven messages that delivered this send, set on acknowledgement.
+    /// Nil before then and for sends acknowledged by earlier builds.
+    public var messageIDs: [String]?
     public init(id: UUID = UUID(), channelID: String, html: String, replyTo: String? = nil, attachments: [StagedAttachment] = [], createdAt: Date = Date(), state: SendState = .queued, attempts: Int = 0, error: String? = nil, sendSilently: Bool = false) {
         self.id = id
         self.channelID = channelID
@@ -265,6 +268,14 @@ public actor AccountStore {
         }
     }
 
+    /// Every stored draft, for Home's Later module. Rows that no longer
+    /// decode are skipped here; opening their conversation reports them.
+    public func drafts() async throws -> [Draft] {
+        try await queue.read { db in
+            try Data.fetchAll(db, sql: "SELECT payload FROM drafts ORDER BY channelID").compactMap { try? Self.decode(Draft.self, from: $0) }
+        }
+    }
+
     /// Atomically converts the channel's draft into a durable queued
     /// `SendOperation` (fresh client idempotency key) and deletes the draft.
     /// Either both happen or neither does: if the operation cannot be
@@ -296,12 +307,30 @@ public actor AccountStore {
         }
     }
 
+    /// Queues a GIF picked in the conversation as its own message, beside
+    /// the channel's draft, which stays as it is.
+    public func acceptGIF(channelID: String, html: String, replyTo: String? = nil, sendSilently: Bool = false) async throws -> SendOperation {
+        let operation = SendOperation(channelID: channelID, html: try GIFMessage.validatedHTML(html), replyTo: replyTo, sendSilently: sendSilently)
+        try await queue.write { db in try Self.insertOperation(db, operation) }
+        return operation
+    }
+
     /// All non-terminal operations (excludes acknowledged and cancelled).
     /// Terminal rows are retained durably; they are simply not pending work.
     public func operations() async throws -> [SendOperation] {
         try await queue.read { db in
             let rows = try Data.fetchAll(db, sql: "SELECT payload FROM operations WHERE state NOT IN ('acknowledged', 'cancelled') ORDER BY createdAt, id")
             return try rows.map { try Self.decode(SendOperation.self, from: $0) }
+        }
+    }
+
+    /// The messages that sends to `channelID` accepted since `since`
+    /// delivered, as recorded on acknowledgement.
+    public func deliveredMessageIDs(channelID: String, since: Date) async throws -> Set<String> {
+        try await queue.read { db in
+            let rows = try Data.fetchAll(db, sql: "SELECT payload FROM operations WHERE channelID = ? AND state = 'acknowledged' AND createdAt >= ?",
+                                         arguments: [channelID, since.timeIntervalSince1970])
+            return try rows.reduce(into: Set<String>()) { ids, row in ids.formUnion(try Self.decode(SendOperation.self, from: row).messageIDs ?? []) }
         }
     }
 
@@ -358,18 +387,30 @@ public actor AccountStore {
     }
 
     public enum TakeBackResult: Sendable, Equatable {
-        case restored(SendOperation), draftChanged, unavailable
+        /// The send was cancelled and its text is the draft again.
+        case restored(SendOperation)
+        /// The send was cancelled and the draft left alone: a GIF never
+        /// was the draft.
+        case cancelled(SendOperation)
+        case draftChanged, unavailable
     }
 
     /// Cancels the original conversation's send and restores its draft in
     /// one transaction. The caller's empty draft snapshot must still match;
     /// a newer draft or a delivery claim leaves both records untouched.
+    /// A GIF is only cancelled, whatever the draft holds.
     public func takeBack(id: UUID, channelID: String, replacingDraft expected: Draft?) async throws -> TakeBackResult {
-        guard InkRules.canRestoreDraft(expected) else { return .draftChanged }
-        return try await queue.write { db -> TakeBackResult in
+        try await queue.write { db -> TakeBackResult in
             guard let data = try Data.fetchOne(db, sql: "SELECT payload FROM operations WHERE id = ?", arguments: [id.uuidString]) else { return .unavailable }
             var operation = try Self.decode(SendOperation.self, from: data)
             guard operation.channelID == channelID, InkRules.canTakeBack(operation) else { return .unavailable }
+            // A GIF never was the draft: taking it back only cancels it.
+            if operation.isGIF {
+                operation.state = .cancelled
+                try Self.replaceOperation(db, operation)
+                return .cancelled(operation)
+            }
+            guard InkRules.canRestoreDraft(expected) else { return .draftChanged }
             let draftData = try Data.fetchOne(db, sql: "SELECT payload FROM drafts WHERE channelID = ?", arguments: [channelID])
             let current = try draftData.map { try Self.decode(Draft.self, from: $0) }
             guard current == expected else { return .draftChanged }
@@ -436,6 +477,7 @@ public actor AccountStore {
             }
             for message in messages { try Self.upsertMessage(db, message) }
             operation.state = .acknowledged
+            operation.messageIDs = messages.map(\.id)
             try Self.replaceOperation(db, operation)
             try Self.trimMessages(db)
         }

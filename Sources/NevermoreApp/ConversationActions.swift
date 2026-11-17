@@ -58,11 +58,6 @@ extension ConversationWindow {
             }
         }
     }
-    @objc func performSearch() {
-        guard session != nil, !search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        advancedSearch(nil)
-        searchWindow?.runSearch()
-    }
     @objc func inbox() { showCollection(title: "Inbox", method: "raven.api.notifications.get_notifications", kind: .inbox) }
     @objc func threads() { showCollection(title: "Threads", method: "raven.api.threads.get_all_threads", kind: .threads) }
     @objc func showSavedMessages(_ sender: Any?) { showCollection(title: "Saved Messages", method: "raven.api.raven_message.get_saved_messages", kind: .saved) }
@@ -220,11 +215,11 @@ extension ConversationWindow {
     }
     @objc func showPinnedMessages(_ sender: Any?) {
         guard let session, let channel else { return }
-        action { let value = try await session.client.rpc("raven.api.raven_message.get_pinned_messages", arguments: ["channel_id": .string(channel.id)]); self.presentCollection(title: "Pinned Messages · \(channel.title)", records: value.array, kind: .search, session: session) }
+        action { let value = try await session.client.rpc("raven.api.raven_message.get_pinned_messages", arguments: ["channel_id": .string(channel.id)]); self.presentCollection(title: "Pinned Messages · \(channel.title)", records: value.array, kind: .messages, session: session) }
     }
     @objc func showChannelFiles(_ sender: Any?) {
         guard let session, let channel else { return }
-        action { let value = try await session.client.rpc("raven.api.search.get_channel_files", arguments: ["channel_id": .string(channel.id), "limit": .number(100)]); self.presentCollection(title: "Files · \(channel.title)", records: value.array, kind: .search, session: session) }
+        action { let value = try await session.client.rpc("raven.api.search.get_channel_files", arguments: ["channel_id": .string(channel.id), "limit": .number(100)]); self.presentCollection(title: "Files · \(channel.title)", records: value.array, kind: .messages, session: session) }
     }
     @objc func createChannel(_ sender: Any?) {
         guard let session else { return }

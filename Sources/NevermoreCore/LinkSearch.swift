@@ -12,7 +12,10 @@ public enum LinkSearch {
         case .account: break
         case .conversation(let id):
             guard !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw SearchCriteriaError.emptyIdentifier(field: "channel_id") }
-            arguments["channel_id"] = .string(id)
+            // `parent_channel_id` resolves thread replies to their parent
+            // conversation on the server, so it covers the conversation and
+            // its threads; `channel_id` covers the conversation alone.
+            arguments[criteria.includeThreads ? "parent_channel_id" : "channel_id"] = .string(id)
         case .workspace:
             throw SearchCriteriaError.unsupportedLinkWorkspace
         }
@@ -23,6 +26,7 @@ public enum LinkSearch {
         }
         if criteria.savedOnly { arguments["saved"] = .number(1) }
         if criteria.mentionsMe { arguments["mentions_me"] = .number(1) }
+        if criteria.attribute == .reactions { arguments["has_reactions"] = .number(1) }
         return CollectionSource(method: method, arguments: arguments, strategy: .offset(parameter: "start_after"), pageSize: 50)
     }
 

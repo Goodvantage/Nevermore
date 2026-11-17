@@ -346,24 +346,10 @@ import NevermoreCore
         let celebration = popUp(ThemeCelebration.allCases.map { Self.words($0.rawValue) }, label: "Celebration")
         bind(celebration, to: &actions) { [unowned self] in edit { $0.celebration = ThemeCelebration.allCases[celebration.indexOfSelectedItem] } }
         syncs.append { theme, _ in celebration.selectItem(at: ThemeCelebration.allCases.firstIndex(of: theme.celebration) ?? 0) }
-        let art = motifPopUp(label: "Empty window art")
-        bind(art, to: &actions) { [unowned self] in edit { $0.emptyMotif = ThemeMotif.allCases[art.indexOfSelectedItem] } }
-        syncs.append { theme, _ in art.selectItem(at: theme.emptyMotif.flatMap(ThemeMotif.allCases.firstIndex(of:)) ?? 0) }
-        let title = NSTextField(string: "")
-        title.setAccessibilityLabel("Empty window title")
-        title.widthAnchor.constraint(equalToConstant: 280).isActive = true
-        // An emptied field falls back to the preset's title.
-        bind(title, to: &actions) { [unowned self] in
-            edit { $0.emptyTitle = title.stringValue }
-            title.stringValue = theme.emptyTitle
-        }
-        syncs.append { theme, _ in title.stringValue = theme.emptyTitle }
         return grid([
             [label("Sender names:"), display],
             [label("Message text:"), body],
             [label("Celebration:"), celebration],
-            [label("Empty window art:"), art],
-            [label("Empty window title:"), title],
             [label(""), note("The composer always uses the system font. The celebration plays when you switch to this theme.")],
         ])
     }

@@ -16,7 +16,6 @@ import RavenProtocol
         check("reading preserves visible editor formatting without retaining edit metadata") {
             let corpus = [
                 "<p><strong>Bold</strong> <em>italic</em> <u>underlined</u> <s>struck</s> <mark>marked</mark> <a href=\"https://example.invalid\">link</a></p>",
-                "<blockquote><p>Quote</p><ul><li>One<ul><li>Nested</li></ul></li></ul></blockquote>",
                 "<p>Before</p><pre><code>let value = 1\nprint(value)</code></pre><hr><p>After<br>line</p>",
                 "<p><img data-type=\"customEmoji\" src=\"/files/fixture.png\" alt=\":fixture:\"> 👩🏽‍💻</p>"
             ]
@@ -38,6 +37,50 @@ import RavenProtocol
                 if privateMetadata { return false }
             }
             return true
+        }
+        check("reading block quotes indent every paragraph without text markers") {
+            let doc = try RichTextCodec.parse("<blockquote><p><strong>First quoted paragraph with words to wrap.</strong></p><p><em>Second quote</em></p></blockquote><p>Outside</p><blockquote><p>Another</p></blockquote>")
+            let text = NativeRichText.readingString(document: doc)
+            let string = text.string as NSString
+            let first = string.range(of: "First quoted"), second = string.range(of: "Second quote"), outside = string.range(of: "Outside"), another = string.range(of: "Another")
+            guard [first, second, outside, another].allSatisfy({ $0.location != NSNotFound }), !text.string.contains("│") else { return false }
+            let firstID = text.attribute(.nevermoreBodyQuote, at: first.location, effectiveRange: nil) as? String
+            let secondID = text.attribute(.nevermoreBodyQuote, at: second.location, effectiveRange: nil) as? String
+            let anotherID = text.attribute(.nevermoreBodyQuote, at: another.location, effectiveRange: nil) as? String
+            let style = text.attribute(.paragraphStyle, at: second.location, effectiveRange: nil) as? NSParagraphStyle
+            return firstID != nil && firstID == secondID && anotherID != nil && firstID != anotherID && text.attribute(.nevermoreBodyQuote, at: outside.location, effectiveRange: nil) == nil && (style?.firstLineHeadIndent ?? 0) > 0 && style?.firstLineHeadIndent == style?.headIndent
+        }
+        // Reading mode deliberately differs from the editor for quotes (no "│ " text
+        // markers, an indent and a bar attribute), so quotes are checked here rather
+        // than in the editor-equality corpus above. List nesting stays in the marker
+        // text, as in the editor; the quote adds one indent to every paragraph.
+        check("reading quoted nested lists keep the editor text with only the bar attribute") {
+            let doc = try RichTextCodec.parse("<blockquote><p>Quote</p><ul><li>One<ul><li>Nested</li></ul></li></ul></blockquote>")
+            let text = NativeRichText.readingString(document: doc)
+            let editor = NativeRichText.attributedString(document: doc).string
+            let string = text.string as NSString
+            let ranges = ["Quote", "One", "Nested"].map { string.range(of: $0) }
+            guard ranges.allSatisfy({ $0.location != NSNotFound }), !text.string.contains("│"), text.string == editor.replacingOccurrences(of: "│ ", with: "") else { return false }
+            let ids = ranges.map { text.attribute(.nevermoreBodyQuote, at: $0.location, effectiveRange: nil) as? String }
+            let indents = ranges.map { (text.attribute(.paragraphStyle, at: $0.location, effectiveRange: nil) as? NSParagraphStyle)?.headIndent ?? 0 }
+            var privateKeys = Set<NSAttributedString.Key>()
+            text.enumerateAttributes(in: NSRange(location: 0, length: text.length)) { attributes, _, _ in
+                privateKeys.formUnion(attributes.keys.filter { $0.rawValue.hasPrefix("Nevermore.") })
+            }
+            return ids[0] != nil && Set(ids).count == 1 && indents[0] > 0 && Set(indents).count == 1 && privateKeys == [.nevermoreBodyQuote]
+        }
+        check("quoted lists and code retain indentation and export without markers") {
+            let doc = try RichTextCodec.parse("<blockquote><ul><li>list item</li></ul><pre><code>code line</code></pre></blockquote><p>after</p>")
+            let message = RavenMessage(raw: .object(["name": .string("quote-fixture"), "channel_id": .string("fixture"), "text": .string("")]))
+            let rendered = CodePresentation.render(doc, message: message, fontSize: 14, expanded: []).text
+            let text = rendered.string as NSString
+            let list = text.range(of: "list item"), code = text.range(of: "code line"), after = text.range(of: "after")
+            guard [list, code, after].allSatisfy({ $0.location != NSNotFound }) else { return false }
+            let id = rendered.attribute(.nevermoreBodyQuote, at: list.location, effectiveRange: nil) as? String
+            let codeStyle = rendered.attribute(.paragraphStyle, at: code.location, effectiveRange: nil) as? NSParagraphStyle
+            let exported = NSMutableAttributedString(attributedString: rendered)
+            TranscriptView.prepareForExport(exported)
+            return id != nil && rendered.attribute(.nevermoreBodyQuote, at: code.location, effectiveRange: nil) as? String == id && rendered.attribute(.nevermoreBodyQuote, at: after.location, effectiveRange: nil) == nil && (codeStyle?.headIndent ?? 0) > 0 && !exported.string.contains("│") && exported.string.contains("code line")
         }
         check("unedited nested list round-trips exactly") {
             let doc = try RichTextCodec.parse("<ul><li>One<ul><li>Alpha</li><li>Beta</li></ul></li><li>Two</li></ul>")

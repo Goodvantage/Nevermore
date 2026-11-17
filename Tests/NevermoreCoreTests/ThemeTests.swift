@@ -34,7 +34,6 @@ final class ThemeTests: XCTestCase {
         XCTAssertTrue(classic.wallpaper.isEmpty)
         XCTAssertNil(classic.typography.displayFont)
         XCTAssertEqual(classic.typography.bodyDesign, .standard)
-        XCTAssertEqual(classic.emptyTitle, "No Conversation Selected")
     }
 
     func testStoredPreferenceFallsBackToClassic() {
@@ -101,9 +100,9 @@ final class ThemeTests: XCTestCase {
                                    accent: ThemeColor(0xFF2E97), link: ThemeColor(0x3DF5FF), alert: ThemeColor(0xFF6F8E),
                                    nameColors: [ThemeColor(0xFFFFFF), ThemeColor(0xEEEEEE), ThemeColor(0xDDDDDD), ThemeColor(0xCCCCCC)])
         let loud = ThemeWallpaper(motifs: [MotifSpec(.dot, [ThemeColor(0xFFFFFF)])], opacity: 0.9)
-        let theme = Theme(id: .neonFun, name: "Test", tagline: "", tone: .dark, palette: palette, wallpaper: loud, emptyTitle: "t", emptyDetail: "d")
+        let theme = Theme(id: .neonFun, name: "Test", tagline: "", tone: .dark, palette: palette, wallpaper: loud)
         XCTAssertTrue(ThemeAudit.violations(in: theme).contains { $0.role == "text" }, "white motifs at 90% hide white text")
-        let quiet = Theme(id: .neonFun, name: "Test", tagline: "", tone: .dark, palette: palette, wallpaper: ThemeWallpaper(motifs: loud.motifs, opacity: 0.1), emptyTitle: "t", emptyDetail: "d")
+        let quiet = Theme(id: .neonFun, name: "Test", tagline: "", tone: .dark, palette: palette, wallpaper: ThemeWallpaper(motifs: loud.motifs, opacity: 0.1))
         XCTAssertFalse(ThemeAudit.violations(in: quiet).contains { $0.role == "text" })
     }
 
@@ -121,7 +120,7 @@ final class ThemeTests: XCTestCase {
 
     func testAuditFlagsToneMismatch() {
         let light = ThemeCatalog.memphis
-        let mislabeled = Theme(id: light.id, name: light.name, tagline: light.tagline, tone: .dark, palette: light.palette, emptyTitle: "t", emptyDetail: "d")
+        let mislabeled = Theme(id: light.id, name: light.name, tagline: light.tagline, tone: .dark, palette: light.palette)
         XCTAssertTrue(ThemeAudit.problems(in: mislabeled).contains { $0.contains("dark tone over a light backdrop") })
     }
 
@@ -134,7 +133,7 @@ final class ThemeTests: XCTestCase {
                          link: base.link, alert: base.alert, nameColors: names ?? base.nameColors)
         }
         func theme(_ tone: ThemeTone, _ palette: ThemePalette?, wallpaper: ThemeWallpaper = .none) -> Theme {
-            Theme(id: .memphis, name: "Test", tagline: "", tone: tone, palette: palette, wallpaper: wallpaper, emptyTitle: "t", emptyDetail: "d")
+            Theme(id: .memphis, name: "Test", tagline: "", tone: tone, palette: palette, wallpaper: wallpaper)
         }
         let cases: [(Theme, String)] = [
             (theme(.dark, nil), "must follow the system tone"),
@@ -180,7 +179,7 @@ final class ThemeTests: XCTestCase {
         let washedOut = ThemePalette(gradient: hidden.gradient, sidebarTint: hidden.sidebarTint, sidebarTintOpacity: hidden.sidebarTintOpacity,
                                      composerTint: hidden.composerTint, text: ThemeColor(0x777777), secondaryText: hidden.secondaryText,
                                      accent: hidden.accent, link: hidden.link, alert: hidden.alert, nameColors: hidden.nameColors)
-        let flagged = ThemeAudit.violations(in: Theme(id: .memphis, name: "Test", tagline: "", tone: .light, palette: washedOut, emptyTitle: "t", emptyDetail: "d"))
+        let flagged = ThemeAudit.violations(in: Theme(id: .memphis, name: "Test", tagline: "", tone: .light, palette: washedOut))
         XCTAssertTrue(flagged.contains { $0.role == "code text" })
     }
 

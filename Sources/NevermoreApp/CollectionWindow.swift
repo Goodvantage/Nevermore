@@ -3,7 +3,9 @@ import RavenProtocol
 import NevermoreCore
 
 @MainActor final class CollectionWindow: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSWindowDelegate, NSToolbarDelegate {
-    enum Kind: Equatable { case search, inbox, threads, saved, reminders, scheduled }
+    /// `messages` is a fixed list of messages (pinned messages, a
+    /// conversation's files) whose rows open the message.
+    enum Kind: Equatable { case messages, inbox, threads, saved, reminders, scheduled }
     weak var conversationOwner: ConversationWindow?
     let session: AccountSession?
     /// The rows currently shown (the filtered view of `pager.records`).
@@ -30,15 +32,6 @@ import NevermoreCore
     var batchTask: Task<Void, Never>?
     var batchGeneration = UUID()
     var isBatchRunning = false
-    let attachmentTransport: CollectionAttachmentActions.Transport?
-    var attachmentTask: Task<Void, Never>?
-    var attachmentRevision = UUID()
-    var attachmentCanonicalParents: [String] = []
-    var attachmentIdentity: SearchAttachment?
-    var searchAttachmentWindows: [AttachmentWindow] = []
-    var attachmentObservers: [NSObjectProtocol] = []
-    let previewAttachmentButton = NSButton(title: "Quick Look", target: nil, action: nil)
-    let saveAttachmentButton = NSButton(title: "Save Attachment…", target: nil, action: nil)
     var loadTask: Task<Void, Never>?
     private(set) var isClosed = false
     var isLoading = false
@@ -47,8 +40,7 @@ import NevermoreCore
         guard let session, let owner = conversationOwner else { return false }
         return !isClosed && owner.isCurrent(session)
     }
-    init(owner: ConversationWindow, title: String, records: [JSONValue], kind: Kind, source: CollectionSource? = nil, batchTransport: CollectionBatchActions.Transport? = nil, attachmentTransport: CollectionAttachmentActions.Transport? = nil) {
-        self.attachmentTransport = owner.session?.demo == true ? attachmentTransport : nil
+    init(owner: ConversationWindow, title: String, records: [JSONValue], kind: Kind, source: CollectionSource? = nil, batchTransport: CollectionBatchActions.Transport? = nil) {
         self.batchTransport = owner.session?.demo == true ? batchTransport : nil
         self.conversationOwner = owner; self.session = owner.session; self.kind = kind; self.source = source
         self.pager = CollectionPager(records: records, pageSize: source?.pageSize ?? CollectionSource.defaultPageSize)
@@ -69,20 +61,6 @@ import NevermoreCore
         markReadButton.setAccessibilityLabel("Mark selected inbox notifications read")
         markReadButton.toolTip = "Select up to 100 inbox items to mark their notifications read."
         markReadButton.isHidden = kind != .inbox
-        previewAttachmentButton.target = self; previewAttachmentButton.action = #selector(previewSearchAttachment)
-        previewAttachmentButton.setAccessibilityLabel("Quick Look selected file search result"); previewAttachmentButton.toolTip = "Space previews the selected file when the results table has focus."
-        saveAttachmentButton.target = self; saveAttachmentButton.action = #selector(saveSearchAttachment)
-        saveAttachmentButton.setAccessibilityLabel("Save selected file search result"); saveAttachmentButton.toolTip = "Command-Shift-S saves the selected file."
-        saveAttachmentButton.keyEquivalent = "s"; saveAttachmentButton.keyEquivalentModifierMask = [.command, .shift]
-        if supportsSearchAttachments {
-            table.onPreviewAttachment = { [weak self] in self?.previewSearchAttachment() }
-            table.onSaveAttachment = { [weak self] in self?.saveSearchAttachment() }
-            let menu = NSMenu()
-            for (title, action) in [("Quick Look Attachment", #selector(previewSearchAttachment)), ("Save Attachment…", #selector(saveSearchAttachment))] {
-                let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
-            }
-            table.menu = menu
-        }
         search.placeholderString = "Filter"
         search.sendsSearchStringImmediately = true; search.sendsWholeSearchString = false
         search.target = self; search.action = #selector(applySearch); search.delegate = self
@@ -99,10 +77,10 @@ import NevermoreCore
         let toolbar = NSToolbar(identifier: source == nil ? "NevermoreCollectionToolbar.static" : "NevermoreCollectionToolbar.refreshable"); toolbar.delegate = self; toolbar.displayMode = .iconOnly
         window.toolbar = toolbar; window.toolbarStyle = .unified
         window.initialFirstResponder = table
-        let bar = NSStackView(); bar.setViews([status], in: .leading); bar.setViews([moreButton, markReadButton, previewAttachmentButton, saveAttachmentButton, manageButton, openButton], in: .trailing); bar.spacing = 8
+        let bar = NSStackView(); bar.setViews([status], in: .leading); bar.setViews([moreButton, markReadButton, manageButton, openButton], in: .trailing); bar.spacing = 8
         for view in [scroll, bar, emptyState] as [NSView] { view.translatesAutoresizingMaskIntoConstraints = false; window.contentView?.addSubview(view) }
         NSLayoutConstraint.activate([scroll.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor), scroll.topAnchor.constraint(equalTo: window.contentView!.safeAreaLayoutGuide.topAnchor), scroll.bottomAnchor.constraint(equalTo: bar.topAnchor, constant: -10), bar.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 16), bar.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -16), bar.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor, constant: -12), emptyState.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), emptyState.centerYAnchor.constraint(equalTo: scroll.centerYAnchor)])
-        installSearchAttachmentObservers(); updateChrome()
+        updateChrome()
     }
     required init?(coder: NSCoder) { fatalError() }
     // MARK: Native keyboard dispatch
@@ -131,7 +109,7 @@ import NevermoreCore
         guard let responder = window?.firstResponder else { return false }
         return (responder as? NSTextView)?.hasMarkedText() ?? false
     }
-    func tableViewSelectionDidChange(_ notification: Notification) { validateSearchAttachment(); updateChrome() }
+    func tableViewSelectionDidChange(_ notification: Notification) { updateChrome() }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard control === search, !textView.hasMarkedText() else { return false }
         let modifiers: NSEvent.ModifierFlags = {
@@ -156,8 +134,6 @@ import NevermoreCore
         if source != nil, records.isEmpty, !isLoading { refresh() }
     }
     func windowWillClose(_ notification: Notification) {
-        cancelSearchAttachment()
-        for token in attachmentObservers { NotificationCenter.default.removeObserver(token) }; attachmentObservers.removeAll()
         // Delayed results must not repopulate a closed collection.
         batchGeneration = UUID(); batchTask?.cancel(); batchTask = nil; isBatchRunning = false
         isClosed = true; pager.invalidate(); loadTask?.cancel(); pager.records.removeAll(); records.removeAll(); table.reloadData()
@@ -170,7 +146,7 @@ import NevermoreCore
         let record = records[row]
         let html = record["text"].string ?? record["message_text"].string ?? ""
         let text = (try? RichTextCodec.plainText(RichTextCodec.parse(html))) ?? ""
-        let value = source?.method == LinkSearch.method ? LinkSearch.preview(record) : text.isEmpty ? record["content"].string ?? record["message_content"].string ?? record["description"].string ?? record["name"].string ?? "Item" : text
+        let value = text.isEmpty ? record["content"].string ?? record["message_content"].string ?? record["description"].string ?? record["name"].string ?? "Item" : text
         let cell = tableView.makeView(withIdentifier: CollectionRowCell.identifier, owner: self) as? CollectionRowCell ?? CollectionRowCell()
         cell.configure(title: String(value.prefix(220)).replacingOccurrences(of: "\n", with: " "), detail: detail(for: record))
         return cell
@@ -191,7 +167,9 @@ import NevermoreCore
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, Self.refreshItem, Self.searchItem] }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         if itemIdentifier == Self.searchItem {
-            let item = NSSearchToolbarItem(itemIdentifier: itemIdentifier); item.searchField = search; item.label = "Filter"; item.preferredWidthForSearchField = 220
+            let field = flag ? search : NSSearchField()
+            if !flag { field.placeholderString = "Filter" }
+            let item = GlassSearchToolbarItem(itemIdentifier: itemIdentifier, searchField: field, minimumWidth: 220); item.label = "Filter"
             return item
         }
         guard itemIdentifier == Self.refreshItem else { return nil }
@@ -199,7 +177,7 @@ import NevermoreCore
         return item
     }
     // MARK: Local scoped filter (native search field)
-    @objc func applySearch() { cancelSearchAttachment(); applyFilter(); table.reloadData(); updateChrome() }
+    @objc func applySearch() { applyFilter(); table.reloadData(); updateChrome() }
     @objc func findNext(_ sender: Any?) { moveResult(1) }
     @objc func findPrevious(_ sender: Any?) { moveResult(-1) }
     private func moveResult(_ delta: Int) {
@@ -216,7 +194,6 @@ import NevermoreCore
         records = pager.records.filter { haystack($0).contains(needle) }
     }
     private func haystack(_ record: JSONValue) -> String {
-        if source?.method == LinkSearch.method { return LinkSearch.preview(record).lowercased() }
         var parts: [String] = []
         for key in ["description","name","id","channel_id","parent_channel_id","channel_name","status","error","scheduled_time","remind_at","notification_type"] {
             if let value = record[key].string { parts.append(value) }
@@ -228,7 +205,6 @@ import NevermoreCore
     // MARK: Refresh / Load More (read-only RPCs)
     @objc func refresh() {
         guard active, source != nil, !isLoading, !isBatchRunning else { return }
-        cancelSearchAttachment()
         isLoading = true; statusMessage = ""; updateChrome()
         loadTask?.cancel()
         let generation = pager.beginRefresh()
@@ -260,7 +236,6 @@ import NevermoreCore
     }
     @objc func loadMore() {
         guard active, let source, source.supportsPaging, pager.hasMore, !isLoading, !isBatchRunning else { return }
-        cancelSearchAttachment()
         isLoading = true; statusMessage = ""; updateChrome()
         let generation = pager.generation
         let offset = pager.nextOffset
@@ -282,9 +257,7 @@ import NevermoreCore
     @discardableResult func apply(rows: [JSONValue], generation: Int, refresh: Bool) -> Bool {
         guard let session, let owner = conversationOwner, owner.session === session, !session.stopped,
               !isClosed, !owner.isClosed, isWindowLoaded, window != nil, pager.generation == generation else { return false }
-        cancelSearchAttachment()
-        var filtered = source?.method == LinkSearch.method ? rows.map(LinkSearch.normalize) : source?.method == "raven.api.search.sqlite_search" ? rows.map(RavenSearchResult.normalize) : rows
-        if let source { filtered = CollectionPaging.scopedSearchRows(filtered, source: source) }
+        var filtered = rows
         filtered.removeAll { session.revokedChannels.contains($0["channel_id"].string ?? "") || session.revokedChannels.contains($0["parent_channel_id"].string ?? "") }
         let oldOffset = refresh ? 0 : pager.nextOffset
         let applied = refresh ? pager.applyRefresh(filtered, generation: generation) : pager.applyAppend(filtered, generation: generation)
@@ -297,11 +270,9 @@ import NevermoreCore
         guard let session else { return }
         let revoked = session.revokedChannels
         pager.records.removeAll { revoked.contains($0["channel_id"].string ?? "") || revoked.contains($0["parent_channel_id"].string ?? "") }
-        applyFilter(); validateSearchAttachment(); table.reloadData(); updateChrome()
+        applyFilter(); table.reloadData(); updateChrome()
     }
     func updateChrome() {
-        previewAttachmentButton.isHidden = !supportsSearchAttachments; saveAttachmentButton.isHidden = !supportsSearchAttachments
-        previewAttachmentButton.isEnabled = canReadSearchAttachment; saveAttachmentButton.isEnabled = canReadSearchAttachment
         let total = pager.records.count
         let hasSelection = active && selected != nil && !isBatchRunning
         if let column = table.tableColumns.first {
@@ -318,7 +289,6 @@ import NevermoreCore
         markReadButton.isEnabled = canMarkSelectedRead
         if isBatchRunning { status.stringValue = "Marking selected notifications read…"; status.textColor = .secondaryLabelColor }
         else if isLoading { status.stringValue = "Loading…"; status.textColor = .secondaryLabelColor }
-        else if attachmentTask != nil { status.stringValue = "Downloading selected attachment…"; status.textColor = .secondaryLabelColor }
         else if !statusMessage.isEmpty { status.stringValue = statusMessage; status.textColor = .systemRed }
         else if let source { status.stringValue = (records.count == total ? "\(total) items" : "\(records.count) of \(total) shown") + (source.supportsPaging && pager.hasMore ? " · more available" : ""); status.textColor = .secondaryLabelColor }
         else { status.stringValue = records.count == total ? "\(total) items" : "\(records.count) of \(total) shown"; status.textColor = .secondaryLabelColor }
@@ -397,11 +367,9 @@ import NevermoreCore
 
 extension CollectionWindow.Kind {
     /// Verified server contracts per collection, exposed for root wiring.
-    /// `sqlite_search` has no offset/cursor argument in the pinned contract,
-    /// so search collections are `.none` and never page.
     var source: CollectionSource? {
         switch self {
-        case .search: return CollectionSource(method: "raven.api.search.sqlite_search", strategy: .none)
+        case .messages: return nil
         case .inbox: return CollectionSource(method: "raven.api.notifications.get_notifications", strategy: .offset(parameter: "start"))
         case .threads: return CollectionSource(method: "raven.api.threads.get_all_threads", strategy: .offset(parameter: "start_after"))
         case .saved: return CollectionSource(method: "raven.api.raven_message.get_saved_messages", strategy: .offset(parameter: "start"))

@@ -365,4 +365,61 @@ final class LinkPreviewLoaderTests: XCTestCase {
         XCTAssertNil(data)
         XCTAssertEqual(StubURLProtocol.requests().count, 0)
     }
+
+    // MARK: - GIF media
+
+    func testMediaDataAllowsGIFsLargerThanPreviewPictures() async {
+        let gif = Data(repeating: 0x47, count: LinkPreviewPolicy.maximumImageBytes + 1)
+        StubURLProtocol.install { _ in StubURLProtocol.Response(statusCode: 200, headers: ["Content-Type": "image/gif"], body: gif) }
+        let loader = makeLoader(hosts: ["media.tenor.com": [Self.publicAddress]])
+        let data = await loader.mediaData(for: URL(string: "https://media.tenor.com/abc/dance.gif")!)
+        XCTAssertEqual(data, gif)
+        let request = StubURLProtocol.requests().first
+        XCTAssertTrue(request?.value(forHTTPHeaderField: "Accept")?.hasPrefix("image/gif") == true)
+        XCTAssertNil(request?.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertNil(request?.value(forHTTPHeaderField: "Cookie"))
+    }
+
+    func testMediaDataOverLimitGivesNil() async {
+        let oversized = Data(repeating: 0x47, count: GIFMediaPolicy.maximumMediaBytes + 1)
+        StubURLProtocol.install { _ in StubURLProtocol.Response(statusCode: 200, headers: ["Content-Type": "image/gif"], body: oversized) }
+        let loader = makeLoader(hosts: ["media.giphy.com": [Self.publicAddress]])
+        let data = await loader.mediaData(for: URL(string: "https://media.giphy.com/media/x/giphy.gif")!)
+        XCTAssertNil(data)
+    }
+
+    func testMediaDataOutsideGIFServicesMakesNoRequest() async {
+        StubURLProtocol.install { _ in StubURLProtocol.Response(statusCode: 200, headers: ["Content-Type": "image/gif"], body: Data([0x47])) }
+        let loader = makeLoader(hosts: ["tracker.example": [Self.publicAddress], "media.tenor.com": [Self.privateAddress]])
+        let tracker = await loader.mediaData(for: URL(string: "https://tracker.example/pixel.gif")!)
+        // A GIF service name that resolves into the local network is refused too.
+        let rebound = await loader.mediaData(for: URL(string: "https://media.tenor.com/abc/dance.gif")!)
+        XCTAssertNil(tracker)
+        XCTAssertNil(rebound)
+        XCTAssertEqual(StubURLProtocol.requests().count, 0)
+    }
+
+    func testMediaRedirectStaysWithinGIFServices() async {
+        StubURLProtocol.install { request in
+            switch request.url?.host {
+            case "media.giphy.com": return StubURLProtocol.Response(statusCode: 302, headers: ["Location": "https://media2.giphy.com/media/x/giphy.gif"], body: Data())
+            case "media.klipy.com": return StubURLProtocol.Response(statusCode: 302, headers: ["Location": "https://cdn.example.com/x.gif"], body: Data())
+            default: return StubURLProtocol.Response(statusCode: 200, headers: ["Content-Type": "image/gif"], body: Data([0x47, 0x49, 0x46]))
+            }
+        }
+        let loader = makeLoader(hosts: ["media.giphy.com": [Self.publicAddress], "media2.giphy.com": [Self.publicAddress], "media.klipy.com": [Self.publicAddress], "cdn.example.com": [Self.publicAddress]])
+        let followed = await loader.mediaData(for: URL(string: "https://media.giphy.com/media/x/giphy.gif")!)
+        XCTAssertEqual(followed, Data([0x47, 0x49, 0x46]))
+        let refused = await loader.mediaData(for: URL(string: "https://media.klipy.com/x.gif")!)
+        XCTAssertNil(refused)
+        XCTAssertFalse(StubURLProtocol.requests().contains { $0.url?.host == "cdn.example.com" })
+    }
+
+    func testMediaDataRejectsNonImages() async {
+        StubURLProtocol.install { _ in StubURLProtocol.Response(statusCode: 200, headers: ["Content-Type": "text/html"], body: Data("<html>".utf8)) }
+        let loader = makeLoader(hosts: ["media.tenor.com": [Self.publicAddress]])
+        let data = await loader.mediaData(for: URL(string: "https://media.tenor.com/abc/dance.gif")!)
+        XCTAssertNil(data)
+    }
+
 }

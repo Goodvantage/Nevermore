@@ -19,6 +19,7 @@ extension NSAttributedString.Key {
     static let nevermoreCopyText = NSAttributedString.Key("Nevermore.CopyText")
     /// A reply quote; the value is the color of the bar drawn beside it.
     static let nevermoreQuoteBar = NSAttributedString.Key("Nevermore.QuoteBar")
+    static let nevermoreBodyQuote = NSAttributedString.Key("Nevermore.BodyQuote")
 }
 
 /// Who sent a group of messages, drawn in the column left of the text.
@@ -176,18 +177,31 @@ struct TranscriptMetrics: Equatable {
         for (run, style) in updates { text.addAttribute(.paragraphStyle, value: style, range: run) }
     }
 
-    /// "[icon] report.pdf  Space to Quick Look". The icon is a reading
-    /// control, so copying the transcript yields only the file name.
-    static func attachmentLine(filename: String, size: CGFloat) -> NSAttributedString {
+    /// A click on a received attachment opens its preview. The message id
+    /// travels in the link so the click finds the message without a caret.
+    static func attachmentLink(for messageID: String) -> URL? {
+        var allowed = CharacterSet.urlPathAllowed; allowed.remove(charactersIn: "/?#%")
+        guard let id = messageID.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+        return URL(string: "nevermore-attachment://message/\(id)")
+    }
+
+    /// "[icon] report.pdf  Click or Space to Quick Look". The icon is a
+    /// reading control, so copying the transcript yields only the file name.
+    static func attachmentLine(filename: String, size: CGFloat, link: URL?) -> NSAttributedString {
         let output = NSMutableAttributedString(string: "\n")
         let icon = NSTextAttachment(); icon.image = fileIcon(for: (filename as NSString).pathExtension)
         icon.bounds = NSRect(x: 0, y: -4, width: size + 4, height: size + 4)
         let iconString = NSMutableAttributedString(attachment: icon)
         iconString.append(NSAttributedString(string: " "))
         iconString.addAttribute(.nevermoreReadingControl, value: true, range: NSRange(location: 0, length: iconString.length))
+        if let link { iconString.addAttribute(.link, value: link, range: NSRange(location: 0, length: iconString.length)) }
         output.append(iconString)
-        output.append(NSAttributedString(string: filename, attributes: [.font: NSFont.systemFont(ofSize: size, weight: .medium), .foregroundColor: NSColor.themeLink]))
-        output.append(NSAttributedString(string: "  Space to Quick Look", attributes: [.font: NSFont.systemFont(ofSize: max(10, size - 3)), .foregroundColor: NSColor.themeTertiaryText, .nevermoreReadingControl: true]))
+        var nameAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: size, weight: .medium), .foregroundColor: NSColor.themeLink]
+        if let link { nameAttributes[.link] = link }
+        output.append(NSAttributedString(string: filename, attributes: nameAttributes))
+        var hintAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: max(10, size - 3)), .foregroundColor: NSColor.themeTertiaryText, .nevermoreReadingControl: true]
+        if let link { hintAttributes[.link] = link }
+        output.append(NSAttributedString(string: "  Click or Space to Quick Look", attributes: hintAttributes))
         return output
     }
 
@@ -283,6 +297,20 @@ extension TranscriptView {
                 (mine ? NSColor.themeAccent.withAlphaComponent(0.16) : NSColor.tertiarySystemFill).setFill(); path.fill()
                 (mine ? NSColor.themeAccent.withAlphaComponent(0.55) : NSColor.separatorColor).setStroke(); path.lineWidth = 1; path.stroke()
             }
+        }
+        storage.enumerateAttribute(.nevermoreBodyQuote, in: visible) { value, range, _ in
+            guard value is String, range.length > 0 else { return }
+            var quote = range
+            if text.character(at: NSMaxRange(quote) - 1) == 10 { quote.length -= 1 }
+            guard quote.length > 0 else { return }
+            let glyphRange = layout.glyphRange(forCharacterRange: quote, actualCharacterRange: nil)
+            var lines = NSRect.null
+            layout.enumerateLineFragments(forGlyphRange: glyphRange) { _, used, _, _, _ in lines = lines.union(used) }
+            guard !lines.isNull else { return }
+            let bar = NSRect(x: origin.x + container.lineFragmentPadding, y: lines.minY + origin.y, width: 3, height: lines.height)
+            guard bar.intersects(dirtyRect) else { return }
+            NSColor.themeTertiaryText.withAlphaComponent(0.8).setFill()
+            NSBezierPath(roundedRect: bar, xRadius: 1.5, yRadius: 1.5).fill()
         }
         storage.enumerateAttribute(.nevermoreQuoteBar, in: visible) { value, range, _ in
             guard let color = value as? NSColor else { return }

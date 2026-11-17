@@ -7,8 +7,6 @@ import AppKit
 /// are forwarded to AppKit's native table behavior, and no key acts while
 /// the current text input has marked (composing) text.
 @MainActor final class CollectionTableView: NSTableView {
-    var onPreviewAttachment: (() -> Void)?
-    var onSaveAttachment: (() -> Void)?
     var onOpen: (() -> Void)?
     var onClose: (() -> Void)?
     var onRefresh: (() -> Void)?
@@ -17,8 +15,6 @@ import AppKit
 
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection([.shift, .control, .option, .command])
-        if event.keyCode == 49, flags.isEmpty, let onPreviewAttachment, !hasMarkedText() { if selectedRow >= 0 { onPreviewAttachment() }; return }
-        if event.keyCode == 1, flags == [.command, .shift], let onSaveAttachment, !hasMarkedText() { if selectedRow >= 0 { onSaveAttachment() }; return }
         if event.keyCode == 36 || event.keyCode == 76 {
             guard flags.isEmpty, !hasMarkedText() else { super.keyDown(with: event); return }
             // Plain Return always belongs to the collection; with no selection it is a no-op.
@@ -38,14 +34,6 @@ import AppKit
         super.keyDown(with: event)
     }
 
-    override func menu(for event: NSEvent) -> NSMenu? {
-        if onPreviewAttachment != nil {
-            let clicked = row(at: convert(event.locationInWindow, from: nil))
-            if clicked >= 0 { selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false) }
-            else { deselectAll(nil) }
-        }
-        return super.menu(for: event)
-    }
     private func hasMarkedText() -> Bool {
         guard let responder = window?.firstResponder else { return false }
         return (responder as? NSTextView)?.hasMarkedText() ?? false

@@ -254,6 +254,27 @@ enum ConversationToolbar {
     required init?(coder: NSCoder) { fatalError() }
 }
 
+/// One row of the conversation sidebar: Home, a section heading or a
+/// conversation.
+struct SidebarItem {
+    enum Kind { case home, header, conversation(RavenChannel) }
+    let title: String
+    let kind: Kind
+
+    static let home = SidebarItem(title: "Home", kind: .home)
+    static func header(_ title: String) -> SidebarItem { SidebarItem(title: title, kind: .header) }
+    static func conversation(_ channel: RavenChannel) -> SidebarItem { SidebarItem(title: channel.title, kind: .conversation(channel)) }
+
+    var channel: RavenChannel? { if case .conversation(let channel) = kind { return channel }; return nil }
+    var isHeader: Bool { if case .header = kind { return true }; return false }
+    var isHome: Bool { if case .home = kind { return true }; return false }
+}
+
+extension SidebarConversationCell.Model {
+    /// The sidebar's Home row.
+    static let home = SidebarConversationCell.Model(title: "Home", symbolName: "house", unread: 0, muted: false, archived: false, presence: nil, tooltip: "Home (⇧⌘H)", bird: nil)
+}
+
 /// One staged file in the composer, with its own remove button.
 @MainActor final class AttachmentChip: NSView {
     init(filename: String, removeTarget: AnyObject?, removeAction: Selector?, tag: Int) {
@@ -413,7 +434,7 @@ extension ConversationWindow {
         // Buttons join the loop only with Full Keyboard Access enabled.
         accountPicker.nextKeyView = workspacePicker; workspacePicker.nextKeyView = sidebar
         sidebar.nextKeyView = transcript; transcript.nextKeyView = attachButton; attachButton.nextKeyView = composer
-        composer.nextKeyView = emojiButton; emojiButton.nextKeyView = sendButton; sendButton.nextKeyView = accountPicker
+        composer.nextKeyView = gifButton; gifButton.nextKeyView = emojiButton; emojiButton.nextKeyView = sendButton; sendButton.nextKeyView = accountPicker
         window.initialFirstResponder = composer
         applyTheme()
     }
@@ -508,6 +529,7 @@ extension ConversationWindow {
             self.chooseReaction(for: message)
         }
         transcript.onUserSelection = { [weak self] in self?.updateMessageHighlight() }
+        transcript.pressDidEnd = { [weak self] in self?.renderAfterPressIfNeeded() }
         transcript.onTypeToCompose = { [weak self] event in self?.typeToCompose(event) ?? false }
         transcriptScroll.documentView = transcript; transcriptScroll.hasVerticalScroller = true; transcriptScroll.autohidesScrollers = true
         transcriptScroll.drawsBackground = true; transcriptScroll.backgroundColor = .textBackgroundColor
@@ -526,12 +548,20 @@ extension ConversationWindow {
         jumpLatestButton.isHidden = true
         earlierProgress.style = .spinning; earlierProgress.controlSize = .small; earlierProgress.isDisplayedWhenStopped = false
         earlierProgress.setAccessibilityLabel("Loading earlier messages")
-        let emptyTitle = NSTextField(labelWithString: "No Conversation Selected"); emptyTitle.font = .preferredFont(forTextStyle: .title2); emptyTitle.textColor = .tertiaryLabelColor
-        let emptyDetail = NSTextField(labelWithString: "Choose a conversation in the sidebar, or press ⌘O."); emptyDetail.textColor = .tertiaryLabelColor
+        let emptyTitle = NSTextField(labelWithString: Self.noAccountTitle); emptyTitle.font = .preferredFont(forTextStyle: .title2); emptyTitle.textColor = .tertiaryLabelColor
+        let emptyDetail = NSTextField(labelWithString: Self.noAccountDetail); emptyDetail.textColor = .tertiaryLabelColor
         emptyConversation.setViews([emptyTitle, emptyDetail], in: .center); emptyConversation.orientation = .vertical; emptyConversation.spacing = 6
         // The ink overlay is last: words in flight pass over the composer glass.
-        for view in [themeBackdrop, transcriptScroll, bar, jumpLatestButton, earlierProgress, emptyConversation, ink.overlay, stickers.overlay] { view.translatesAutoresizingMaskIntoConstraints = false; chat.addSubview(view) }
+        for view in [themeBackdrop, transcriptScroll, home, searchView, bar, jumpLatestButton, earlierProgress, emptyConversation, ink.overlay, stickers.overlay] { view.translatesAutoresizingMaskIntoConstraints = false; chat.addSubview(view) }
         NSLayoutConstraint.activate([
+            searchView.topAnchor.constraint(equalTo: chat.topAnchor),
+            searchView.leadingAnchor.constraint(equalTo: chat.leadingAnchor),
+            searchView.trailingAnchor.constraint(equalTo: chat.trailingAnchor),
+            searchView.bottomAnchor.constraint(equalTo: chat.bottomAnchor),
+            home.topAnchor.constraint(equalTo: chat.topAnchor),
+            home.leadingAnchor.constraint(equalTo: chat.leadingAnchor),
+            home.trailingAnchor.constraint(equalTo: chat.trailingAnchor),
+            home.bottomAnchor.constraint(equalTo: chat.bottomAnchor),
             stickers.overlay.topAnchor.constraint(equalTo: chat.topAnchor),
             stickers.overlay.leadingAnchor.constraint(equalTo: chat.leadingAnchor),
             stickers.overlay.trailingAnchor.constraint(equalTo: chat.trailingAnchor),
@@ -598,9 +628,11 @@ extension ConversationWindow {
         }
         iconButton(attachButton, size: 15, tint: .secondaryLabelColor, tip: "Attach files (⇧⌘A)", action: #selector(attachFiles(_:)))
         iconButton(emojiButton, size: 15, tint: .secondaryLabelColor, tip: "Emoji & Symbols (⌃⌘Space)", action: #selector(showEmojiPalette(_:)))
+        iconButton(gifButton, size: 15, tint: .secondaryLabelColor, tip: "Send a GIF (⌃⌘G)", action: #selector(sendGIF(_:)))
+        gifButton.font = .systemFont(ofSize: 11, weight: .bold); gifButton.setAccessibilityLabel("Send a GIF")
         iconButton(sendButton, size: 22, tint: .themeAccent, tip: "Send (Return)", action: #selector(send(_:)))
         sendButton.setAccessibilityLabel("Send")
-        let input = NSStackView(views: [attachButton, NSView(), emojiButton, sendButton])
+        let input = NSStackView(views: [attachButton, NSView(), gifButton, emojiButton, sendButton])
         composerScroll.translatesAutoresizingMaskIntoConstraints = false
         composerEditorContainer.addSubview(composerScroll)
         NSLayoutConstraint.activate([
@@ -619,7 +651,7 @@ extension ConversationWindow {
             self?.manualComposerHeight = nil; self?.updateComposerHeight()
         }
         input.orientation = .horizontal; input.alignment = .bottom; input.spacing = 6; input.edgeInsets = NSEdgeInsets(top: 4, left: 10, bottom: 5, right: 6)
-        for button in [attachButton, emojiButton, sendButton] { button.heightAnchor.constraint(equalToConstant: ComposerMetrics.buttonHeight).isActive = true }
+        for button in [attachButton, gifButton, emojiButton, sendButton] { button.heightAnchor.constraint(equalToConstant: ComposerMetrics.buttonHeight).isActive = true }
         let statusIcon = NSImageView(image: NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)!); statusIcon.contentTintColor = .secondaryLabelColor
         status.font = .systemFont(ofSize: NSFont.smallSystemFontSize); status.textColor = .secondaryLabelColor; status.lineBreakMode = .byTruncatingTail; status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         status.setAccessibilityLabel("Conversation status")
@@ -773,10 +805,19 @@ extension ConversationWindow {
     func updateWindowTitle() {
         guard let window else { return }
         let account = session.map { $0.account.displayName.isEmpty ? $0.account.user : $0.account.displayName }
-        emptyConversation.isHidden = channel != nil
+        home.isHidden = channel != nil || session == nil || isSearching
+        searchView.isHidden = channel != nil || session == nil || !isSearching
+        emptyConversation.isHidden = channel != nil || session != nil
         composerGlass.isHidden = channel == nil
+        // Home and search cover the transcript, which still set the I-beam
+        // over their buttons: its tracking area on every pointer move, and
+        // its clip view's cursor for the space below the text. The scroll
+        // view stays visible: under Classic it draws their background.
+        transcript.isHidden = channel == nil
+        transcriptScroll.documentCursor = channel == nil ? nil : .iBeam
         guard let channel else {
-            window.title = "Nevermore"; window.subtitle = account ?? ""
+            window.title = session == nil ? "Nevermore" : isSearching ? "Search" : "Home"
+            window.subtitle = [account, session?.account.origin.host].compactMap { $0 }.joined(separator: " · ")
             return
         }
         window.title = channel.title
@@ -803,7 +844,7 @@ extension ConversationWindow {
         // Include AppKit's prefetched rows: scrolling them into view may not
         // call viewFor again. Do not materialize more rows or reset the table.
         sidebar.enumerateAvailableRowViews { [self] _, row in
-            guard sidebarItems.indices.contains(row), let channel = sidebarItems[row].1,
+            guard sidebarItems.indices.contains(row), let channel = sidebarItems[row].channel,
                   let cell = sidebar.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarConversationCell else { return }
             cell.configure(sidebarModel(for: channel, unread: unreadCount(channel.id)), fontSize: sidebarFontSize)
         }
@@ -847,7 +888,7 @@ extension ConversationWindow {
         guard menu === sidebar.menu else { return }
         menu.removeAllItems()
         let row = sidebar.clickedRow
-        guard sidebarItems.indices.contains(row), let target = sidebarItems[row].1 else { return }
+        guard sidebarItems.indices.contains(row), let target = sidebarItems[row].channel else { return }
         func add(_ title: String, _ action: Selector) {
             let item = menu.addItem(withTitle: title, action: action, keyEquivalent: ""); item.target = self; item.representedObject = target
         }
@@ -864,7 +905,7 @@ extension ConversationWindow {
     private func sidebarTarget(_ sender: Any?) -> RavenChannel? {
         if let item = sender as? NSMenuItem, let channel = item.representedObject as? RavenChannel { return channel }
         let row = sidebar.clickedRow >= 0 ? sidebar.clickedRow : sidebar.selectedRow
-        return sidebarItems.indices.contains(row) ? sidebarItems[row].1 : nil
+        return sidebarItems.indices.contains(row) ? sidebarItems[row].channel : nil
     }
     @objc func openSidebarRowInNewWindow(_ sender: Any?) { guard let session, let target = sidebarTarget(sender) else { return }; app.open(session: session, channel: target) }
     @objc func openSidebarRowInNewTab(_ sender: Any?) { guard let session, let target = sidebarTarget(sender) else { return }; app.openTab(beside: self, session: session, channel: target) }
@@ -884,15 +925,15 @@ extension ConversationWindow {
     /// skipping read ones (Go ▸ Next Unread Conversation).
     func selectAdjacentConversation(forward: Bool, unreadOnly: Bool) {
         let candidates = sidebarItems.indices.filter { index in
-            guard let channel = sidebarItems[index].1 else { return false }
+            guard let channel = sidebarItems[index].channel else { return false }
             return !unreadOnly || unreadCount(channel.id) > 0
         }
         guard !candidates.isEmpty else { NSSound.beep(); return }
-        let current = sidebarItems.firstIndex { $0.1?.id == channel?.id }
+        let current = sidebarItems.firstIndex { $0.channel?.id == channel?.id }
         let next: Int?
         if let current { next = forward ? candidates.first { $0 > current } ?? (unreadOnly ? candidates.first : nil) : candidates.last { $0 < current } }
         else { next = forward ? candidates.first : candidates.last }
-        guard let next, let destination = sidebarItems[next].1 else { NSSound.beep(); return }
+        guard let next, let destination = sidebarItems[next].channel else { NSSound.beep(); return }
         sidebar.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false); sidebar.scrollRowToVisible(next)
         select(destination)
     }
@@ -913,9 +954,9 @@ extension ConversationWindow {
         if clip.bounds.origin.y < farthest - 2 { transcriptScroll.pageDown(nil); return }
         // On to the next conversation a raven waits on: muted ones have
         // unread counts and no claim on the reader.
-        let waiting = sidebarItems.indices.filter { index in sidebarItems[index].1.map { $0.id != channel?.id && unkindness.bird(for: $0) != nil } == true }
-        let current = sidebarItems.firstIndex { $0.1?.id == channel?.id } ?? -1
-        guard let next = waiting.first(where: { $0 > current }) ?? waiting.first, let destination = sidebarItems[next].1 else { return }
+        let waiting = sidebarItems.indices.filter { index in sidebarItems[index].channel.map { $0.id != channel?.id && unkindness.bird(for: $0) != nil } == true }
+        let current = sidebarItems.firstIndex { $0.channel?.id == channel?.id } ?? -1
+        guard let next = waiting.first(where: { $0 > current }) ?? waiting.first, let destination = sidebarItems[next].channel else { return }
         sidebar.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false); sidebar.scrollRowToVisible(next)
         select(destination)
     }
@@ -1114,13 +1155,16 @@ extension ConversationWindow {
             group.isNavigational = true
             return group
         case .nevermoreSearch:
-            let item = NSSearchToolbarItem(itemIdentifier: id)
             // The customization palette asks for its own copy; it must not
             // take the window's live search field out of the toolbar.
-            guard flag else { item.label = "Search"; return item }
+            guard flag else {
+                let copy = NSSearchField(); copy.placeholderString = "Search"
+                let item = GlassSearchToolbarItem(itemIdentifier: id, searchField: copy, minimumWidth: 200); item.label = "Search"
+                return item
+            }
             search.placeholderString = "Search"; search.sendsWholeSearchString = true; search.target = self; search.action = #selector(performSearch); search.delegate = self
-            search.setAccessibilityLabel("Search messages"); search.toolTip = "Search messages in this conversation (Return to search, ⌥⌘F)"
-            item.searchField = search; item.label = "Search"; item.preferredWidthForSearchField = 200; item.resignsFirstResponderWithCancel = true
+            search.setAccessibilityLabel("Search messages"); search.toolTip = "Search messages, files, links and people (⌥⌘F). Results appear as you type."
+            let item = GlassSearchToolbarItem(itemIdentifier: id, searchField: search, minimumWidth: 200); item.label = "Search"
             return item
         case .nevermoreLater:
             let item = NSMenuToolbarItem(itemIdentifier: id)
@@ -1176,12 +1220,12 @@ extension ConversationWindow {
         let hasSession = session.map { !$0.stopped } ?? false
         let writable = hasSession && session?.readOnly == false
         switch action {
-        case #selector(goBack): return navigation.canGoBack
+        case #selector(goBack): return navigation.canGoBack || (channel == nil && !isSearching && navigation.currentEntry != nil)
         case #selector(goForward): return navigation.canGoForward
-        case #selector(inbox), #selector(threads), #selector(showSavedMessages(_:)), #selector(showReminders(_:)), #selector(showScheduledMessages(_:)), #selector(outbox):
+        case #selector(goHome(_:)), #selector(customizeHome(_:)), #selector(inbox), #selector(threads), #selector(showSavedMessages(_:)), #selector(showReminders(_:)), #selector(showScheduledMessages(_:)), #selector(outbox):
             return hasSession
         case #selector(nextConversation(_:)), #selector(previousConversation(_:)), #selector(nextUnreadConversation(_:)):
-            return sidebarItems.contains { $0.1 != nil }
+            return sidebarItems.contains { $0.channel != nil }
         case #selector(toggleFavorite(_:)):
             item.title = channel.map { session?.favoriteIDs.contains($0.id) == true } == true ? "Remove from Favorites" : "Add to Favorites"
             return writable && channel != nil
@@ -1200,7 +1244,8 @@ extension ConversationWindow {
             guard let channel else { return false }
             return writable && !channel.isDM && !channel.raw["is_thread"].bool && channel.raw["parent_channel_id"].string == nil
         case #selector(createChannel(_:)), #selector(setCustomStatus(_:)): return writable
-        case #selector(showCurrentAccountPreferences(_:)), #selector(openBrowser(_:)), #selector(findMessages(_:)), #selector(searchAccount(_:)), #selector(advancedSearch(_:)): return hasSession
+        case #selector(showCurrentAccountPreferences(_:)), #selector(openBrowser(_:)), #selector(findMessages(_:)), #selector(searchAccount(_:)), #selector(advancedSearch(_:)), #selector(showSavedSearch(_:)): return hasSession
+        case #selector(saveSearch(_:)): return hasSession && isSearching && SavedSearchStore.load(session?.account.id ?? UUID()).count < SavedSearchStore.limit
         case #selector(chooseConversation(_:)): return session.map { !$0.stopped } ?? true
         case #selector(toggleThreadInspector(_:)):
             item.title = threadInspector == nil ? "Show Thread Inspector" : "Hide Thread Inspector"

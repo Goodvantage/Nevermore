@@ -1,0 +1,105 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>A · Results in the window</title>
+<link rel="stylesheet" href="../../home/mockups/base.css">
+<link rel="stylesheet" href="search.css">
+<script src="../../home/mockups/chrome.js"></script>
+<style>
+  .bar { padding: 2px 22px 10px; display: flex; flex-direction: column; gap: 10px; }
+  .row1 { display: flex; align-items: center; gap: 12px; }
+  .row1 .sort { margin-left: auto; display: flex; align-items: center; gap: 6px; font-family: var(--sys); font-size: 12px; color: var(--text2); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .cols { display: grid; grid-template-columns: 1fr 250px; gap: 16px; padding: 0 22px; }
+  .list { padding: 6px; }
+  .side { display: flex; flex-direction: column; gap: 12px; }
+  .side .card { padding: 10px; }
+  .foot { position: absolute; left: 22px; right: 22px; bottom: 14px; display: flex; align-items: center; justify-content: space-between; }
+</style></head>
+<body data-theme="classic">
+<div class="window">
+  <div class="wallpaper"></div>
+  <aside class="sidebar"></aside>
+  <section class="pane">
+    <div class="toolbar">
+      <div><div class="title">Search</div><div class="subtitle">Studio · chat.example.org</div></div>
+      <div class="grow"></div>
+      <div class="glass tool-group"><b id="i1"></b><b id="i2"></b><b id="i3"></b></div>
+      <div class="glass tb-search"><span id="mag"></span><span>onboarding</span><span class="x">✕</span></div>
+    </div>
+    <div class="content">
+      <div class="bar">
+        <div class="row1">
+          <div class="tabs"><span class="on">Messages<i>37</i></span><span>Files<i>6</i></span><span>Links<i>3</i></span><span>Conversations<i>2</i></span><span>People<i>1</i></span></div>
+          <div class="sort">Sort <span class="chip">Best match <span class="caret">▾</span></span></div>
+        </div>
+        <div class="chips">
+          <span class="chip on">In: # design, # releases <span class="caret">✕</span></span>
+          <span class="chip">From: Anyone <span class="caret">▾</span></span>
+          <span class="chip">Date: Any time <span class="caret">▾</span></span>
+          <span class="chip">Has: Anything <span class="caret">▾</span></span>
+          <span class="chip">Saved by me</span>
+          <span class="chip">Mentions me</span>
+          <span class="chip">Include threads</span>
+        </div>
+      </div>
+      <div class="cols">
+        <div class="card list">
+          <div class="group-head"><span class="chan" style="width:20px;height:20px;font-size:11px;border-radius:6px">#</span>design <span class="n">· 14 results</span><span class="more">Show all 14</span></div>
+          <div class="res sel"><span id="a1"></span><div class="body">
+            <div class="who"><b class="name-0">Mara Lindqvist</b><span class="where">Today</span><span class="t">11:48</span></div>
+            <div class="snip">@you could you look at the new <mark>onboarding</mark> illustrations before 3? I think the second one is too busy next to the sign-in button.</div>
+            <div class="meta"><span class="react">👀 2</span><span class="tag">Thread · 2 replies</span></div></div></div>
+          <div class="res"><span id="a2"></span><div class="body">
+            <div class="who"><b class="name-2">Aiko Tanaka</b><span class="where">Today</span><span class="t">12:02</span></div>
+            <div class="snip">Uploaded <mark>onboarding</mark>-round-2.png and three alternates.</div>
+            <div class="meta"><span class="react">🖼 4 images</span></div></div></div>
+          <div class="res"><span id="a3"></span><div class="body">
+            <div class="who"><b class="name-4">Priya Raman</b><span class="where">Tue 11 Nov</span><span class="t">16:20</span></div>
+            <div class="snip">The <mark>onboarding</mark> copy deck is in the shared folder; legal wants the privacy line kept as is.</div></div></div>
+          <div class="group-head"><span class="chan" style="width:20px;height:20px;font-size:11px;border-radius:6px">#</span>releases <span class="n">· 5 results</span><span class="more">Show all 5</span></div>
+          <div class="res"><span id="a4"></span><div class="body">
+            <div class="who"><b class="name-3">Jonas Weber</b><span class="where">Fri 7 Nov</span><span class="t">09:14</span></div>
+            <div class="snip">2.4 ships the new <mark>onboarding</mark> flow behind a flag; we turn it on for everyone in 2.4.1.</div>
+            <div class="meta"><span class="react">🚀 5</span><span class="react">👍 2</span></div></div></div>
+          <div class="group-head"><span class="chan" style="width:20px;height:20px;font-size:11px;border-radius:6px">#</span>general <span class="n">· 2 results</span><span class="more">Show all 2</span></div>
+          <div class="res"><span id="a5"></span><div class="body">
+            <div class="who"><b class="name-5">Léa Martin</b><span class="where">Mon 3 Nov</span><span class="t">10:05</span></div>
+            <div class="snip">Welcome Sam! Your <mark>onboarding</mark> buddy is Tomás, he will walk you through the release process on Thursday.</div>
+            <div class="meta"><span class="react">👋 6</span></div></div></div>
+          <div class="group-head"><span id="g1"></span>Tomás Ferreira <span class="n">· 1 result</span></div>
+          <div class="res"><span id="a6"></span><div class="body">
+            <div class="who"><b class="name-1">You</b><span class="where">Wed 29 Oct</span><span class="t">17:31</span></div>
+            <div class="snip">Can we pair on the <mark>onboarding</mark> crash tomorrow? It only happens after the Mac wakes from sleep.</div></div></div>
+        </div>
+        <div class="side">
+          <div class="card">
+            <div class="sec-title" style="padding:2px 4px 6px">Top hits</div>
+            <div class="hit"><span class="chan">#</span><div><div><b># onboarding-v2</b></div><div class="sub">Channel · 48 members · not joined</div></div></div>
+            <div class="hit"><span id="p1"></span><div><div><b>Aiko Tanaka</b></div><div class="sub">Status: ✏️ onboarding sketches</div></div></div>
+          </div>
+          <div class="card">
+            <div class="sec-title" style="padding:2px 4px 6px">Saved searches</div>
+            <div class="hit" style="padding:5px 8px"><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" style="color:var(--text2)"><path d="M6 3h8v14l-4-3-4 3z"/></svg> <span>Release notes from Jonas</span></div>
+            <div class="hit" style="padding:5px 8px"><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" style="color:var(--text2)"><path d="M6 3h8v14l-4-3-4 3z"/></svg> <span>Files in # design this month</span></div>
+            <div class="hit" style="padding:5px 8px;color:var(--link);font-weight:600">Save this search…</div>
+          </div>
+        </div>
+      </div>
+      <div class="foot">
+        <div class="keys"><span><i class="kbd">↑</i><i class="kbd">↓</i> move</span><span><i class="kbd">↩</i> open</span><span><i class="kbd">⌘[</i> back to results</span><span><i class="kbd">Space</i> Quick Look</span></div>
+        <div class="note">Raven returns the 100 best matches. Narrow the search to reach older ones.</div>
+      </div>
+    </div>
+  </section>
+</div>
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    document.querySelector(".side-row.sel")?.classList.remove("sel");
+    const ic = { i1: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 15.5V4.5h12v8h-5l-3 3z"/></svg>', i2: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 11l3-6h8l3 6v4H3z M3 11h4l1 2h4l1-2h4"/></svg>', i3: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3h8v14l-4-3-4 3z"/></svg>' };
+    for (const k in ic) document.getElementById(k).innerHTML = ic[k];
+    document.getElementById("mag").innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>';
+    [["a1","mara"],["a2","aiko"],["a3","priya"],["a4","jonas"],["a5","lea"],["a6","sam"]].forEach(([id,k]) => document.getElementById(id).outerHTML = avatar(k, 32));
+    document.getElementById("g1").outerHTML = avatar("tomas", 20);
+    document.getElementById("p1").outerHTML = avatar("aiko", 28, { dot: true });
+  });
+</script>
+</body></html>

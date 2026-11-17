@@ -116,15 +116,11 @@ import RavenProtocol
         results.append(("native search commands resolve through the conversation responder chain", searchTarget === window))
         window.search.stringValue = "  "
         window.performSearch()
-        results.append(("empty quick searches do not open a result window", window.searchWindow == nil))
+        results.append(("empty quick searches do not open the results screen", !window.isSearching))
         _ = NSApp.sendAction(#selector(ConversationWindow.advancedSearch(_:)), to: nil, from: nil)
-        results.append(("the native Search with Filters command opens the account-bound form", window.searchWindow?.window?.isVisible == true))
-        if let search = window.searchWindow, let content = search.window?.contentView {
-            content.layoutSubtreeIfNeeded()
-            let controls: [NSView] = [search.query, search.scope, search.kind, search.author, search.savedOnly, search.mentionsMe]
-            results.append(("native search filters fit their content pane", controls.allSatisfy { content.bounds.contains($0.convert($0.bounds, to: content)) }))
-            search.close(); window.searchWindow = nil
-        }
+        results.append(("the native Search with Filters command opens the results screen in the window", window.isSearching && !window.searchView.isHidden))
+        window.leaveSearch()
+        results.append(("leaving search returns the pane", !window.isSearching && window.searchView.isHidden))
         return results
     }
 }

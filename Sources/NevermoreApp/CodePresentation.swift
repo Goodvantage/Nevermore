@@ -68,6 +68,11 @@ struct CodeCommand {
             } else {
                 replacement.append(NSAttributedString(string: "[Code collapsed · expand here or open the reader]", attributes: [.font: NSFont.systemFont(ofSize: max(11, fontSize - 1)), .foregroundColor: NSColor.secondaryLabelColor]))
             }
+            for key: NSAttributedString.Key in [.nevermoreBodyQuote, .paragraphStyle] {
+                if let value = output.attribute(key, at: range.location, effectiveRange: nil) {
+                    replacement.addAttribute(key, value: value, range: NSRange(location: 0, length: replacement.length))
+                }
+            }
             output.replaceCharacters(in: range, with: replacement)
         }
         return Output(text: output, commands: commands, references: references.reversed())

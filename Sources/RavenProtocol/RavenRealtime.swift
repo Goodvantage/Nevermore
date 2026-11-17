@@ -19,12 +19,22 @@ public final class RavenRealtime {
     private var desired = Set<String>()
     /// Rooms emitted on the live socket generation; diffed against `desired`.
     private var joined = Set<String>()
+    /// Live sockets per origin host, so cookie cleanup runs only for the
+    /// first connect and the last disconnect — siblings must not delete each
+    /// other's load-balancer stickiness cookie mid-session.
+    private static var socketCountByHost: [String: Int] = [:]
+    /// The host slot this instance holds, if it created a socket.
+    private var countedHost: String?
 
     public init(account: Account, accessToken: String, onEvent: @escaping @MainActor (String, JSONValue) -> Void) {
         self.account = account
         self.accessToken = accessToken
         self.onEvent = onEvent
     }
+
+    /// Every owner disconnects before release today; release the host slot in
+    /// deinit too so a future owner that forgets cannot leak the refcount.
+    isolated deinit { releaseHostSlot() }
 
     public func connect() {
         if let socket {
@@ -38,9 +48,29 @@ public final class RavenRealtime {
             // not equal the sitename.
             "X-Frappe-Site-Name": account.siteName,
         ]
+        // Default transports: open on Engine.IO polling, then upgrade to
+        // WebSocket — the same path the browser client takes. extraHeaders
+        // ride the polling requests too, so authentication is unchanged, and
+        // a network that blocks or wedges WebSocket upgrades still connects.
+        // Multi-node deployments need sticky sessions and unbuffered
+        // long-poll responses; browsers have the same requirement.
+        // Polling exchanges cookies through HTTPCookieStorage.shared. The jar
+        // is process-global, so its accept policy stays untouched — clustered
+        // deployments rely on load-balancer stickiness cookies. Instead the
+        // first socket to an origin drops everything stored for that origin,
+        // and the last one out purges again, so site state from another
+        // session cannot ride the socket. Two live sockets on one host share
+        // the jar like two browser tabs share cookies — Bearer headers still
+        // dominate authentication — since the pinned SocketManager offers no
+        // per-socket cookie store to isolate them.
+        if countedHost == nil, let host = account.origin.host?.lowercased() {
+            countedHost = host
+            let siblings = Self.socketCountByHost[host, default: 0]
+            Self.socketCountByHost[host] = siblings + 1
+            if siblings == 0 { Self.purgeOriginCookies(host) }
+        }
         let manager = SocketManager(socketURL: account.origin, config: [
             .log(false),
-            .forceWebsockets(true),
             .reconnects(true),
             .reconnectAttempts(-1),
             .reconnectWait(1),
@@ -64,6 +94,39 @@ public final class RavenRealtime {
         socket = nil
         manager = nil
         joined.removeAll()
+        releaseHostSlot()
+    }
+
+    /// Release this instance's host slot; the last socket out purges.
+    private func releaseHostSlot() {
+        guard let host = countedHost else { return }
+        countedHost = nil
+        // A missing count means the slot was never taken or already released;
+        // treat it as a no-op rather than purging under live siblings.
+        guard let count = Self.socketCountByHost[host] else { assertionFailure("Released a host slot that was never counted"); return }
+        let remaining = count - 1
+        if remaining > 0 {
+            Self.socketCountByHost[host] = remaining
+        } else {
+            Self.socketCountByHost.removeValue(forKey: host)
+            Self.purgeOriginCookies(host)
+        }
+    }
+
+    /// Cookies whose domain is `host` or a parent of it leave the shared jar,
+    /// except a cookie shared with another live socket under the same parent
+    /// domain survives — deleting it would unstick the sibling's transport.
+    /// Callers pass the already-lowercased host.
+    private static func purgeOriginCookies(_ host: String) {
+        let jar = HTTPCookieStorage.shared
+        for cookie in jar.cookies ?? [] {
+            let isDomainCookie = cookie.domain.hasPrefix(".")
+            let lower = (isDomainCookie ? String(cookie.domain.dropFirst()) : cookie.domain).lowercased()
+            guard host == lower || host.hasSuffix("." + lower) else { continue }
+            if isDomainCookie || lower != host,
+               Self.socketCountByHost.keys.contains(where: { $0 != host && ($0 == lower || $0.hasSuffix("." + lower)) }) { continue }
+            jar.deleteCookie(cookie)
+        }
     }
 
     /// Diff desired rooms against the live socket's joined set. Calls while

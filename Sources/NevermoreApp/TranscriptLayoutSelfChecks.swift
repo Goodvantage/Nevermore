@@ -27,7 +27,9 @@ import RavenProtocol
             row("reply", "bob@example.invalid", "2026-11-05 12:36:00.000000", "<p>Bob replies.</p>", extra: ["message_reactions": .string(reactions)]),
             row("nextDay", "bob@example.invalid", "2026-11-06 09:00:00.000000", "<p>Next day from Bob.</p>"),
             row("bot", "admin@example.invalid", "2026-11-06 09:00:30.000000", "<p>Bot report.</p>", extra: ["is_bot_message": .number(1), "bot": .string("hours-bot")]),
-            row("answer", "alice@example.invalid", "2026-11-06 09:01:00.000000", "<p>Answering Bob.</p>", extra: ["is_reply": .bool(true), "linked_message": .string("nextDay")])
+            row("answer", "alice@example.invalid", "2026-11-06 09:01:00.000000", "<p>Answering Bob.</p>", extra: ["is_reply": .bool(true), "linked_message": .string("nextDay")]),
+            row("upload", "bob@example.invalid", "2026-11-06 09:05:00.000000", "", type: "File", extra: ["file": .string("/files/report.pdf")]),
+            row("photo", "alice@example.invalid", "2026-11-06 09:06:00.000000", "", type: "Image", extra: ["file": .string("/files/pic.png")])
         ]
         try await session.store.cacheMessages(rows)
         let defaults = UserDefaults.standard
@@ -69,7 +71,7 @@ import RavenProtocol
 
         check("all fixture messages render", controller.messageRanges.count == rows.count)
         let headed = Set(controller.messageRanges.filter { has(.nevermoreAvatar, in: $0.0) }.map(\.1.id))
-        check("a sender header starts each group: new author, a gap over five minutes, a new day or a bot", headed == ["first", "later", "reply", "nextDay", "bot", "answer"])
+        check("a sender header starts each group: new author, a gap over five minutes, a new day or a bot", headed == ["first", "later", "reply", "nextDay", "bot", "answer", "upload", "photo"])
         let secondTime = session.displayTime(rows[2].creation)
         check("a continued message has no header and keeps its time for the avatar column", !has(.nevermoreAvatar, in: range("second")) && range("second").map { storage.attribute(.nevermoreGutterTime, at: $0.location, effectiveRange: nil) as? String == session.compactTime(rows[2].creation) } == true && range("first").map { storage.attribute(.nevermoreGutterTime, at: $0.location, effectiveRange: nil) == nil } == true)
         let firstTime = session.displayTime(rows[1].creation), firstFull = session.displayTimestamp(rows[1].creation)
@@ -170,6 +172,99 @@ import RavenProtocol
             check("a continued message shows its time in the column only while pointed at", idle == 0 && hovered > 10)
         } else { check("pixel fixture ranges exist", false) }
 
+        // Attachments open on click: the file line and an image's thumbnail
+        // carry an internal link that dispatches to the message's download.
+        session.thumbnails["photo"] = NSImage(size: NSSize(width: 48, height: 32))
+        controller.render(); await controller.renderTask?.value
+        var previewLinks: [(range: NSRange, url: URL)] = []
+        storage.enumerateAttribute(.link, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            if let url = value as? URL, url.scheme == "nevermore-attachment" { previewLinks.append((range, url)) }
+        }
+        check("file and image messages carry preview links on name and thumbnail", previewLinks.count == 3 && previewLinks.filter { $0.url.pathComponents.last == "upload" }.count == 1 && previewLinks.filter { $0.url.pathComponents.last == "photo" }.count == 2)
+        check("the file name and the image thumbnail are the click targets", previewLinks.contains { text.substring(with: $0.range).contains("report.pdf") } && previewLinks.contains { $0.range.length == 1 && $0.url.pathComponents.last == "photo" })
+        if let target = previewLinks.first(where: { $0.url.pathComponents.last == "upload" }) {
+            _ = controller.textView(transcript, clickedOnLink: target.url, at: target.range.location)
+            let dispatched = controller.status.stringValue == "Downloading attachment…" && controller.attachmentDownload != nil
+            let task = controller.attachmentDownload; controller.clearPreview(); await task?.value
+            check("an attachment link dispatches to the message's download", dispatched)
+        } else { check("attachment preview link exists", false) }
+        let statusBefore = controller.status.stringValue
+        if let stale = TranscriptStyle.attachmentLink(for: "gone") { _ = controller.textView(transcript, clickedOnLink: stale, at: 0) }
+        check("stale attachment links cannot start a download", controller.status.stringValue == statusBefore && controller.attachmentDownload == nil)
+        if let window = controller.window {
+            window.orderFront(nil)
+            let nameIndex = text.range(of: "report.pdf").location
+            let glyphRect = layout.boundingRect(forGlyphRange: NSRange(location: layout.glyphIndexForCharacter(at: nameIndex), length: 1), in: container).offsetBy(dx: origin.x, dy: origin.y)
+            let winPoint = transcript.convert(NSPoint(x: glyphRect.midX, y: glyphRect.midY), to: nil)
+            if let up = NSEvent.mouseEvent(with: .leftMouseUp, location: winPoint, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0) { NSApp.postEvent(up, atStart: false) }
+            if let down = NSEvent.mouseEvent(with: .leftMouseDown, location: winPoint, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0) { transcript.mouseDown(with: down) }
+            let clicked = controller.status.stringValue == "Downloading attachment…" && controller.attachmentDownload != nil
+            let task = controller.attachmentDownload; controller.clearPreview(); await task?.value
+            transcript.highlightRect = nil
+            check("a click on the file name in the transcript starts its preview", clicked)
+        }
+        // AppKit reads a clicked link at the press, then tracks it in a
+        // nested event loop where main-actor work keeps running. A render
+        // that replaced the text there could free the link before AppKit
+        // delivered it: clicking a just-sent image crashed. Renders now
+        // wait until the press ends.
+        if let window = controller.window, let thumbnail = previewLinks.first(where: { $0.range.length == 1 && $0.url.pathComponents.last == "photo" }) {
+            let probe = PressProbe()
+            let observer = NotificationCenter.default.addObserver(forName: NSTextStorage.didProcessEditingNotification, object: storage, queue: nil) { _ in
+                MainActor.assumeIsolated { if probe.pressing { probe.editsDuringPress += 1 } else { probe.editsAfterPress += 1 } }
+            }
+            defer { NotificationCenter.default.removeObserver(observer) }
+            let glyphRect = layout.boundingRect(forGlyphRange: NSRange(location: layout.glyphIndexForCharacter(at: thumbnail.range.location), length: 1), in: container).offsetBy(dx: origin.x, dy: origin.y)
+            let winPoint = transcript.convert(NSPoint(x: glyphRect.midX, y: glyphRect.midY), to: nil)
+            window.makeKey()
+            // The fixture cannot download, so a preview a press starts is dropped.
+            await holdPress(probe, in: window, at: winPoint, afterPress: { controller.clearPreview() }) {
+                // Held until the render task has finished, as a quick answer would.
+                controller.render()
+                let rendering = controller.renderTask
+                Task { @MainActor in await rendering?.value; probe.rendered = true }
+                let deadline = Date(timeIntervalSinceNow: 2)
+                while !probe.rendered, Date() < deadline { RunLoop.current.run(mode: .eventTracking, before: Date(timeIntervalSinceNow: 0.01)) }
+            }
+            await controller.renderTask?.value
+            transcript.highlightRect = nil
+            check("a render waits for a press in the transcript to end, keeping the clicked link alive", probe.tracked && probe.rendered && probe.editsDuringPress == 0 && probe.editsAfterPress > 0)
+        } else { check("image thumbnail press fixture exists", false) }
+        // A clear cannot wait for the press like a render: it follows lost
+        // access. The pane empties at once; the links of the old text live
+        // on until the press ends. AppKit and the pane may hold the links
+        // they show, so the press adds one only the text owns.
+        let photo = previewLinks.first { $0.range.length == 1 && $0.url.pathComponents.last == "photo" }?.range.location
+        let plainIndex = photo.flatMap { photo in (0..<photo).reversed().first { storage.attribute(.link, at: $0, effectiveRange: nil) == nil && UnicodeScalar(text.character(at: $0)).map(CharacterSet.alphanumerics.contains) == true } }
+        if let window = controller.window, let plainIndex {
+            let probe = PressProbe()
+            var clearedUnderPress = false
+            let glyphRect = layout.boundingRect(forGlyphRange: NSRange(location: layout.glyphIndexForCharacter(at: plainIndex), length: 1), in: container).offsetBy(dx: origin.x, dy: origin.y)
+            await holdPress(probe, in: window, at: transcript.convert(NSPoint(x: glyphRect.midX, y: glyphRect.midY), to: nil), afterPress: {}) {
+                weak var link: NSURL?
+                autoreleasepool {
+                    let added = NSURL(string: "nevermore-attachment://message/press-probe")
+                    link = added
+                    added.map { storage.addAttribute(.link, value: $0, range: NSRange(location: plainIndex, length: 1)) }
+                    transcript.clearText()
+                }
+                clearedUnderPress = link != nil && transcript.string.isEmpty
+            }
+            controller.render(); await controller.renderTask?.value
+            transcript.setSelectedRange(NSRange(location: 0, length: 0))
+            check("a clear under a press empties the transcript and keeps its links alive until the press ends", probe.tracked && clearedUnderPress && transcript.string.contains("report.pdf"))
+        } else { check("plain text before the thumbnail exists", false) }
+        if let upload = range("upload") {
+            transcript.setSelectedRange(upload)
+            let pasteboard = NSPasteboard(name: NSPasteboard.Name("NevermoreLayoutCheck-\(UUID().uuidString)"))
+            defer { pasteboard.releaseGlobally() }
+            pasteboard.clearContents()
+            let plain = transcript.writeSelection(to: pasteboard, type: .string) ? pasteboard.string(forType: .string) ?? "" : ""
+            let rich = transcript.writeSelection(to: pasteboard, type: .rtf) ? String(decoding: pasteboard.data(forType: .rtf) ?? Data(), as: UTF8.self) : ""
+            check("copied attachment lines keep the name without the preview command", plain.contains("report.pdf") && !plain.contains("Quick Look") && !rich.contains("nevermore-attachment"))
+            transcript.setSelectedRange(NSRange(location: 0, length: 0))
+        } else { check("attachment copy fixture range exists", false) }
+
         // Compact mode drops avatars and gives their column back to text.
         defaults.set(true, forKey: "compactMessages")
         controller.render(); await controller.renderTask?.value
@@ -177,5 +272,44 @@ import RavenProtocol
         let compactTimes = controller.messageRanges.filter { has(.nevermoreGutterTime, in: $0.0) }.count
         check("compact messages keep grouped headers without avatars or column times", compactHeaders == 0 && compactTimes == 0 && transcript.metrics.gutter == 0 && abs(transcript.textContainerOrigin.x - transcript.readingColumnInset) < 0.5 && firstLine("first").hasPrefix("Alice Example  ") && !firstLine("second").hasPrefix("Alice Example"))
         return checks
+    }
+}
+
+/// What happened to the transcript text during and after a held press.
+@MainActor private final class PressProbe {
+    var pressing = false
+    var tracked = false
+    var released = false
+    var releasePosted = false
+    var rendered = false
+    var editsDuringPress = 0
+    var editsAfterPress = 0
+}
+
+/// Holds a press at `point` in `window` and runs `midPress` inside AppKit's
+/// tracking loop, where main-actor work runs during a real press.
+/// `probe.pressing` is set while `mouseDown` runs, `probe.tracked` once
+/// `midPress` ran.
+@MainActor private func holdPress(_ probe: PressProbe, in window: NSWindow, at point: NSPoint, afterPress: @escaping @MainActor () -> Void, midPress: @escaping @MainActor () -> Void) async {
+    // Stamped on delivery: AppKit times the press.
+    let press: @MainActor (NSEvent.EventType) -> NSEvent? = { type in NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) }
+    // A press into the hidden fixture window is not always tracked (the
+    // first may only focus it), so it is repeated until it is.
+    for _ in 0..<3 where !probe.tracked {
+        probe.released = false; probe.releasePosted = false
+        // Delivered from the run loop rather than a main-queue job, as the
+        // event loop does, so main-actor work can run mid-press.
+        RunLoop.main.perform(inModes: [.default]) { MainActor.assumeIsolated {
+            probe.pressing = true; press(.leftMouseDown).map(window.sendEvent); probe.pressing = false
+            probe.released = true; afterPress()
+        } }
+        let timer = Timer(timeInterval: 0, repeats: false) { _ in MainActor.assumeIsolated { probe.tracked = true; midPress() } }
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        // Ends a tracked press. The next attempt waits for it, so a release
+        // meant for an untracked press cannot cut the next one short.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { press(.leftMouseUp).map { NSApp.postEvent($0, atStart: false) }; probe.releasePosted = true }
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while !(probe.released && probe.releasePosted), Date() < deadline { try? await Task.sleep(for: .milliseconds(20)) }
+        timer.invalidate()
     }
 }

@@ -26,7 +26,7 @@ import RavenProtocol
         controller.showWindow(nil)
         controller.window?.contentView?.layoutSubtreeIfNeeded()
         func cell(_ channel: RavenChannel) -> SidebarConversationCell? {
-            guard let row = controller.sidebarItems.firstIndex(where: { $0.1?.id == channel.id }) else { return nil }
+            guard let row = controller.sidebarItems.firstIndex(where: { $0.channel?.id == channel.id }) else { return nil }
             return controller.sidebar.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarConversationCell
         }
         guard let generalCell = cell(general), let image = generalCell.imageView?.image,

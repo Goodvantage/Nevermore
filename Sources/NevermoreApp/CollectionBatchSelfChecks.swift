@@ -40,7 +40,7 @@ import RavenProtocol
         inbox.table.selectRowIndexes(IndexSet(integersIn: 0..<3), byExtendingSelection: false)
         inbox.updateChrome()
         check("only inbox supports multiple selection and disables single-row actions", inbox.table.allowsMultipleSelection && inbox.markReadButton.isEnabled && !inbox.openButton.isEnabled && !inbox.manageButton.isEnabled && inbox.selected == nil)
-        let search = CollectionWindow(owner: isolated, title: "Single selection fixture", records: rows, kind: .search, batchTransport: transport)
+        let search = CollectionWindow(owner: isolated, title: "Single selection fixture", records: rows, kind: .messages, batchTransport: transport)
         defer { search.close() }
         check("other collections keep single selection and hide the batch action", !search.table.allowsMultipleSelection && search.markReadButton.isHidden && !search.canMarkSelectedRead)
         let command = NSMenuItem(title: "Mark Selected Notifications Read", action: #selector(CollectionWindow.markSelectedRead), keyEquivalent: "")

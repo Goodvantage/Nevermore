@@ -25,6 +25,14 @@ import AppKit
         fresh.window?.setContentSize(NSSize(width: 650, height: 500))
         fresh.window?.contentView?.layoutSubtreeIfNeeded()
         results.append(("a narrow window still leaves room for the conversation", sidebar.frame.width >= 200 && fresh.contentController.view.frame.width >= 380))
+        // Full screen sizes the window to the display; a pane constraint that
+        // outranks the window's own size would leave black bars beside it.
+        let wide: CGFloat = 2400
+        fresh.window?.setContentSize(NSSize(width: wide, height: 900))
+        fresh.window?.layoutIfNeeded()
+        let reached = fresh.window?.frame.width ?? 0
+        print("MEASURE wide window: asked \(wide) pt, got \(reached) pt")
+        results.append(("no pane holds the window narrower than a wide display", abs(reached - wide) <= 1))
         let name = "NevermoreGeometryCheck-\(UUID())"
         let key = "NSWindow Frame \(name)"
         defer { UserDefaults.standard.removeObject(forKey: key) }

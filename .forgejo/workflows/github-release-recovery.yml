@@ -1,0 +1,44 @@
+name: Mirror an existing release to GitHub
+
+# Bootstrap or recover a published release without rebuilding or overwriting it.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published Forgejo release tag (for example v0.1.0-beta.4)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Mirror the published Forgejo release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # v4.2.2; the recovery script needs the requested release tag as well as main.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Download the original Forgejo workflow artifact
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          FORGE_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/download-forge-release.py "$RELEASE_TAG" "$RUNNER_TEMP/forge-release"
+
+      - name: Publish its source snapshot and artifacts to GitHub
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          MIRROR_TOKEN_GITHUB: ${{ secrets.MIRROR_TOKEN_GITHUB }}
+        run: >-
+          python3 scripts/github-release-mirror.py "$RELEASE_TAG"
+          "$RUNNER_TEMP/forge-release" "$RUNNER_TEMP/forge-release/release-notes.txt"
+          --allow-license-bootstrap

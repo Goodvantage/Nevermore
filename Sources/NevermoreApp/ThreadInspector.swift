@@ -18,6 +18,8 @@ import NevermoreCore
     private var renderTask: Task<Void, Never>?
     private var detached = false
     private var following = true
+    /// A render found the transcript under a press; see `LiveResizeTextView`.
+    private var renderAfterPress = false
     /// Keeps the bottom of the replies in place while the inspector changes shape.
     private var viewportKeeper: TranscriptViewportKeeper?
     init(session: AccountSession, rootMessage: RavenMessage, conversation: ConversationWindow) {
@@ -41,6 +43,10 @@ import NevermoreCore
         transcript.textContainerInset = NSSize(width: 8, height: 12); transcript.isVerticallyResizable = true; transcript.autoresizingMask = .width; transcript.textContainer?.widthTracksTextView = true
         transcript.minSize = .zero; transcript.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude); transcript.frame = NSRect(x: 0, y: 0, width: scroll.contentSize.width, height: 300)
         transcript.setAccessibilityLabel("Thread replies")
+        transcript.pressDidEnd = { [weak self] in
+            guard let self, self.renderAfterPress else { return }
+            self.renderAfterPress = false; self.render()
+        }
         scroll.documentView = transcript; scroll.hasVerticalScroller = true; scroll.drawsBackground = false
         let reply = NSButton(title: "Open in Window", target: self, action: #selector(openWindow)); reply.toolTip = "Open this thread in its own window to reply"
         let parent = NSButton(title: "Show in Channel", target: self, action: #selector(showParent)); parent.toolTip = "Scroll the conversation to this thread’s first message"
@@ -78,6 +84,7 @@ import NevermoreCore
             do {
                 let rows = MessageWindow.bounded(try await session.cachedMessages(channelID: rootMessage.id, limit: 500), anchorID: following ? nil : messageRanges.first { rect($0.0).maxY >= scroll.contentView.bounds.minY }?.1.id)
                 guard !Task.isCancelled, !detached, !session.stopped else { return }
+                if transcript.isTrackingPress { renderAfterPress = true; return }
                 self.rows = rows
                 let anchor = messageRanges.first { rect($0.0).maxY >= scroll.contentView.bounds.minY }.map { ($0.1.id, rect($0.0).minY - scroll.contentView.bounds.minY) }
                 let output = NSMutableAttributedString(string: ""); messageRanges = []
@@ -118,7 +125,7 @@ import NevermoreCore
         detached = true; refreshTask?.cancel(); renderTask?.cancel(); session.attach(window: subscriptionID, channelID: nil)
         viewportKeeper?.invalidate(); viewportKeeper = nil
         for observer in observers { NotificationCenter.default.removeObserver(observer) }; observers.removeAll()
-        context.stringValue = ""; transcript.string = ""; rows = []; messageRanges = []; status.stringValue = "Thread closed"
+        context.stringValue = ""; transcript.clearText(); rows = []; messageRanges = []; status.stringValue = "Thread closed"
     }
     @objc private func closeInspector() { conversation?.closeThreadInspector() }
     @objc func openWindow() {

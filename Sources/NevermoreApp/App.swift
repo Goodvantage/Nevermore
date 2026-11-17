@@ -32,6 +32,22 @@ import NevermoreCore
         if CommandLine.arguments.contains("--performance-check"), (try? PerformanceMetrics.Options(arguments: CommandLine.arguments)) == nil {
             FileHandle.standardError.write(Data("Performance mode requires --demo, idle seconds 0...600 and iterations 10 or 20.\n".utf8)); exit(2)
         }
+        let checkingSoundSettings = CommandLine.arguments.contains("--check-ui-sound-settings")
+        if CommandLine.arguments.contains("--check-ui-sounds") || checkingSoundSettings {
+            var results = InterfaceSoundSelfChecks.run()
+            if checkingSoundSettings {
+                let application = NSApplication.shared
+                application.setActivationPolicy(.prohibited)
+                let delegate = AppDelegate()
+                withExtendedLifetime(delegate) {
+                    let settings = SettingsController(app: delegate)
+                    results += InterfaceSoundSelfChecks.checkSettings(settings)
+                    settings.close()
+                }
+            }
+            for (label, passed) in results { print("\(passed ? "PASS" : "FAIL") \(label)") }
+            exit(results.allSatisfy(\.1) ? 0 : 1)
+        }
         if CommandLine.arguments.contains("--check-rich-text") {
             do {
                 let results = try RichTextSelfChecks.run()
@@ -64,6 +80,7 @@ import NevermoreCore
     var terminationTask: Task<Void, Never>?
     var accountPreferenceWindows: [UUID: AccountPreferencesController] = [:]
     lazy var updates = AppUpdateController()
+    let interfaceSounds = InterfaceSounds()
     var activityMonitor: Any?
     var menuBarItem: NSStatusItem?
     var shortcutsWindow: NSWindowController?
@@ -88,6 +105,7 @@ import NevermoreCore
         NSApp.appearance = nil
         observeThemeAccessibility()
         configureUpdater(); makeMenus(); updateMenuBarItem(); NSApp.servicesProvider = self
+        interfaceSounds.configure()
         activityMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel]) { event in
             let conversation = event.window?.windowController as? ConversationWindow
             let collection = event.window?.windowController as? CollectionWindow
@@ -144,7 +162,7 @@ import NevermoreCore
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { if !flag { newWindow(nil) }; return true }
-    func applicationWillTerminate(_ notification: Notification) { updates.stop(); for window in windows { window.cancelPromisedFiles(); window.cancelEmojiPicker(); window.closePollWindows(); window.closeCodeReaders(); window.clearPreview() }; PromisedFileReceiver.cleanUpActiveReceives(); if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }; persistWindows(); for session in sessions { session.stop() } }
+    func applicationWillTerminate(_ notification: Notification) { interfaceSounds.stop(); updates.stop(); for window in windows { window.cancelPromisedFiles(); window.cancelEmojiPicker(); window.closePollWindows(); window.closeCodeReaders(); window.clearPreview() }; PromisedFileReceiver.cleanUpActiveReceives(); if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }; persistWindows(); for session in sessions { session.stop() } }
     func persistWindows() {
         guard !CommandLine.arguments.contains("--demo") else { return }
         if UserDefaults.standard.object(forKey: "NSQuitAlwaysKeepsWindows") as? Bool == false {
@@ -253,6 +271,7 @@ import NevermoreCore
     }
     @objc func addAccount(_ sender: Any?) { login = LoginController(app: self); login?.showWindow(nil) }
     func showAccountPreferences(_ session: AccountSession) { guard !session.stopped else { return }; let controller = accountPreferenceWindows[session.account.id] ?? AccountPreferencesController(session: session); accountPreferenceWindows[session.account.id] = controller; controller.showWindow(nil) }
+    func showSettingsPane(_ pane: SettingsPane) { showSettings(nil); settings?.gifSettings.reload(); settings?.select(pane) }
     @objc func showSettings(_ sender: Any?) { if settings == nil { settings = SettingsController(app: self) }; settings?.reloadAccounts(); settings?.reloadGeneralControls(); settings?.reloadReadingControls(); settings?.loginItem.refreshStatus(); settings?.showWindow(nil) }
     @objc func about(_ sender: Any?) { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Nevermore", .credits: NSAttributedString(string: "A native Mac client for Raven.\nIndependent client · running-app notifications only.")]) }
     /// App-modal by design: errors often arrive after the originating window
@@ -395,6 +414,18 @@ import NevermoreCore
                 let design = RavenChannel(raw: .object(["name": .string("design"), "channel_name": .string("design"), "workspace": .string("Acme"), "type": .string("Private")]))
                 let direct = RavenChannel(raw: .object(["name": .string("dm-morgan"), "channel_name": .string("Morgan"), "is_direct_message": .bool(true), "peer_user_id": .string("morgan@example.com")]))
                 try await session.store.cacheChannels([design, direct])
+                // A week of your own messages gives Home's numbers something
+                // to count. Times follow the clock, so the week stays full.
+                let own: [(Double, String, String)] = [
+                    (146, "dm-morgan", "Morning! Did the staging deploy finish?"), (122, "engineering", "Merged the audit log filter."),
+                    (120, "dm-morgan", "Thanks, I will look after lunch."), (98, "dm-morgan", "Pushed the fix for the export timeout."),
+                    (75, "engineering", "CI is green on my branch again."), (72, "dm-morgan", "Can you read the release notes draft?"),
+                    (50, "dm-morgan", "Sounds good."), (47, "engineering", "Who has the staging credentials?"),
+                    (26, "dm-morgan", "Shipping it tomorrow then."), (22, "engineering", "Tagged 2.4.0."), (3, "dm-morgan", "Lunch at the usual place?")
+                ]
+                try await session.store.cacheMessages(own.enumerated().map { index, line in
+                    RavenMessage(raw: .object(["name": .string("demo-own-\(index)"), "channel_id": .string(line.1), "owner": .string(account.user), "creation": .string(session.serverTimestamp(Date().addingTimeInterval(-line.0 * 3600))), "text": .string("<p>\(line.2)</p>"), "message_type": .string("Text")]))
+                })
                 try await session.store.cacheMessages([RavenMessage(raw: .object(["name": .string("demo-design-0"), "channel_id": .string("design"), "owner": .string("morgan@example.com"), "creation": .string("2026-11-07 11:02:00.000000"), "text": .string("<p>The new sidebar marks unread conversations in bold with a count.</p>"), "message_type": .string("Text")])), RavenMessage(raw: .object(["name": .string("demo-dm-0"), "channel_id": .string("dm-morgan"), "owner": .string("morgan@example.com"), "creation": .string("2026-11-07 11:05:00.000000"), "text": .string("<p>Direct messages appear under their own heading.</p>"), "message_type": .string("Text")]))])
             }
             try await session.demoWire?.seed()

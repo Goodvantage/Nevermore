@@ -65,6 +65,10 @@ public enum RavenEndpoints {
         "raven.api.chat_stream.get_older_messages",
         "raven.api.chat_stream.get_newer_messages",
         "raven.api.raven_message.send_message_with_attachments",
+        // Only for GIFs (`AccountSession.deliverGIF`, reached only for a
+        // `SendOperation.isGIF`): the idempotent send above refuses a body
+        // without text.
+        "raven.api.raven_message.send_message",
         "raven.api.raven_message.delete_messages",
         "raven.api.raven_message.get_unread_count_for_channels",
         "raven.api.raven_message.get_saved_messages",

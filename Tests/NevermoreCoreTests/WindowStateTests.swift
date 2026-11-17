@@ -7,8 +7,8 @@ import Testing
     history.visit(ConversationLocation(channelID: "a"))
     let reading = ConversationLocation(channelID: "a", anchorMessageID: "opaque:message", pixelOffset: -19.5, searchText: "scoped query")
     history.capture(reading); history.visit(ConversationLocation(channelID: "b"))
-    #expect(history.back() == reading)
-    #expect(history.forward()?.channelID == "b")
+    #expect(history.back() == .conversation(reading))
+    #expect(history.forward()?.location?.channelID == "b")
     #expect(try JSONDecoder().decode(NavigationHistory.self, from: JSONEncoder().encode(history)) == history)
 }
 @Test func visitingANewConversationTruncatesForwardNavigationAndBoundsMemory() {

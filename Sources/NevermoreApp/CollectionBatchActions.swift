@@ -38,7 +38,6 @@ import RavenProtocol
 
 extension CollectionWindow: NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(previewSearchAttachment) || item.action == #selector(saveSearchAttachment) { return canReadSearchAttachment }
         if item.action == #selector(markSelectedRead) { return canMarkSelectedRead }
         return active
     }

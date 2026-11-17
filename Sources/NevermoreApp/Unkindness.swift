@@ -170,7 +170,7 @@ import RavenProtocol
         return .init(lit: channel.isDM || session.mentionedChannels.contains(channel.id), away: away.contains(channel.id))
     }
 
-    private func row(of channelID: String) -> Int? { owner.sidebarItems.firstIndex { $0.1?.id == channelID } }
+    private func row(of channelID: String) -> Int? { owner.sidebarItems.firstIndex { $0.channel?.id == channelID } }
 
     /// The row's cell when it is on screen.
     private func cell(for channelID: String) -> SidebarConversationCell? {

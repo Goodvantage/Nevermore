@@ -64,7 +64,6 @@ public enum ThemeAudit {
         var problems: [String] = []
         let tag = theme.id.rawValue
         if theme.name.trimmingCharacters(in: .whitespaces).isEmpty { problems.append("\(tag): empty name") }
-        if theme.emptyTitle.isEmpty || theme.emptyDetail.isEmpty { problems.append("\(tag): empty-state text missing") }
         guard let palette = theme.palette else {
             if theme.tone != .system { problems.append("\(tag): a system-colored theme must follow the system tone") }
             if !theme.wallpaper.isEmpty { problems.append("\(tag): a system-colored theme draws no wallpaper") }
