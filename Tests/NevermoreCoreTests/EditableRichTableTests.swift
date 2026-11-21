@@ -84,6 +84,59 @@ struct EditableRichTableTests {
         #expect(throws: (any Error).self) { try EditableRichTable(styled) }
     }
 
+    @Test func insertingAboveTheHeaderDoesNotCreateAnotherHeader() throws {
+        let original = try table("<table title='T'><thead title='Head'><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>C</td><td>D</td></tr></tbody></table>")
+        var value = original
+        try value.insertRow(at: 0)
+        #expect(value.layout.rows == 3)
+        for column in 0..<2 {
+            guard case .element(let tag, _, _) = value.cell(row: 0, column: column) else { Issue.record("Missing inserted cell"); return }
+            #expect(tag == "td")
+        }
+        // The inserted body row lands inside the header's section, ahead of
+        // the original header row. Pin that placement so moving it into a
+        // tbody is a deliberate change.
+        guard case .element("table", _, let sections) = value.node,
+              case .element("thead", _, let headerRows)? = sections.first,
+              case .element("tr", _, let insertedCells)? = headerRows.first else { Issue.record("Malformed table"); return }
+        #expect(insertedCells.allSatisfy { if case .element("td", _, _) = $0 { return true } else { return false } })
+        // The original header row keeps every `th` cell; only the new row
+        // changed, and removing it restores the node exactly.
+        #expect(value.layout.cells.filter { if case .element("th", _, _) = $0.node { return true } else { return false } }.count == 2)
+        try value.removeRow(at: 0)
+        #expect(value.node == original.node)
+
+        // Inserting directly below the header clones the displaced body row,
+        // not the header cells above it.
+        var below = original
+        try below.insertRow(at: 1)
+        for column in 0..<2 {
+            guard case .element(let tag, _, _) = below.cell(row: 1, column: column) else { Issue.record("Missing inserted cell"); return }
+            #expect(tag == "td")
+        }
+        #expect(below.layout.cells.filter { if case .element("th", _, _) = $0.node { return true } else { return false } }.count == 2)
+
+        // No inserted row extends a multi-row header or a header-only table.
+        var multiHeader = try table("<table title='T'><thead><tr><th>A</th></tr><tr><th>B</th></tr></thead><tbody><tr><td>C</td></tr></tbody></table>")
+        try multiHeader.insertRow(at: 1)
+        guard case .element(let multiHeaderTag, _, _) = multiHeader.cell(row: 1, column: 0) else { Issue.record("Missing inserted cell"); return }
+        #expect(multiHeaderTag == "td")
+        #expect(multiHeader.layout.cells.filter { if case .element("th", _, _) = $0.node { return true } else { return false } }.count == 2)
+        var headerOnly = try table("<table title='T'><thead><tr><th>A</th></tr></thead></table>")
+        try headerOnly.insertRow(at: headerOnly.layout.rows)
+        guard case .element(let headerOnlyTag, _, _) = headerOnly.cell(row: 1, column: 0) else { Issue.record("Missing inserted cell"); return }
+        #expect(headerOnlyTag == "td")
+
+        // A headerless table gets plain body cells: no header structure is
+        // synthesized even when inserting above the first row.
+        var plain = try table("<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>")
+        try plain.insertRow(at: 0)
+        guard case .element(let plainTag, _, _) = plain.cell(row: 0, column: 0) else { Issue.record("Missing inserted cell"); return }
+        #expect(plainTag == "td")
+        guard case .element("table", _, let plainSections) = plain.node else { Issue.record("Malformed table"); return }
+        #expect(!plainSections.contains { if case .element("thead", _, _) = $0 { return true } else { return false } })
+    }
+
     @Test func sizeLimitsAndMalformedGeometryAreRejected() throws {
         #expect(throws: (any Error).self) { try EditableRichTable.make(rows: 51, columns: 1) }
         #expect(throws: (any Error).self) { try EditableRichTable.make(rows: 1, columns: 21) }

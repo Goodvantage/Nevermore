@@ -18,23 +18,38 @@ import NevermoreCore
         results.append(("the text system exposes spelling and substitutions menus", spelling.isSuperset(of: [#selector(NSTextView.showGuessPanel(_:)), #selector(NSTextView.checkSpelling(_:)), #selector(NSTextView.toggleContinuousSpellChecking(_:)), #selector(NSTextView.toggleGrammarChecking(_:)), #selector(NSTextView.toggleAutomaticSpellingCorrection(_:))]) && substitutions.isSuperset(of: [#selector(NSTextView.toggleAutomaticQuoteSubstitution(_:)), #selector(NSTextView.toggleAutomaticDashSubstitution(_:)), #selector(NSTextView.toggleAutomaticTextReplacement(_:)), #selector(NSTextView.toggleAutomaticDataDetection(_:))])))
         let titles = NSApp.mainMenu?.items.compactMap { $0.submenu?.title } ?? []
         results.append(("the menu bar follows Mail's File, Edit, View, Go, Conversation, Message, Format, Window, Help order", titles == ["Nevermore", "File", "Edit", "View", "Go", "Conversation", "Message", "Format", "Window", "Help"]))
+        let messageMenu = NSApp.mainMenu?.items.first { $0.submenu?.title == "Message" }?.submenu
+        let markAll = messageMenu?.items.first { $0.title == "Mark All Notifications Read" }
+        let markSelected = messageMenu?.items.first { $0.title == "Mark Selected Notifications Read" }
+        results.append(("Mark All Notifications Read resolves through the app delegate from any window", markAll?.action == #selector(AppDelegate.markAllNotificationsRead(_:)) && markAll?.target == nil))
+        results.append(("Mark Selected Notifications Read stays an Inbox-window command", markSelected?.action == #selector(CollectionWindow.markSelectedRead) && markSelected?.target == nil))
+        if let first = app.windows.first, let markSelected {
+            results.append(("a conversation window disables Mark Selected Notifications Read", !first.validateMenuItem(markSelected)))
+        }
         let go = NSApp.mainMenu?.items.first { $0.submenu?.title == "Go" }?.submenu
         let back = go?.items.first { $0.action == #selector(ConversationWindow.goBack) }, forward = go?.items.first { $0.action == #selector(ConversationWindow.goForward) }
         // AppKit localizes bracket key equivalents for the active keyboard
         // layout, so compare the shortcut's presence and modifiers.
         results.append(("Back and Forward have Command shortcuts in the Go menu", back?.keyEquivalent.isEmpty == false && forward?.keyEquivalent.isEmpty == false && back?.keyEquivalent != forward?.keyEquivalent && back?.keyEquivalentModifierMask == .command && forward?.keyEquivalentModifierMask == .command))
-        var menuKeys: [String: [String]] = [:]
-        for top in NSApp.mainMenu?.items ?? [] {
-            for entry in top.submenu?.items ?? [] {
-                let candidates: [NSMenuItem] = [entry] + (entry.submenu?.items ?? [])
-                for item in candidates where !item.keyEquivalent.isEmpty && !item.isHidden && !item.isAlternate {
-                    menuKeys["\(item.keyEquivalentModifierMask.rawValue)-\(item.keyEquivalent.lowercased())", default: []].append("\(top.submenu?.title ?? "") > \(item.title)")
-                }
-            }
-        }
-        let duplicates = menuKeys.values.filter { $0.count > 1 }
+        let duplicates = duplicateKeyEquivalents(in: NSApp.mainMenu, services: NSApp.servicesMenu)
         for titles in duplicates { print("DIAG duplicate menu key equivalent: \(titles.joined(separator: " | "))") }
         results.append(("menu key equivalents are unique", duplicates.isEmpty))
+        let fixtureServices = NSMenu(title: "Services")
+        fixtureServices.addItem(NSMenuItem(title: "Make New Sticky Note", action: nil, keyEquivalent: "q"))
+        let fixtureApp = NSMenu(title: "Nevermore")
+        fixtureApp.addItem(withTitle: "Services", action: nil, keyEquivalent: "").submenu = fixtureServices
+        fixtureApp.addItem(withTitle: "Quit Nevermore", action: nil, keyEquivalent: "q")
+        let fixtureBar = NSMenu()
+        fixtureBar.addItem(withTitle: "Nevermore", action: nil, keyEquivalent: "").submenu = fixtureApp
+        results.append(("system services' shortcuts do not count as duplicate menu keys", duplicateKeyEquivalents(in: fixtureBar, services: fixtureServices).isEmpty))
+        // The exemption must not hide a real clash between the app's menus.
+        let clashBar = NSMenu()
+        for (menu, title) in [("File", "Quick Look Attachment"), ("Edit", "Paste and Match Style")] {
+            let submenu = NSMenu(title: menu)
+            submenu.addItem(withTitle: title, action: nil, keyEquivalent: "y")
+            clashBar.addItem(withTitle: menu, action: nil, keyEquivalent: "").submenu = submenu
+        }
+        results.append(("two app menu items sharing a shortcut count as a duplicate", duplicateKeyEquivalents(in: clashBar, services: fixtureServices) == [["File > Quick Look Attachment", "Edit > Paste and Match Style"]]))
         let destructive = SheetPrompt.confirmationAlert("Delete?", message: "", confirm: "Delete", destructive: true)
         let ordinary = SheetPrompt.confirmationAlert("Archive?", message: "", confirm: "Archive", destructive: false)
         // NSAlert gives a leading Cancel button Escape and no button Return,
@@ -44,6 +59,9 @@ import NevermoreCore
         app.newMessage(nil)
         let choosing = app.windows.first { $0.conversationChooser != nil }
         results.append(("New Message opens the native recipient and conversation chooser", choosing?.conversationChooser != nil && choosing?.window?.attachedSheet != nil))
+        if let chooser = choosing?.conversationChooser, let user = choosing?.session?.account.user {
+            results.append(("the open-conversation chooser never lists the account user as a person", !chooser.candidates.contains { $0.kind == .person && $0.serverID == user }))
+        }
         choosing?.conversationChooser?.cancel()
         if let host = app.windows.first(where: { $0.session?.stopped == false && $0.window?.isVisible == true }), let session = host.session {
             let tab = app.openTab(beside: host, session: session, channel: host.channel)
@@ -62,6 +80,14 @@ import NevermoreCore
         let stoppedWindow = ConversationWindow(app: app, session: stopped)
         app.windows.append(stoppedWindow); stoppedWindow.showWindow(nil); stoppedWindow.window?.makeKeyAndOrderFront(nil)
         for _ in 0..<100 { if stoppedWindow.window?.isKeyWindow == true { break }; try await Task.sleep(for: .milliseconds(10)) }
+        let writableAccount = Account(origin: URL(string: "http://127.0.0.1:12345")!, user: "performance-fixture@example.invalid", siteName: "Fixture", clientID: "performance-loopback")
+        let writable = try AccountSession(account: writableAccount, directory: directory.appendingPathComponent("writable"), authentication: .loopbackFixture)
+        app.sessions.append(writable)
+        if let markAll {
+            results.append(("Mark All Read stays disabled in the focused demo even with another writable account", !app.validateMenuItem(markAll)))
+        }
+        app.sessions.removeAll { $0 === writable }
+        writable.stop()
         stopped.stop(); app.newWindow(nil)
         let opened = app.windows.last
         results.append(("New Window replaces a stopped focused account with an active session", opened !== stoppedWindow && opened?.session?.stopped == false))
@@ -144,6 +170,25 @@ import NevermoreCore
 
         results += InterfaceSoundSelfChecks.checkSettings(settings)
         return results
+    }
+
+    /// The titles sharing each shortcut used more than once in the menu bar,
+    /// one level of submenus deep. The Services menu is skipped: macOS fills
+    /// it with other apps' services, whose shortcuts the user assigns in
+    /// Keyboard settings and the app's own items take precedence over.
+    private static func duplicateKeyEquivalents(in menuBar: NSMenu?, services: NSMenu?) -> [[String]] {
+        var menuKeys: [String: [String]] = [:]
+        for top in menuBar?.items ?? [] {
+            for entry in top.submenu?.items ?? [] {
+                let submenu = entry.submenu === services ? [] : entry.submenu?.items ?? []
+                let candidates: [NSMenuItem] = [entry] + submenu
+                for item in candidates where !item.keyEquivalent.isEmpty && !item.isHidden && !item.isAlternate {
+                    menuKeys["\(item.keyEquivalentModifierMask.rawValue)-\(item.keyEquivalent.lowercased())", default: []].append("\(top.submenu?.title ?? "") > \(item.title)")
+                }
+            }
+        }
+        // Sorted so the diagnostics read the same from run to run.
+        return menuKeys.values.filter { $0.count > 1 }.sorted { $0.joined() < $1.joined() }
     }
 
     /// `image` drawn at 2x into a bitmap, to compare icons by what they show.

@@ -17,6 +17,8 @@ public final class RavenRealtime {
     /// Channels the caller wants warm. The server drops every room on
     /// disconnect, so this desired set is the only durable state.
     private var desired = Set<String>()
+    /// The rooms this socket should be in, whether or not it is connected.
+    public var desiredChannels: Set<String> { desired }
     /// Rooms emitted on the live socket generation; diffed against `desired`.
     private var joined = Set<String>()
     /// Live sockets per origin host, so cookie cleanup runs only for the

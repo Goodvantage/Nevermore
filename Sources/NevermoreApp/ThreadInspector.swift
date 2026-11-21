@@ -3,6 +3,8 @@ import RavenProtocol
 import NevermoreCore
 
 @MainActor final class ThreadInspector: NSViewController {
+    /// Below this window width the shell hides the pane without releasing it.
+    static let minimumWindowWidth: CGFloat = 1000
     let session: AccountSession
     let rootMessage: RavenMessage
     weak var conversation: ConversationWindow?
@@ -17,6 +19,14 @@ import NevermoreCore
     private var refreshTask: Task<Void, Never>?
     private var renderTask: Task<Void, Never>?
     private var detached = false
+    /// The owning window forgets this pane when it discards private content.
+    var onInvalidated: (@MainActor () -> Void)?
+    var isDetached: Bool { detached }
+    var hasAccess: Bool {
+        !session.stopped && !session.deletedIDs.contains(rootMessage.id)
+            && !ChannelPolicy.isRevoked(channelID: rootMessage.id, revoked: session.revokedChannels, threadParents: session.threadParents)
+            && !ChannelPolicy.isRevoked(channelID: rootMessage.channelID, revoked: session.revokedChannels, threadParents: session.threadParents)
+    }
     private var following = true
     /// A render found the transcript under a press; see `LiveResizeTextView`.
     private var renderAfterPress = false
@@ -77,7 +87,7 @@ import NevermoreCore
     func waitUntilLoaded() async { await refreshTask?.value; await renderTask?.value }
     func render() {
         guard !detached else { return }
-        if session.stopped || session.deletedIDs.contains(rootMessage.id) || session.revokedChannels.contains(rootMessage.channelID) || session.revokedChannels.contains(rootMessage.id) { detach(); return }
+        guard hasAccess else { detach(); return }
         renderTask?.cancel()
         renderTask = Task { [weak self] in
             guard let self else { return }
@@ -126,10 +136,11 @@ import NevermoreCore
         viewportKeeper?.invalidate(); viewportKeeper = nil
         for observer in observers { NotificationCenter.default.removeObserver(observer) }; observers.removeAll()
         context.stringValue = ""; transcript.clearText(); rows = []; messageRanges = []; status.stringValue = "Thread closed"
+        let invalidated = onInvalidated; onInvalidated = nil; invalidated?()
     }
     @objc private func closeInspector() { conversation?.closeThreadInspector() }
     @objc func openWindow() {
-        guard !session.stopped, !session.revokedChannels.contains(rootMessage.channelID) else { return }
+        guard hasAccess else { detach(); return }
         conversation?.app.open(session: session, channel: RavenChannel(raw: .object(["name":.string(rootMessage.id), "channel_name":.string("Thread · \(rootMessage.owner)"), "is_thread":.bool(true), "parent_channel_id":.string(rootMessage.channelID)])))
     }
     @objc func showParent() {

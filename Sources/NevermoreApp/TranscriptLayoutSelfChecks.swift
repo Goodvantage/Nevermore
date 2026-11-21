@@ -21,15 +21,18 @@ import RavenProtocol
         let reactions = #"{"👍": {"count": 2, "users": ["reader@example.invalid", "alice@example.invalid"], "reaction": "👍"}, "🎉": {"count": 1, "users": ["alice@example.invalid"], "reaction": "🎉"}}"#
         let rows = [
             row("event", "alice@example.invalid", "2026-11-05 12:23:00.000000", "Alice Example created fixture.", type: "System"),
-            row("first", "alice@example.invalid", "2026-11-05 12:23:30.000000", "<p>First from Alice.</p>"),
+            row("first", "alice@example.invalid", "2026-11-05 12:23:30.000000", "<p>First from Alice.</p>", extra: ["link_doctype": .string("Project")]),
             row("second", "alice@example.invalid", "2026-11-05 12:24:00.000000", "<p>Second from Alice.</p>"),
-            row("later", "alice@example.invalid", "2026-11-05 12:35:00.000000", "<p>Later from Alice.</p>"),
+            row("later", "alice@example.invalid", "2026-11-05 12:35:00.000000", "<p>Later from Alice.</p>", extra: ["is_edited": .number(1), "link_doctype": .string("Task"), "link_document": .string("TASK-1")]),
             row("reply", "bob@example.invalid", "2026-11-05 12:36:00.000000", "<p>Bob replies.</p>", extra: ["message_reactions": .string(reactions)]),
             row("nextDay", "bob@example.invalid", "2026-11-06 09:00:00.000000", "<p>Next day from Bob.</p>"),
             row("bot", "admin@example.invalid", "2026-11-06 09:00:30.000000", "<p>Bot report.</p>", extra: ["is_bot_message": .number(1), "bot": .string("hours-bot")]),
             row("answer", "alice@example.invalid", "2026-11-06 09:01:00.000000", "<p>Answering Bob.</p>", extra: ["is_reply": .bool(true), "linked_message": .string("nextDay")]),
             row("upload", "bob@example.invalid", "2026-11-06 09:05:00.000000", "", type: "File", extra: ["file": .string("/files/report.pdf")]),
-            row("photo", "alice@example.invalid", "2026-11-06 09:06:00.000000", "", type: "Image", extra: ["file": .string("/files/pic.png")])
+            row("photo", "alice@example.invalid", "2026-11-06 09:06:00.000000", "", type: "Image", extra: ["file": .string("/files/pic.png")]),
+            // Answers a message outside the loaded window; Raven's copy of it
+            // names the author, and its plain text holds a spoiler.
+            row("lateAnswer", "alice@example.invalid", "2026-11-06 09:06:30.000000", "<p>Answering an old one.</p>", extra: ["is_reply": .bool(true), "linked_message": .string("unloaded-origin"), "replied_message_details": .string(#"{"owner": "bob@example.invalid", "content": "The butler did it", "message_type": "Text", "creation": "2026-11-01 08:00:00"}"#)])
         ]
         try await session.store.cacheMessages(rows)
         let defaults = UserDefaults.standard
@@ -69,6 +72,33 @@ import RavenProtocol
             return layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: location), effectiveRange: nil).offsetBy(dx: origin.x, dy: origin.y)
         }
 
+        do {
+            let originalFontSize = defaults.object(forKey: "fontSize")
+            defer {
+                if let originalFontSize { defaults.set(originalFontSize, forKey: "fontSize") }
+                else { defaults.removeObject(forKey: "fontSize") }
+            }
+            func fontSize(of string: NSAttributedString, matching label: String) -> CGFloat? {
+                let location = (string.string as NSString).range(of: label).location
+                guard location != NSNotFound else { return nil }
+                return (string.attribute(.font, at: location, effectiveRange: nil) as? NSFont)?.pointSize
+            }
+            for size: CGFloat in [11, 13, 24] {
+                defaults.set(Double(size), forKey: "fontSize")
+                controller.render(); await controller.renderTask?.value
+                let metrics = TranscriptMetrics(size: size, compact: false)
+                let divider = TranscriptStyle.unreadDivider(metrics: metrics)
+                check("the unread divider follows reading size at \(Int(size)) pt",
+                      fontSize(of: divider, matching: "Unread messages") == max(11, size - 2)
+                        && divider.attribute(.nevermoreReadingControl, at: 0, effectiveRange: nil) as? Bool == true)
+                check("linked-document metadata follows reading size at \(Int(size)) pt",
+                      fontSize(of: storage, matching: "Linked document: Task · TASK-1") == max(11, size - 2))
+            }
+            check("linked-document metadata omits the separator without an identifier",
+                  storage.string.contains("Linked document: Project") && !storage.string.contains("Linked document: Project ·"))
+        }
+        controller.render(); await controller.renderTask?.value
+
         check("all fixture messages render", controller.messageRanges.count == rows.count)
         let headed = Set(controller.messageRanges.filter { has(.nevermoreAvatar, in: $0.0) }.map(\.1.id))
         check("a sender header starts each group: new author, a gap over five minutes, a new day or a bot", headed == ["first", "later", "reply", "nextDay", "bot", "answer", "upload", "photo"])
@@ -93,6 +123,8 @@ import RavenProtocol
         }
         check("day dividers and system events sit in the middle of the pane", transcript.metrics.gutter > 0 && offCenter(days[0]) < 1 && offCenter("Alice Example created fixture.") < 1)
         check("bot messages name the bot, not the account it posts as", firstLine("bot").hasPrefix("Hours Bot  "))
+        let edited = range("later").map { text.substring(with: $0) } ?? ""
+        check("an edited message says so after its text, as in Raven", edited.contains("Later from Alice. (edited)") && !(range("first").map { text.substring(with: $0) } ?? "(edited)").contains("(edited)"))
         var chips: [(String, Bool)] = []
         if let reply = range("reply") { storage.enumerateAttribute(.nevermoreReactionChip, in: reply) { value, range, _ in if let mine = value as? Bool { chips.append((text.substring(with: range), mine)) } } }
         check("reactions are chips, with the reader's own marked", chips.count == 2 && chips.contains { $0 == ("👍 2", true) } && chips.contains { $0 == ("🎉 1", false) })
@@ -105,7 +137,25 @@ import RavenProtocol
             let copied = transcript.writeSelection(to: pasteboard, type: .string) ? pasteboard.string(forType: .string) ?? "" : ""
             check("reply quotes show the quoted author with a bar and copy as before", has(.nevermoreQuoteBar, in: answer) && text.substring(with: answer).contains("Bob Builder  Next day from Bob.\n") && copied.contains("↪ Bob Builder:  Next day from Bob.\nAnswering Bob."))
             transcript.setSelectedRange(NSRange(location: 0, length: 0))
+            // The quote is a way to the answered message.
+            var target: (NSRange, String)?
+            storage.enumerateAttribute(.nevermoreReplyTarget, in: answer) { value, range, stop in if let id = value as? String { target = (range, id); stop.pointee = true } }
+            let quoteGlyph = target.map { layout.glyphIndexForCharacter(at: $0.0.location + 1) } ?? 0
+            let quoteLine = layout.lineFragmentUsedRect(forGlyphAt: quoteGlyph, effectiveRange: nil)
+            let onQuote = NSPoint(x: transcript.textContainerOrigin.x + quoteLine.minX + 20, y: transcript.textContainerOrigin.y + quoteLine.midY)
+            let beside = NSPoint(x: transcript.bounds.maxX - 4, y: onQuote.y)
+            check("reply quotes carry the answered message, and only their text is a target", target?.1 == "nextDay" && transcript.replyTarget(at: onQuote) == "nextDay" && transcript.replyTarget(at: beside) == nil)
+            transcript.setSelectedRange(NSRange(location: answer.location + 1, length: 0))
+            let accessibilityJump = controller.transcriptAccessibility.actions().first { $0.name == "Show Answered Message" }
+            check("VoiceOver offers the same way to the answered message", accessibilityJump != nil)
+            controller.showQuotedMessage("nextDay")
+            let caret = transcript.selectedRange()
+            check("a click on a reply quote puts the caret on the answered message", caret.length == 0 && range("nextDay").map { NSLocationInRange(caret.location, $0) } == true && transcript.highlightRect != nil && !controller.isFollowing)
+            transcript.setSelectedRange(NSRange(location: 0, length: 0)); controller.updateMessageHighlight()
         } else { check("reply fixture renders", false) }
+        if let late = range("lateAnswer") {
+            check("a reply to an unloaded message names its author from Raven's copy and shows none of its text", text.substring(with: late).hasPrefix("Bob Builder\n") && !text.substring(with: late).contains("butler") && has(.nevermoreReplyTarget, in: late))
+        } else { check("reply to an unloaded message renders", false) }
         // A quote must not reveal what its message hides.
         let hidden = row("hidden", "bob@example.invalid", "2026-11-06 09:02:00.000000", #"<p>The butler <span data-spoiler="true">did it</span>.</p>"#)
         check("reply quotes keep spoilers masked", controller.replyPreview(hidden) == "The butler [Spoiler].")
@@ -184,13 +234,49 @@ import RavenProtocol
         check("the file name and the image thumbnail are the click targets", previewLinks.contains { text.substring(with: $0.range).contains("report.pdf") } && previewLinks.contains { $0.range.length == 1 && $0.url.pathComponents.last == "photo" })
         if let target = previewLinks.first(where: { $0.url.pathComponents.last == "upload" }) {
             _ = controller.textView(transcript, clickedOnLink: target.url, at: target.range.location)
-            let dispatched = controller.status.stringValue == "Downloading attachment…" && controller.attachmentDownload != nil
-            let task = controller.attachmentDownload; controller.clearPreview(); await task?.value
+            let dispatched = controller.status.stringValue == "Downloading attachment…" && !controller.attachmentDownloads.isEmpty
+            let movedCaret = controller.selectedMessage?.id == "upload"
+            let tasks = controller.attachmentDownloads; controller.clearPreview(); for task in tasks { await task.value }
             check("an attachment link dispatches to the message's download", dispatched)
+            check("a click on a file moves the caret to its message, so Space shows the same file", movedCaret)
+            // A window wide enough for the File panel shows the file there.
+            if let window = controller.window {
+                let frame = window.frame
+                window.setFrame(NSRect(origin: frame.origin, size: NSSize(width: max(frame.width, FileInspector.minimumWindowWidth + 100), height: frame.height)), display: false)
+                _ = controller.textView(transcript, clickedOnLink: target.url, at: target.range.location)
+                let panel = controller.fileInspector
+                let shown = { controller.splitController.splitViewItems.contains { $0.viewController === panel } }
+                let opened = panel?.source.messageID == "upload" && shown()
+                // Quick Look of another file has its own download.
+                let panelDownload = controller.fileDownload
+                if let photo = controller.messages.first(where: { $0.id == "photo" }) { controller.fetchAttachment(save: false, message: photo) }
+                let keptDownload = panelDownload != nil && controller.fileDownload == panelDownload && controller.attachmentDownload != nil && controller.fileInspector === panel
+                // The fixture cannot download; drop the Quick Look before its error alert.
+                controller.attachmentAttempt = UUID(); controller.attachmentDownload?.cancel()
+                // A narrow window hides the panel and a wide one brings it back.
+                let wide = window.frame
+                window.setFrame(NSRect(origin: wide.origin, size: NSSize(width: FileInspector.minimumWindowWidth - 100, height: wide.height)), display: false)
+                let hidden = controller.fileInspector === panel && controller.fileInspectorCollapsedByWidth && !shown() && controller.fileDownload == panelDownload
+                window.setFrame(wide, display: false)
+                let restored = controller.fileInspector === panel && !controller.fileInspectorCollapsedByWidth && shown()
+                // Moving the caret to another file's message shows that file.
+                if let photo = range("photo") { transcript.setSelectedRange(NSRange(location: photo.location, length: 0)) }
+                try? await Task.sleep(for: .milliseconds(400))
+                let followed = controller.fileInspector?.source.messageID == "photo" && controller.fileInspector !== panel
+                if let first = range("first") { transcript.setSelectedRange(NSRange(location: first.location, length: 0)) }
+                try? await Task.sleep(for: .milliseconds(400))
+                let stayed = controller.fileInspector?.source.messageID == "photo"
+                let wideTasks = controller.attachmentDownloads; controller.clearPreview(); for task in wideTasks { await task.value }
+                check("a click on a file opens the File panel beside the conversation, and leaving closes it", opened && controller.fileInspector == nil && !controller.splitController.splitViewItems.contains { $0.viewController is FileInspector })
+                check("Quick Look of another file leaves the File panel's download running", keptDownload)
+                check("a narrow window hides the File panel with its download, and widening brings it back", hidden && restored)
+                check("the File panel follows the caret to another file and stays on messages without one", followed && stayed)
+                window.setFrame(frame, display: false)
+            } else { check("a click on a file opens the File panel beside the conversation, and leaving closes it", false) }
         } else { check("attachment preview link exists", false) }
         let statusBefore = controller.status.stringValue
         if let stale = TranscriptStyle.attachmentLink(for: "gone") { _ = controller.textView(transcript, clickedOnLink: stale, at: 0) }
-        check("stale attachment links cannot start a download", controller.status.stringValue == statusBefore && controller.attachmentDownload == nil)
+        check("stale attachment links cannot start a download", controller.status.stringValue == statusBefore && controller.attachmentDownloads.isEmpty)
         if let window = controller.window {
             window.orderFront(nil)
             let nameIndex = text.range(of: "report.pdf").location
@@ -198,8 +284,8 @@ import RavenProtocol
             let winPoint = transcript.convert(NSPoint(x: glyphRect.midX, y: glyphRect.midY), to: nil)
             if let up = NSEvent.mouseEvent(with: .leftMouseUp, location: winPoint, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0) { NSApp.postEvent(up, atStart: false) }
             if let down = NSEvent.mouseEvent(with: .leftMouseDown, location: winPoint, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0) { transcript.mouseDown(with: down) }
-            let clicked = controller.status.stringValue == "Downloading attachment…" && controller.attachmentDownload != nil
-            let task = controller.attachmentDownload; controller.clearPreview(); await task?.value
+            let clicked = controller.status.stringValue == "Downloading attachment…" && !controller.attachmentDownloads.isEmpty
+            let tasks = controller.attachmentDownloads; controller.clearPreview(); for task in tasks { await task.value }
             transcript.highlightRect = nil
             check("a click on the file name in the transcript starts its preview", clicked)
         }
@@ -276,7 +362,7 @@ import RavenProtocol
 }
 
 /// What happened to the transcript text during and after a held press.
-@MainActor private final class PressProbe {
+@MainActor final class PressProbe {
     var pressing = false
     var tracked = false
     var released = false

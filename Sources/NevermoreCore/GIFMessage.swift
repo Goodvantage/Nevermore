@@ -7,8 +7,9 @@ import Foundation
 /// not uploaded to the Raven site; every reader's client loads it from the
 /// service. The body has no text, which Raven's idempotent send refuses
 /// ("Cannot send an empty message"); `Session` therefore sends these
-/// through Raven's plain send and checks for an earlier delivery before a
-/// retry.
+/// through Raven's plain send, which has no client idempotency key. An
+/// uncertain attempt waits for explicit review instead of replaying itself,
+/// and a deliberate retry posts the GIF again.
 public enum GIFMessage {
     /// The message body for `item`.
     public static func html(for item: GIFItem) -> String {

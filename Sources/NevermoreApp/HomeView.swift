@@ -99,7 +99,7 @@ extension Notification.Name {
         menu.delegate = self
         self.menu = menu
         let center = NotificationCenter.default
-        for name in [Notification.Name.sessionChanged, .homeFeedChanged, .sessionAvatarsChanged, .draftChanged] {
+        for name in [Notification.Name.sessionChanged, .homeFeedChanged, .sessionAvatarsChanged, .sessionPresenceChanged, .draftChanged] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 let source = note.object as? AccountSession
                 MainActor.assumeIsolated { guard let self, source === self.owner?.session else { return }; self.setNeedsReload() }
@@ -199,10 +199,12 @@ extension Notification.Name {
 
     /// What Later says with no rows to show. A part that failed already has
     /// its own note, so a failure never reads as nothing saved.
-    static func emptyLaterNote(reminders: HomeFeed.Part<[JSONValue]>, saved: HomeFeed.Part<[JSONValue]>) -> String? {
-        if case .loading = reminders { return "Loading…" }
-        if case .loading = saved { return "Loading…" }
-        guard reminders.value != nil, saved.value != nil else { return nil }
+    static func emptyLaterNote(_ feed: HomeFeed.Snapshot) -> String? {
+        if feed.reminders.isLoading || feed.saved.isLoading || feed.draftRead.isLoading || feed.outboxRead.isLoading {
+            return "Loading…"
+        }
+        guard feed.reminders.value != nil, feed.saved.value != nil,
+              feed.draftRead.value != nil, feed.outboxRead.value != nil else { return nil }
         return "Nothing saved for later. Save a message or set a reminder from its menu."
     }
 
@@ -394,13 +396,13 @@ private extension NSView {
         } else if case .failed = feed.saved {
             card.add(HomeText.note("Saved messages could not be loaded."))
         }
-        let drafts = feed.drafts.filter { draft in session.channels.contains { $0.id == draft.channelID } }
-        if let first = drafts.first {
-            let names = drafts.prefix(3).compactMap { draft in session.channels.first { $0.id == draft.channelID }.map(label) }.joined(separator: " · ")
+        let drafts = homeDraftDestinations(for: session)
+        if !drafts.isEmpty {
+            let names = drafts.prefix(3).map { label($0.channel) }.joined(separator: " · ")
             let title = drafts.count == 1 ? "1 draft" : "\(drafts.count) drafts"
             let row = HomeRow(icon: HomeSymbol("square.and.pencil"), title: HomeText.title(title), detail: HomeText.detail(names), trailing: nil)
             row.setAccessibilityLabel("\(title): \(names)")
-            row.onPress = { [weak owner, session] in if let channel = session.channels.first(where: { $0.id == first.channelID }) { owner?.select(channel) } }
+            row.onPress = { [weak owner] in owner?.openHomeDrafts() }
             card.add(row); rows += 1
         }
         if !feed.unsent.isEmpty {
@@ -410,7 +412,9 @@ private extension NSView {
             row.onPress = { [weak owner] in owner?.outbox() }
             card.add(row); rows += 1
         }
-        if rows == 0, let note = HomeView.emptyLaterNote(reminders: feed.reminders, saved: feed.saved) { card.add(HomeText.note(note)) }
+        if case .failed = feed.draftRead { card.add(HomeText.note("Drafts could not be loaded.")) }
+        if case .failed = feed.outboxRead { card.add(HomeText.note("The outbox could not be loaded.")) }
+        if rows == 0, let note = HomeView.emptyLaterNote(feed) { card.add(HomeText.note(note)) }
         return card
     }
 
@@ -470,10 +474,7 @@ private extension NSView {
         let calendar = session.displayCalendar
         let now = Date()
         let summary = HomeWeekSummary.make(sent: sent.map(\.date), now: now, calendar: calendar)
-        let difference = summary.thisWeek - summary.previousWeek
-        // Neither more nor fewer is good or bad, so both read the same way.
-        let comparison = difference == 0 ? "Same as the week before" : "\(abs(difference)) \(difference > 0 ? "more" : "fewer") than the week before"
-        let sentStat = HomeStat(label: "Messages sent", value: String(summary.thisWeek), detail: comparison)
+        let sentStat = HomeStat(label: "Messages sent", value: String(summary.thisWeek), detail: summary.comparison)
         let hour: HomeStat
         if let busiest = summary.busiestHour {
             hour = HomeStat(label: "Busiest hour", value: hourRange(busiest, calendar: calendar), detail: summary.busiestHourCount == 1 ? "1 message" : "\(summary.busiestHourCount) messages")
@@ -521,9 +522,9 @@ private extension NSView {
                 let unread = feed.unreadThreads[id] ?? 0
                 let title = NSMutableAttributedString(attributedString: HomeText.title(messageText(thread["content"].string ?? thread["text"].string)))
                 if unread > 0 { title.append(NSAttributedString(string: "  \(unread) new", attributes: HomeText.accentAttributes)) }
-                let replies = Int(thread["reply_count"].numberValue ?? 0)
+                let replies = thread["reply_count"].nonnegativeCount.map { $0 == 1 ? "1 reply" : "\($0) replies" }
                 let place = session.channels.first { $0.id == parent }.map(label) ?? (thread["is_dm_thread"].bool ? "Direct message" : "")
-                let detail = [place, replies == 1 ? "1 reply" : "\(replies) replies"].filter { !$0.isEmpty }.joined(separator: " · ")
+                let detail = [place, replies].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
                 let icon = thread["owner"].string.map { personAvatar($0, size: 28) } ?? HomeSymbol("bubble.left.and.text.bubble.right")
                 let row = HomeRow(icon: icon, title: title, detail: HomeText.detail(detail), trailing: time(thread["last_message_timestamp"].string))
                 row.setAccessibilityLabel([title.string, detail].joined(separator: ", "))
@@ -545,7 +546,7 @@ private extension NSView {
             if files.isEmpty { card.add(HomeText.note("Files and images shared with you appear here.")) }
             for file in files {
                 let name = fileName(file)
-                let size = file["file_size"].numberValue.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) }
+                let size = file["file_size"].nonnegativeCount.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
                 let detail = [origin(owner: file["owner"].string, channelID: file["channel_id"].string), size].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
                 let row = HomeRow(icon: HomeFileIcon(filename: name), title: HomeText.title(name), detail: HomeText.detail(detail), trailing: time(file["creation"].string))
                 row.setAccessibilityLabel("\(name), \(detail)")
@@ -599,7 +600,7 @@ private extension NSView {
         return full.split(separator: " ").first.map(String.init) ?? full
     }
 
-    private func label(_ channel: RavenChannel) -> String { channel.isDM ? channel.title : "# \(channel.title)" }
+    private func label(_ channel: RavenChannel) -> String { homeChannelLabel(channel) }
 
     /// "Mara in # design": who wrote a message and where.
     private func origin(owner user: String?, channelID: String?) -> String {
@@ -641,19 +642,58 @@ private extension NSView {
     }
 }
 
-private extension JSONValue {
-    var numberValue: Double? {
-        switch self {
-        case .number(let value): value.isFinite ? value : nil
-        case .string(let text): Double(text)
-        default: nil
-        }
+/// Later's draft destinations: a stored draft paired with the channel it
+/// belongs to. A draft whose channel is gone or no longer accessible is not
+/// a destination, so Home cannot offer it.
+@MainActor private func homeDraftDestinations(for session: AccountSession) -> [(draft: Draft, channel: RavenChannel)] {
+    session.home.snapshot.drafts.compactMap { draft in
+        guard let channel = session.channels.first(where: { $0.id == draft.channelID }),
+              !ChannelPolicy.isRevoked(channelID: channel.id, revoked: session.revokedChannels, threadParents: session.threadParents) else { return nil }
+        return (draft: draft, channel: channel)
     }
+}
+
+/// How a channel is named in Home rows: "# design", or the peer for a DM.
+@MainActor private func homeChannelLabel(_ channel: RavenChannel) -> String { channel.isDM ? channel.title : "# \(channel.title)" }
+
+/// The draft preview shown beside a destination in the chooser.
+@MainActor private func homeDraftDetail(_ draft: Draft) -> String {
+    let plain = (try? RichTextCodec.parse(draft.html)).map { RichTextCodec.plainText($0) } ?? ""
+    let text = plain.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    if draft.attachments.isEmpty { return text.isEmpty ? "Draft" : String(text.prefix(60)) }
+    return text.isEmpty ? "Draft with attachments" : "\(String(text.prefix(60))) · attachments"
 }
 
 // MARK: - Actions
 
 extension ConversationWindow {
+    /// Opens the draft row in Home's Later card. One destination opens
+    /// directly; several offer the native choice sheet.
+    fileprivate func openHomeDrafts() {
+        guard let session, let window else { return }
+        let destinations = homeDraftDestinations(for: session)
+        guard !destinations.isEmpty else { return }
+        if destinations.count == 1 {
+            openHomeDraft(destinations[0].channel.id, session: session)
+            return
+        }
+        let choices = destinations.map { destination in
+            ChoiceSheet.Choice(id: destination.channel.id, title: homeChannelLabel(destination.channel), detail: homeDraftDetail(destination.draft))
+        }
+        Task { [weak self] in
+            guard let picked = try? await ChoiceSheet.choose(title: "Open Draft", prompt: "Choose the conversation whose draft you want to continue.", choices: choices, allowsMultiple: false, on: window), let id = picked.first else { return }
+            self?.openHomeDraft(id, session: session)
+        }
+    }
+
+    /// Opens one draft destination after rechecking the original session,
+    /// Home's current state and the destination's eligibility.
+    fileprivate func openHomeDraft(_ channelID: String, session: AccountSession) {
+        guard isCurrent(session), !home.isHidden,
+              let destination = homeDraftDestinations(for: session).first(where: { $0.channel.id == channelID }) else { return }
+        select(destination.channel)
+    }
+
     /// Opens a message in its conversation in this window. Thread replies
     /// open their thread; access the session lost stays closed.
     func openMessage(channelID: String?, messageID: String?, parentID: String?) {
@@ -944,7 +984,7 @@ extension ConversationWindow {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-/// A person in "You Talk with Most": portrait, first name, status.
+/// A person in "People You Talk With Most": portrait, first name, status.
 @MainActor final class HomePerson: HomePressable {
     static let width: CGFloat = 84
     init(avatar: HomeAvatar, name: String, status: String) {
@@ -1113,6 +1153,11 @@ extension ConversationWindow {
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
 
+    static func badgeTextColor(on fill: NSColor) -> NSColor {
+        guard let color = ThemeColor(nsColor: fill) else { return .labelColor }
+        return NSColor(theme: color.readableForeground)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         let rect = bounds
         if let image {
@@ -1146,12 +1191,13 @@ extension ConversationWindow {
             color.setFill(); NSBezierPath(ovalIn: ring.insetBy(dx: 1.5, dy: 1.5)).fill()
         }
         if badge > 0 {
-            let text = NSAttributedString(string: badge > 99 ? "99+" : String(badge), attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .bold), .foregroundColor: NSColor.themeAccentText])
+            let fill = NSColor.themeAccent
+            let text = NSAttributedString(string: badge > 99 ? "99+" : String(badge), attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .bold), .foregroundColor: Self.badgeTextColor(on: fill)])
             let textSize = text.size()
             let height: CGFloat = 17
             let width = max(height, textSize.width + 9)
             let pill = NSRect(x: rect.maxX - width + 5, y: rect.minY - 4, width: width, height: height)
-            NSColor.themeAccent.setFill(); NSBezierPath(roundedRect: pill, xRadius: height / 2, yRadius: height / 2).fill()
+            fill.setFill(); NSBezierPath(roundedRect: pill, xRadius: height / 2, yRadius: height / 2).fill()
             text.draw(at: NSPoint(x: pill.midX - textSize.width / 2, y: pill.midY - textSize.height / 2))
         }
     }
@@ -1231,13 +1277,26 @@ extension ConversationWindow {
 /// window; drag rows to reorder.
 @MainActor final class HomeCustomizeController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     private let table = NSTableView()
+    private lazy var moveUp = moveButton("Move Up", symbol: "arrow.up", key: NSUpArrowFunctionKey)
+    private lazy var moveDown = moveButton("Move Down", symbol: "arrow.down", key: NSDownArrowFunctionKey)
     private var layout = HomePreferences.layout
     private static let dragType = NSPasteboard.PasteboardType("ch.goodvantage.Nevermore.home-module")
+
+    private func moveButton(_ title: String, symbol: String, key: Int) -> NSButton {
+        let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage(),
+                              target: self, action: #selector(moveSelected(_:)))
+        button.controlSize = .small
+        button.setAccessibilityLabel(title)
+        button.toolTip = title
+        button.keyEquivalent = String(UnicodeScalar(key)!)
+        button.keyEquivalentModifierMask = .option
+        return button
+    }
 
     override func loadView() {
         let title = NSTextField(labelWithString: "Customize Home")
         title.font = .systemFont(ofSize: 13, weight: .semibold)
-        let hint = NSTextField(wrappingLabelWithString: "Choose what Home shows. Drag to change the order.")
+        let hint = NSTextField(wrappingLabelWithString: "Choose what Home shows. Drag rows or select one and use the arrows to reorder.")
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("module"))
@@ -1253,7 +1312,11 @@ extension ConversationWindow {
         table.setAccessibilityLabel("Home modules")
         let restore = NSButton(title: "Restore Defaults", target: self, action: #selector(restoreDefaults))
         restore.controlSize = .small
-        let stack = NSStackView(views: [title, hint, table, restore])
+        let actions = NSStackView(views: [moveUp, moveDown, NSView(), restore])
+        actions.orientation = .horizontal
+        actions.spacing = 4
+        updateMoveButtons()
+        let stack = NSStackView(views: [title, hint, table, actions])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -1261,6 +1324,7 @@ extension ConversationWindow {
         NSLayoutConstraint.activate([
             stack.widthAnchor.constraint(equalToConstant: 260),
             table.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28),
+            actions.widthAnchor.constraint(equalTo: table.widthAnchor),
             table.heightAnchor.constraint(equalToConstant: CGFloat(HomeModule.allCases.count) * 26),
             hint.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28)
         ])
@@ -1288,10 +1352,39 @@ extension ConversationWindow {
         HomePreferences.layout = layout
     }
 
+    func tableViewSelectionDidChange(_ notification: Notification) { updateMoveButtons() }
+
+    private func updateMoveButtons() {
+        let row = table.selectedRow
+        moveUp.isEnabled = layout.order.indices.contains(row) && row > 0
+        moveDown.isEnabled = layout.order.indices.contains(row) && row + 1 < layout.order.count
+    }
+
+    @objc private func moveSelected(_ sender: NSButton) {
+        let row = table.selectedRow
+        guard layout.order.indices.contains(row) else { return }
+        let target = sender === moveUp ? row - 1 : row + 1
+        guard layout.order.indices.contains(target) else { return }
+        move(layout.order[row], to: target)
+    }
+
+    private func move(_ module: HomeModule, to index: Int) {
+        layout.move(module, to: index)
+        HomePreferences.layout = layout
+        table.reloadData()
+        table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        updateMoveButtons()
+        NSAccessibility.post(element: table, notification: .announcementRequested, userInfo: [
+            .announcement: "\(module.title), position \(index + 1) of \(layout.order.count)",
+            .priority: NSAccessibilityPriorityLevel.medium.rawValue
+        ])
+    }
+
     @objc private func restoreDefaults() {
         layout = .standard
         HomePreferences.layout = layout
         table.reloadData()
+        updateMoveButtons()
     }
 
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
@@ -1308,9 +1401,8 @@ extension ConversationWindow {
     func tableView(_ tableView: NSTableView, acceptDrop info: any NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
         guard let raw = info.draggingPasteboard.pasteboardItems?.first?.string(forType: Self.dragType),
               let module = HomeModule(rawValue: raw), let from = layout.order.firstIndex(of: module) else { return false }
-        layout.move(module, to: from < row ? row - 1 : row)
-        HomePreferences.layout = layout
-        tableView.reloadData()
+        guard (0...layout.order.count).contains(row) else { return false }
+        move(module, to: from < row ? row - 1 : row)
         return true
     }
 }

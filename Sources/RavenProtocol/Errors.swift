@@ -21,9 +21,11 @@ public enum RavenError: Error, Sendable, Equatable {
     case http(Int, String?)
     /// The response did not match the documented envelope or payload contract.
     case invalidResponse
+    /// A download or response body exceeded the caller's byte budget. The
+    /// associated value is the limit that applied, not always 64 MB.
+    case resourceLimit(Int)
     /// The request was refused because it would send this account's
     /// credentials to a different origin.
-    case resourceLimit
     case crossOrigin
     /// Secure storage returned an OSStatus.
     case keychain(Int32)
@@ -38,6 +40,18 @@ public enum RavenError: Error, Sendable, Equatable {
             if status == 401 || status == 403 { return true }
             return ["PermissionError", "AuthenticationError"].contains(kind ?? "")
         default: return false
+        }
+    }
+
+    /// A permanent client failure can occur after the server accepted a POST,
+    /// such as rejecting an oversized acknowledgement or invalidating the
+    /// session before it consumes the response. Only an invalid request site
+    /// or an explicit, definitive HTTP refusal rules out acceptance here.
+    public var definitivelyRefusedMutation: Bool {
+        switch self {
+        case .invalidSite: true
+        case .http: isPermanent
+        default: false
         }
     }
 
@@ -56,6 +70,22 @@ public enum RavenError: Error, Sendable, Equatable {
             default: return false
             }
         }
+    }
+}
+
+public extension RavenError {
+    /// Hard byte ceiling enforced for attachment uploads and downloads.
+    static let maximumAttachmentBytes = 64 * 1024 * 1024
+}
+
+extension RavenError {
+    /// The enforced byte budget in the same units the reader thinks in, so a
+    /// 512-byte preview budget and a 64 MB attachment budget each report the
+    /// limit that actually applied. `locale` keeps the number in the same
+    /// language as the surrounding sentence.
+    public static func formattedResourceLimit(_ bytes: Int, locale: Locale? = nil) -> String {
+        let style = ByteCountFormatStyle(style: .file, locale: locale ?? Locale.current)
+        return max(0, bytes).formatted(style)
     }
 }
 
@@ -86,8 +116,8 @@ extension RavenError: LocalizedError {
             }
         case .invalidResponse:
             return "The site returned a response Nevermore could not understand."
-        case .resourceLimit:
-            return "This file or response exceeds Nevermore’s safe size limit (64 MB per attachment)."
+        case .resourceLimit(let bytes):
+            return "This file or response exceeds Nevermore’s safe size limit (\(Self.formattedResourceLimit(bytes)))."
         case .crossOrigin:
             return "This request points at a different site. Nevermore only sends account credentials to the account’s own site."
         case .keychain(let status):

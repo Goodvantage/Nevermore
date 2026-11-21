@@ -49,9 +49,10 @@ import RavenProtocol
         validation = Task { [weak self] in
             guard let self else { return }
             do {
-                let rows = try await session.cachedMessages(channelID: reference.channelID, limit: 1000)
+                let message = try await session.cachedMessage(id: reference.messageID, channelID: reference.channelID)
                 guard !Task.isCancelled, !closed else { return }
-                guard isAuthorized, let message = rows.first(where: { $0.id == reference.messageID }), let document = try? RichTextCodec.parse(message.html), CodeBlocks.extract(from: document).contains(where: { $0.id == reference.block.id }) else { close(); return }
+                guard isAuthorized, let message, let document = try? RichTextCodec.parse(message.html),
+                      CodeBlocks.extract(from: document).contains(where: { $0.id == reference.block.id }) else { close(); return }
             } catch { if !Task.isCancelled { close() } }
         }
     }

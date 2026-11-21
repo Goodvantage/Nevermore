@@ -63,7 +63,11 @@ public struct EditableRichTable: Sendable {
         let parent = Array(neighbour.dropLast())
         let cells = Self.at(neighbour, in: node).children.compactMap { cell -> RichNode? in
             guard case .element(let tag, let attrs, _) = cell, ["th", "td"].contains(tag) else { return nil }
-            return .element(tag, attrs.filter { $0.key == "colwidth" }, [.element("p", [:], [])])
+            // An inserted row never copies header cells: it is body content
+            // whichever row it displaces. Native header styling reads the
+            // cell tag, not the section.
+            let resolvedTag = tag == "th" ? "td" : tag
+            return .element(resolvedTag, attrs.filter { $0.key == "colwidth" }, [.element("p", [:], [])])
         }
         let changed = Self.changingChildren(Self.at(parent, in: node)) { $0.insert(.element("tr", [:], cells), at: insertion) }
         try commit(Self.replacing(parent, in: node, with: changed))

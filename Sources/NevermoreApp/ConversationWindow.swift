@@ -1,8 +1,13 @@
 import AppKit
+import QuickLookUI
 import RavenProtocol
 import NevermoreCore
 
 @MainActor final class ComposerView: NSTextView {
+    /// NSTextView takes Quick Look whenever it is first responder, ahead of
+    /// an attachment preview that joins the window's responder chain, so
+    /// a clicked file opened the file actions window instead of a preview.
+    override nonisolated func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { false }
     var sharedUndoManager: UndoManager?
     override var undoManager: UndoManager? { sharedUndoManager ?? super.undoManager }
     /// A layout manager's storage swap does not clamp the text view's old
@@ -188,7 +193,8 @@ import NevermoreCore
         guard isEditable else { super.keyDown(with: event); return }
         if !hasMarkedText(), onCompletionKey?(event) == true { return }
         if !hasMarkedText(), event.keyCode == 126, string.isEmpty, onEditLast?() == true { return }
-        if event.keyCode == 53 { onEscape?(); return }
+        // While an input method composes, Escape cancels the conversion there.
+        if !hasMarkedText(), event.keyCode == 53 { onEscape?(); return }
         if event.keyCode == 36 || event.keyCode == 76 {
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if !hasMarkedText() {
@@ -346,12 +352,28 @@ import NevermoreCore
     private func isOverHoverBar(_ point: NSPoint) -> Bool { subviews.contains { ($0 is MessageHoverBar || $0 is InkBlot) && !$0.isHidden && $0.frame.contains(point) } || onChipHover?(point) == true }
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if isOverHoverBar(point) { NSCursor.arrow.set() } else { super.mouseMoved(with: event) }
+        if isOverHoverBar(point) { NSCursor.arrow.set() } else if replyTarget(at: point) != nil { NSCursor.pointingHand.set() } else { super.mouseMoved(with: event) }
         onHover?(point)
     }
     override func cursorUpdate(with event: NSEvent) {
-        if isOverHoverBar(convert(event.locationInWindow, from: nil)) { NSCursor.arrow.set() } else { super.cursorUpdate(with: event) }
+        let point = convert(event.locationInWindow, from: nil)
+        if isOverHoverBar(point) { NSCursor.arrow.set() } else if replyTarget(at: point) != nil { NSCursor.pointingHand.set() } else { super.cursorUpdate(with: event) }
     }
+    /// The message a reply quote under `point` answers, if the point is on
+    /// the quote's text rather than in the empty space beside it.
+    func replyTarget(at point: NSPoint) -> String? {
+        guard let layout = layoutManager, let container = textContainer, let storage = textStorage, storage.length > 0 else { return nil }
+        let origin = textContainerOrigin
+        let local = NSPoint(x: point.x - origin.x, y: point.y - origin.y)
+        let glyph = layout.glyphIndex(for: local, in: container)
+        guard glyph < layout.numberOfGlyphs, layout.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil).contains(local) else { return nil }
+        let index = layout.characterIndexForGlyph(at: glyph)
+        guard index < storage.length else { return nil }
+        return storage.attribute(.nevermoreReplyTarget, at: index, effectiveRange: nil) as? String
+    }
+    /// A click on a reply quote, after AppKit has handled it as text: a drag
+    /// that selects text from a quote stays a selection.
+    var onReplyQuotePress: ((String) -> Void)?
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         let point = convert(event.locationInWindow, from: nil)
@@ -361,8 +383,10 @@ import NevermoreCore
     /// peels the reader's own off. True when the press was handled.
     var onChipPress: ((NSEvent) -> Bool)?
     override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 1, event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty, onChipPress?(event) == true { return }
+        if event.clickCount == 1, event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty, let onChipPress, trackPress({ onChipPress(event) }) { return }
         super.mouseDown(with: event); onUserSelection?()
+        if event.clickCount == 1, event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty, selectedRange().length == 0,
+           let target = replyTarget(at: convert(event.locationInWindow, from: nil)) { onReplyQuotePress?(target) }
     }
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
         super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
@@ -474,10 +498,24 @@ import NevermoreCore
     var inspectorSplitItem: NSSplitViewItem?
     var contentController: LayoutReportingViewController!
     var threadInspector: ThreadInspector?
+    /// True while a window narrower than the inspector's minimum hid the
+    /// pane. The inspector, its authorized root and its reading position
+    /// stay alive until the window widens again.
+    private(set) var inspectorCollapsedByWidth = false
+    /// A collapsed thread keeps its subscription, but its replies are no
+    /// longer on screen and should remain eligible for notifications.
+    func displaysConversation(_ channelID: String) -> Bool {
+        channel?.id == channelID || (!inspectorCollapsedByWidth && fileInspector == nil && threadInspector?.rootMessage.id == channelID)
+    }
+
+    /// Native, keyboard-reachable access to the thread while it is hidden.
+    let threadInspectorHiddenButton = NSButton(title: "Open Thread", target: nil, action: nil)
     var conversationChooser: ConversationChooser?
+    var channelDetailsSheet: ChannelDetailsSheet?
+    var memberRoster: MemberRosterWindow?
     var outboxWindow: OutboxWindow?
     let transcript = TranscriptView()
-    let transcriptScroll = NSScrollView()
+    let transcriptScroll = TranscriptScrollView()
     let composer = ComposerView()
     lazy var inlineComposer = InlineComposer(owner: self)
     let composerEditorContainer = NSView()
@@ -515,6 +553,12 @@ import NevermoreCore
     let connectionFooter = ConnectionFooter()
     let hoverBar = MessageHoverBar()
     let earlierProgress = NSProgressIndicator()
+    /// The day being read, shown under the toolbar while the reader scrolls.
+    let dayPill = FloatingDayPill()
+    var dayPillCenter: NSLayoutConstraint?
+    var dayPillFade: Task<Void, Never>?
+    /// A trackpad gesture or scroller drag is moving the transcript.
+    var isTranscriptLiveScrolling = false
     let emptyConversation = NSStackView()
     /// Theme wallpaper behind the transcript and the sidebar's tint; hidden under Classic.
     let themeBackdrop = ThemeBackdropView(role: .conversation)
@@ -530,6 +574,8 @@ import NevermoreCore
     var expandedCode = Set<String>()
     var codeReaders: [String: CodeReaderWindow] = [:]
     lazy var transcriptAccessibility = TranscriptAccessibility(owner: self)
+    /// In layout order, top to bottom: `messageEntries(intersecting:)`
+    /// binary-searches it.
     var messageRanges: [(NSRange, RavenMessage)] = []
     var attachments: [StagedAttachment] = []
     var promisedReceives: [UUID: Task<Void, Never>] = [:]
@@ -545,7 +591,18 @@ import NevermoreCore
     var saveTask: Task<Void, Never>?
     var loadTask: Task<Void, Never>?
     var renderTask: Task<Void, Never>?
+    private var sidebarOpenTask: Task<Void, Never>?
+    /// A row awaiting the keyboard pause or a held click. Preserve its
+    /// identity when incoming activity reloads the list.
+    private var pendingSidebarTarget: SidebarItem.Target?
     var collectionWindows: [CollectionWindow] = []
+    /// The mention pool, rebuilt only when the directory, the channel list
+    /// or the revocation generation changes — not on every keystroke.
+    private var mentionPoolCache: (directoryVersion: Int, channelsVersion: Int, generation: Int, revokedCount: Int, pool: [MentionCandidate])?
+    /// Self-checks count pool constructions to prove the cache holds.
+    var mentionPoolBuilds = 0
+    /// Self-checks reset the cache to measure pool builds from cold.
+    func resetMentionPoolCache() { mentionPoolCache = nil }
     var pollWindows: [PollWindow] = []
     var pollCreationTask: Task<Void, Never>?
     var emojiSelectionTask: Task<Void, Never>?
@@ -567,8 +624,35 @@ import NevermoreCore
     /// once its conversation has loaded.
     var restoreLocationTask: Task<Void, Never>?
     var attachmentWindows: [AttachmentWindow] = []
+    /// Quick Look and Save As outside the File panel share one download.
     var attachmentDownload: Task<Void, Never>?
     var attachmentAttempt = UUID()
+    /// The File panel's own download, so a Quick Look of another file
+    /// never cancels it.
+    private(set) var fileDownload: Task<Void, Never>?
+    private var fileAttempt = UUID()
+    /// Every attachment download under way in this window.
+    var attachmentDownloads: [Task<Void, Never>] { [attachmentDownload, fileDownload].compactMap { $0 } }
+    /// The File panel and its inspector item, while a file is shown there.
+    /// It covers an open thread, which comes back when the panel closes.
+    private(set) var fileInspector: FileInspector?
+    private var fileSplitItem: NSSplitViewItem?
+    /// True while a window too narrow for the File panel hides it. The
+    /// panel, its file and its download stay until the window widens.
+    private(set) var fileInspectorCollapsedByWidth = false
+    /// Waits briefly before the File panel follows the transcript's
+    /// selection, so arrowing past several files downloads only the last.
+    private var followSelectionTask: Task<Void, Never>?
+    /// True while a render puts the transcript's selection back, which is
+    /// not the reader choosing another message.
+    private var restoringTranscriptSelection = false
+    /// A Save As started from a window too narrow for the File panel.
+    private var attachmentSavePanel: NSSavePanel?
+    /// Save As waits for the File panel's download.
+    private var saveWhenFileArrives = false
+    /// Creates the File panel's Save As panel; self-checks substitute a
+    /// recording one so a retry's intent is observed without a real sheet.
+    var makeFileInspectorSavePanel: @MainActor () -> NSSavePanel = { NSSavePanel() }
     var readPosition = TranscriptReadPosition()
     let jumpLatestButton = NSButton(title: "Jump to Latest", target: nil, action: nil)
     /// Keeps the bottom of the transcript in place while its pane changes shape.
@@ -655,14 +739,30 @@ import NevermoreCore
             let source = note.object as? AccountSession
             MainActor.assumeIsolated { guard let self, let source, source === self.session else { return }; self.updateStatusAnnouncements() }
         })
+        observerTokens.append(NotificationCenter.default.addObserver(forName: .sessionPresenceChanged, object: nil, queue: .main) { [weak self] note in
+            let source = note.object as? AccountSession
+            // Only the rows on screen show presence; the transcript does not.
+            MainActor.assumeIsolated { guard let self, let source, source === self.session else { return }; self.refreshSidebarAvatars() }
+        })
+        observerTokens.append(NotificationCenter.default.addObserver(forName: .sessionDraftMarksChanged, object: nil, queue: .main) { [weak self] note in
+            let source = note.object as? AccountSession
+            MainActor.assumeIsolated { guard let self, let source, source === self.session else { return }; self.refreshSidebarAvatars() }
+        })
         observerTokens.append(NotificationCenter.default.addObserver(forName: .sessionAvatarsChanged, object: nil, queue: .main) { [weak self] note in
             let source = note.object as? AccountSession
             MainActor.assumeIsolated { guard let self, let source, source === self.session else { return }; self.transcript.needsDisplay = true; self.refreshSidebarAvatars() }
         })
         viewportKeeper.isFollowing = { [weak self] in self?.isFollowing ?? false }
-        viewportKeeper.onMove = { [weak self] in self?.seenVisible(); self?.transcriptDidScroll() }
+        transcriptScroll.onWheelMove = { [weak self] in self?.updateFloatingDayPill(readerWheel: true) }
+        viewportKeeper.onMove = { [weak self] in self?.seenVisible(); self?.transcriptDidScroll(); self?.updateFloatingDayPill() }
         observerTokens.append(NotificationCenter.default.addObserver(forName: NSScrollView.didLiveScrollNotification, object: transcriptScroll, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.loadEarlierIfAtTop() }
+        })
+        observerTokens.append(NotificationCenter.default.addObserver(forName: NSScrollView.willStartLiveScrollNotification, object: transcriptScroll, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.isTranscriptLiveScrolling = true }
+        })
+        observerTokens.append(NotificationCenter.default.addObserver(forName: NSScrollView.didEndLiveScrollNotification, object: transcriptScroll, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { guard let self else { return }; self.isTranscriptLiveScrolling = false; if self.dayPill.isShown { self.scheduleFloatingDayPillFade() } }
         })
         observerTokens.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: composer, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.updateComposerHeight() }
@@ -694,6 +794,8 @@ import NevermoreCore
         accountPicker.setAccessibilityValue(current)
     }
     func use(_ session: AccountSession?) {
+        cancelSidebarKeyboardOpen()
+        channelDetailsSheet?.close(); channelDetailsSheet = nil
         ComposerEditorLifetime.cancel(attachedTo: window)
         clearReadPosition(); latestAuthorizedMessageID = nil
         statusAnnouncements.invalidate()
@@ -706,9 +808,9 @@ import NevermoreCore
         inlineComposer.load(nil)
         cancelPromisedFiles(); navigationGeneration += 1
         self.session?.attach(window: windowID, channelID: nil)
-        conversationChooser?.cancel(); conversationChooser = nil; closeThreadInspector(); mentionPopover.reset(); clearPreview(); closeCodeReaders()
-        for collection in collectionWindows { collection.records.removeAll(); collection.table.reloadData(); collection.close() }; collectionWindows.removeAll()
-        loadTask?.cancel(); renderTask?.cancel(); self.session = session; composer.sharedUndoManager = nil; composer.useTextStorage(NSTextStorage()); channel = nil; messages = []; messageRanges = []; transcript.clearText(); animatedImages.removeAll(); isUpdatingTranscript = false; composer.string = ""; attachments = []; replyTo = nil; editing = nil
+        conversationChooser?.cancel(); conversationChooser = nil; memberRoster?.cancel(); memberRoster = nil; closeThreadInspector(); mentionPopover.reset(); clearPreview(); closeCodeReaders()
+        for collection in Array(collectionWindows) { collection.records.removeAll(); collection.table.reloadData(); collection.close() }; collectionWindows.removeAll()
+        loadTask?.cancel(); renderTask?.cancel(); self.session = session; mentionPoolCache = nil; composer.sharedUndoManager = nil; composer.useTextStorage(NSTextStorage()); channel = nil; messages = []; messageRanges = []; transcript.clearText(); animatedImages.removeAll(); isUpdatingTranscript = false; composer.string = ""; attachments = []; replyTo = nil; editing = nil
         navigation = NavigationHistory(); threadContextTask?.cancel(); threadRoot = nil; pendingRestoration = nil; restoreInspectorTask?.cancel(); updateAccounts(); refreshSidebar(); updateWindowTitle(); updateContext()
     }
     @objc func switchAccount(_ sender: NSMenuItem) {
@@ -744,7 +846,8 @@ import NevermoreCore
         updateWindowTitle()
         sidebar.reloadData(); status.stringValue = session?.state ?? "Add an account to get started"
         connectionFooter.update(session: session)
-        if let channel, let index = sidebarItems.firstIndex(where: { $0.channel?.id == channel.id }) { sidebar.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+        if let pending = pendingSidebarTarget, let index = sidebarItems.firstIndex(where: { $0.target == pending }) { sidebar.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+        else if let channel, let index = sidebarItems.firstIndex(where: { $0.channel?.id == channel.id }) { sidebar.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
         else if channel == nil, !isSearching, let index = sidebarItems.firstIndex(where: \.isHome) { sidebar.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
         else if isSearching { sidebar.deselectAll(nil) }
         unkindness.sidebarDidReload()
@@ -773,14 +876,77 @@ import NevermoreCore
         cell.configure(sidebarModel(for: channel, unread: unreadCount(channel.id)), fontSize: sidebarFontSize)
         return cell
     }
+    /// How long the sidebar selection rests under the keyboard before its
+    /// conversation opens: a held arrow key passes over conversations
+    /// without opening each one and marking it read.
+    static let sidebarKeyboardDelay: Duration = .milliseconds(250)
+
+    /// The arrow keys moved the sidebar selection: open what it rests on,
+    /// as Mail and Messages do.
+    func openSidebarSelectionSoon() {
+        sidebarOpenTask?.cancel()
+        let target = selectedSidebarTarget
+        pendingSidebarTarget = target
+        sidebarOpenTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.sidebarKeyboardDelay)
+            guard !Task.isCancelled, let self else { return }
+            // The keyboard's selection only speaks for the pane while the
+            // sidebar still has focus. Clicking the composer or Tabbing into
+            // the transcript during the pause moves on without opening, so
+            // drop the pending open instead of switching a moment later.
+            guard self.window?.firstResponder === self.sidebar else {
+                self.cancelSidebarKeyboardOpen()
+                return
+            }
+            self.pendingSidebarTarget = nil
+            // Compared by identity: a reload during the pause may move rows.
+            guard self.selectedSidebarTarget == target else { return }
+            self.openSidebarSelection()
+        }
+    }
+
+    /// AppKit tracks a held click across run-loop turns. Keep its row by
+    /// identity if incoming activity reloads or reorders the list.
+    func trackSidebarClick(row: Int?) {
+        cancelSidebarKeyboardOpen()
+        if let row, sidebarItems.indices.contains(row) { pendingSidebarTarget = sidebarItems[row].target }
+    }
+
+    private var selectedSidebarTarget: SidebarItem.Target? {
+        sidebarItems.indices.contains(sidebar.selectedRow) ? sidebarItems[sidebar.selectedRow].target : nil
+    }
+
+    /// Drops the open the arrow keys scheduled. Every way of showing a
+    /// conversation, Home, search, or a new window or tab calls this first:
+    /// otherwise the reload it triggers would put the selection back on the
+    /// arrowed row, and the pending open would then replace what was just
+    /// shown.
+    func cancelSidebarKeyboardOpen() {
+        sidebarOpenTask?.cancel(); sidebarOpenTask = nil; pendingSidebarTarget = nil
+    }
+
+    /// Opens the selected sidebar row unless the pane already shows it.
+    func openSidebarSelection() {
+        cancelSidebarKeyboardOpen()
+        guard sidebarItems.indices.contains(sidebar.selectedRow) else { return }
+        let item = sidebarItems[sidebar.selectedRow]
+        let showing = item.isHome ? channel == nil && !isSearching : item.channel.map { $0.id == channel?.id && !isSearching } == true
+        guard !showing else { return }
+        selectedSidebar()
+    }
+
     @objc func selectedSidebar() {
+        cancelSidebarKeyboardOpen()
         guard sidebarItems.indices.contains(sidebar.selectedRow) else { return }
         if sidebarItems[sidebar.selectedRow].isHome { showHome(); return }
         guard let item = sidebarItems[sidebar.selectedRow].channel else { return }
         select(item)
     }
     func select(_ channel: RavenChannel, anchor: String? = nil, record: Bool = true) {
+        cancelSidebarKeyboardOpen()
+        hideFloatingDayPill(animated: false)
         if self.channel?.id != channel.id {
+            memberRoster?.cancel(); memberRoster = nil
             if window?.isVisible == true { app.interfaceSounds.play(.selection) }
             stickers.reset()
         }
@@ -795,7 +961,7 @@ import NevermoreCore
         let navigationID = navigationGeneration
         if record { pendingRestoration = nil; captureNavigation(); navigation.visit(ConversationLocation(channelID: channel.id, anchorMessageID: anchor, threadParentChannelID: channel.raw["parent_channel_id"].string)) }
         threadContextTask?.cancel(); threadRoot = nil; codeCommands.removeAll(); expandedCode.removeAll()
-        restoreInspectorTask?.cancel(); closeThreadInspector(); mentionPopover.reset(); loadTask?.cancel(); renderTask?.cancel(); self.channel = channel; historyUpperID = nil; requestedAnchor = anchor; requestedPlacement = anchor == nil ? nil : .inView
+        restoreInspectorTask?.cancel(); closeThreadInspector(); closeFileInspector(); mentionPopover.reset(); loadTask?.cancel(); renderTask?.cancel(); self.channel = channel; refreshSidebarAvatars(); historyUpperID = nil; requestedAnchor = anchor; requestedPlacement = anchor == nil ? nil : .inView
         if let session {
             if session.sharedTextStorage[channel.id] == nil { session.sharedTextStorage[channel.id] = NSTextStorage() }
             if session.draftUndoManagers[channel.id] == nil { session.draftUndoManagers[channel.id] = UndoManager() }
@@ -819,6 +985,8 @@ import NevermoreCore
     /// typed, so leaving loses nothing; Back returns to the conversation.
     func showHome() {
         guard session != nil else { return }
+        cancelSidebarKeyboardOpen()
+        hideFloatingDayPill(animated: false)
         if isSearching { isSearching = false; searchView.attachments.cancel(); search.stringValue = "" }
         guard channel != nil else { refreshSidebar(); updateWindowTitle(); home.reloadNow(); return }
         if window?.isVisible == true { app.interfaceSounds.play(.selection) }
@@ -839,9 +1007,12 @@ import NevermoreCore
         inlineComposer.load(nil)
         cancelPromisedFiles(); navigationGeneration += 1
         threadContextTask?.cancel(); threadRoot = nil; codeCommands.removeAll(); expandedCode.removeAll()
+        memberRoster?.cancel(); memberRoster = nil
         restoreInspectorTask?.cancel(); restoreLocationTask?.cancel(); closeThreadInspector(); mentionPopover.reset(); loadTask?.cancel(); renderTask?.cancel()
         hideHoverBar(); transcript.highlightRect = nil; transcript.caretMessageLocation = nil; autoEarlierFirstID = nil
         channel = nil; messages = []; messageRanges = []; transcript.clearText(); animatedImages.removeAll(); isUpdatingTranscript = false
+        // The conversation left behind may hold a draft to mark.
+        refreshSidebarAvatars()
         // A fresh storage: typing can no longer reach the conversation's draft.
         composer.sharedUndoManager = nil; composer.useTextStorage(NSTextStorage())
         editing = nil; replyTo = nil; attachments = []; displayedHTML = ""; context.stringValue = ""
@@ -1006,6 +1177,8 @@ import NevermoreCore
                     if let date = dates[index] { lastDate = date }
                 }
                 var authors = Set<String>()
+                // The channel list carries the pins; the window's copy may predate a refresh.
+                let pinnedIDs = self.pinnedMessageIDs(in: channel.id) ?? []
                 for (index, message) in messages.enumerated() {
                     if dayBreaks[index], let date = dates[index] { output.append(TranscriptStyle.dayDivider(session.dayLabel(for: date), metrics: metrics)) }
                     if message.id == firstUnread { output.append(TranscriptStyle.unreadDivider(metrics: metrics)) }
@@ -1031,18 +1204,30 @@ import NevermoreCore
                     }
                     let bodyStart = output.length
                     if message.raw["is_reply"].bool {
-                        let quoted = message.raw["linked_message"].string.flatMap { id in messages.first { $0.id == id } }
-                        output.append(TranscriptStyle.replyQuote(author: quoted.map { (session.authorName($0), $0.authorID) }, preview: quoted.map(self.replyPreview) ?? "", metrics: metrics))
+                        let target = message.raw["linked_message"].string
+                        let quoted = target.flatMap { id in messages.first { $0.id == id } }
+                        // An answered message outside the loaded window still
+                        // names its author; a click loads it.
+                        let author = quoted.map { (session.authorName($0), $0.authorID) }
+                            ?? TranscriptStyle.repliedAuthorID(message.raw["replied_message_details"]).map { (session.userNames[$0] ?? $0, $0) }
+                        output.append(TranscriptStyle.replyQuote(author: author, preview: quoted.map(self.replyPreview) ?? "", target: target, metrics: metrics))
                     }
                     let inkStart = output.length
                     let pendingSend = pendingSends[message.id]
                     if !message.html.isEmpty, case .parsed(let doc) = session.messageDocument(for: message) { let presented = CodePresentation.render(doc, message: message, fontSize: size, expanded: self.expandedCode, parentChannelID: channel.raw["parent_channel_id"].string)
                         output.append(InlineImagePresentation.embed(presented.text, session: session)); commands.merge(presented.commands) { _, new in new }; visibleCode.formUnion(presented.references.map(\.key))
                         // A GIF message is read only by nature, so it needs no note.
-                        if !doc.canEdit, GIFMessage.source(in: doc) == nil { output.append(NSAttributedString(string: "\nNative formatting fallback · edit in Raven", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.themeSecondaryText])) } }
+                        if !doc.canEdit, GIFMessage.source(in: doc) == nil { output.append(NSAttributedString(string: "\nNative formatting fallback · edit in Raven", attributes: [.font: TranscriptStyle.secondaryFont(metrics), .foregroundColor: NSColor.themeSecondaryText])) } }
                     else if !message.html.isEmpty { output.append(NSAttributedString(string: "[Message cannot be safely rendered · open Raven for the full content]", attributes: [.font: ThemeFonts.readingBody(ofSize: size), .foregroundColor: NSColor.themeText])) }
                     else if message.messageType == "Poll" { output.append(NSAttributedString(string: "Poll: \(message.raw["content"].string ?? "Choose View / Vote in Poll from Conversation.")", attributes: [.font: ThemeFonts.readingBody(ofSize: size), .foregroundColor: NSColor.themeText])) }
                     else if message.messageType != "File" && message.messageType != "Image" { output.append(NSAttributedString(string: message.raw["content"].string.map { String($0.prefix(4096)) } ?? "[\(message.messageType) message — open in Raven for details]", attributes: [.font: ThemeFonts.readingBody(ofSize: size), .foregroundColor: NSColor.themeText])) }
+                    // Raven keeps edits visible: a small "(edited)" follows the text.
+                    if message.raw["is_edited"].bool, pendingSend == nil, output.length > inkStart {
+                        output.append(TranscriptStyle.editedMark(afterLineBreak: (output.string as NSString).character(at: output.length - 1) == 10, metrics: metrics))
+                    }
+                    if pendingSend == nil, let marks = TranscriptStyle.stateMarks(pinned: pinnedIDs.contains(message.id), saved: MessageMarks.isSaved(message, by: session.account.user), afterLineBreak: output.length == inkStart || (output.string as NSString).character(at: output.length - 1) == 10, metrics: metrics) {
+                        output.append(marks)
+                    }
                     if pendingSend == nil, !message.html.isEmpty, case .parsed(let document) = session.messageDocument(for: message) {
                         for raw in SentLinkPreviewPresentation.links(in: document) {
                             session.sentLinkPreviews.request(raw, session: session)
@@ -1067,7 +1252,13 @@ import NevermoreCore
                         let filename = URL(string: file)?.lastPathComponent ?? "Attachment"
                         output.append(TranscriptStyle.attachmentLine(filename: filename, size: size, link: attachmentLink))
                     }
-                    if let doctype = message.raw["link_doctype"].string, !doctype.isEmpty { output.append(NSAttributedString(string: "\nLinked document: \(doctype) · \(message.raw["link_document"].string ?? "")", attributes: [.foregroundColor: NSColor.themeSecondaryText])) }
+                    if let doctype = message.raw["link_doctype"].string, !doctype.isEmpty {
+                        let documentID = message.raw["link_document"].string ?? ""
+                        let title = documentID.isEmpty ? doctype : "\(doctype) · \(documentID)"
+                        output.append(NSAttributedString(
+                            string: "\nLinked document: \(title)",
+                            attributes: [.font: TranscriptStyle.secondaryFont(metrics), .foregroundColor: NSColor.themeSecondaryText]))
+                    }
                     for attachment in pendingSend?.attachments ?? [] { output.append(TranscriptStyle.pendingAttachmentLine(filename: attachment.filename, size: size, first: output.length == inkStart)) }
                     if metrics.bodyLineSpacing > 0, output.length > bodyStart { TranscriptStyle.addLineSpacing(metrics.bodyLineSpacing, to: output, in: NSRange(location: bodyStart, length: output.length - bodyStart)) }
                     let inkBody = NSRange(location: inkStart, length: output.length - inkStart)
@@ -1079,7 +1270,7 @@ import NevermoreCore
                     }
                     let reactions = message.raw["message_reactions"].nested
                     if let chips = ReactionChip.chips(reactions, currentUser: session.account.user) { output.append(TranscriptStyle.reactions(chips, metrics: metrics)) }
-                    else if reactions != .null && reactions != .object([:]) && reactions != .array([]) { output.append(NSAttributedString(string: "\nReactions: \(self.summary(reactions))", attributes: [.font: NSFont.systemFont(ofSize: max(11, size - 2)), .foregroundColor: NSColor.themeSecondaryText])) }
+                    else if reactions != .null && reactions != .object([:]) && reactions != .array([]) { output.append(NSAttributedString(string: "\nReactions: \(self.summary(reactions))", attributes: [.font: TranscriptStyle.secondaryFont(metrics), .foregroundColor: NSColor.themeSecondaryText])) }
                     if continues[index], !metrics.compact, output.length > bodyStart { output.addAttribute(.nevermoreGutterTime, value: session.compactTime(message.creation), range: NSRange(location: bodyStart, length: 1)) }
                     output.append(TranscriptStyle.separator(metrics: metrics, nextContinuesGroup: index + 1 < messages.count && continues[index + 1]))
                     if pendingSend == nil { self.messageRanges.append((NSRange(location: start, length: output.length - start), message)) }
@@ -1087,8 +1278,10 @@ import NevermoreCore
                 session.loadAvatars(authors)
                 self.codeCommands = commands; self.expandedCode.formIntersection(visibleCode)
                 let selection = self.transcript.selectedRange()
+                self.restoringTranscriptSelection = true
                 self.transcript.textStorage?.setAttributedString(output)
                 if NSMaxRange(selection) <= output.length { self.transcript.setSelectedRange(selection) }
+                self.restoringTranscriptSelection = false
                 self.transcript.layoutManager?.ensureLayout(for: self.transcript.textContainer!)
                 // Character offsets moved; follow the messages, not the offsets.
                 self.transcript.hoverMessageLocation = self.hoveredMessageID.flatMap { id in self.messageRanges.first { $0.1.id == id }?.0.location }
@@ -1135,8 +1328,29 @@ import NevermoreCore
         // and a pane that still shows other text has nothing to acknowledge.
         guard !isUpdatingTranscript, requestedAnchor == nil, historyUpperID == nil else { return nil }
         // Only the band between the toolbar and the floating composer counts.
-        let visible = readableTranscriptRect
-        return messageRanges.last { visible.intersects(rect(for: $0.0)) }?.1
+        return messageEntries(intersecting: readableTranscriptRect).last?.1
+    }
+    /// The messages whose text intersects `visible`, in order. Messages are
+    /// laid out top to bottom in `messageRanges` order, so a binary search
+    /// finds the first one and the scan stops below the band: a scroll step
+    /// measures a few messages instead of all 500 (about 0.1 ms instead of
+    /// 4 ms for two passes on an M4 Max).
+    func messageEntries(intersecting visible: NSRect) -> [(NSRange, RavenMessage)] {
+        var low = 0, high = messageRanges.count
+        while low < high {
+            let middle = (low + high) / 2
+            if rect(for: messageRanges[middle].0).maxY <= visible.minY { low = middle + 1 } else { high = middle }
+        }
+        var found: [(NSRange, RavenMessage)] = []
+        var index = low
+        while index < messageRanges.count {
+            let entry = messageRanges[index]
+            let frame = rect(for: entry.0)
+            guard frame.minY < visible.maxY else { break }
+            if visible.intersects(frame) { found.append(entry) }
+            index += 1
+        }
+        return found
     }
     func seenVisible() {
         guard !isUpdatingTranscript else { return }
@@ -1151,7 +1365,7 @@ import NevermoreCore
         if isFollowing { readPosition.followedLatest() }
         updateReadPositionControl()
         guard NSApp.isActive, window?.isKeyWindow == true, let session, let channel else { return }
-        for entry in messageRanges where visible.intersects(rect(for: entry.0)) { session.loadThumbnail(entry.1) }
+        for entry in messageEntries(intersecting: visible) { session.loadThumbnail(entry.1) }
         guard let message = visibleMessageForReadReceipt else { return }
         Task { await session.markSeen(channelID: channel.id, timestamp: message.creation) }
     }
@@ -1161,7 +1375,7 @@ import NevermoreCore
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
         proposedOptions.subtracting(.autoHideToolbar).union([.fullScreen, .autoHideMenuBar])
     }
-    func windowWillClose(_ notification: Notification) { inlineComposer.tearDown(); ComposerEditorLifetime.cancel(attachedTo: window); rememberWindowFrame(); linkPreview.cancel(); ink.detach(); unkindness.reset(); stickers.detach(); clearReadPosition(); latestAuthorizedMessageID = nil; transcriptAccessibility.clear(); statusAnnouncements.invalidate(); cancelEmojiPicker(); gifSelectionTask?.cancel(); closePollWindows(); searchView.reset(session: nil); outboxWindow?.close(); outboxWindow = nil; isClosed = true; cancelPromisedFiles(); threadContextTask?.cancel(); threadRoot = nil; closeCodeReaders(); restoreInspectorTask?.cancel(); conversationChooser?.cancel(); conversationChooser = nil; closeThreadInspector(); mentionPopover.reset(); for collection in collectionWindows { collection.close() }; collectionWindows.removeAll(); clearPreview(); session?.attach(window: windowID, channelID: nil); loadTask?.cancel(); renderTask?.cancel(); viewportKeeper.invalidate(); animatedImages.invalidate(); for token in observerTokens { NotificationCenter.default.removeObserver(token) }; app.windows.removeAll { $0 === self } }
+    func windowWillClose(_ notification: Notification) { cancelSidebarKeyboardOpen(); dayPillFade?.cancel(); channelDetailsSheet?.close(); channelDetailsSheet = nil; inlineComposer.tearDown(); ComposerEditorLifetime.cancel(attachedTo: window); rememberWindowFrame(); linkPreview.cancel(); ink.detach(); unkindness.reset(); stickers.detach(); clearReadPosition(); latestAuthorizedMessageID = nil; transcriptAccessibility.clear(); statusAnnouncements.invalidate(); cancelEmojiPicker(); gifSelectionTask?.cancel(); closePollWindows(); searchView.reset(session: nil); outboxWindow?.close(); outboxWindow = nil; isClosed = true; cancelPromisedFiles(); threadContextTask?.cancel(); threadRoot = nil; closeCodeReaders(); restoreInspectorTask?.cancel(); conversationChooser?.cancel(); conversationChooser = nil; memberRoster?.cancel(); memberRoster = nil; closeThreadInspector(); mentionPopover.reset(); for collection in Array(collectionWindows) { collection.close() }; collectionWindows.removeAll(); clearPreview(); session?.attach(window: windowID, channelID: nil); loadTask?.cancel(); renderTask?.cancel(); viewportKeeper.invalidate(); animatedImages.invalidate(); for token in observerTokens { NotificationCenter.default.removeObserver(token) }; app.windows.removeAll { $0 === self } }
     func restorePendingInspector() {
         guard let state = pendingRestoration, let rootID = state.threadRootID, let session, channel?.id == state.location.channelID, session.account.id == state.accountID else { return }
         pendingRestoration?.threadRootID = nil
@@ -1176,24 +1390,73 @@ import NevermoreCore
     }
     func showThreadInspector(root: RavenMessage) {
         guard let session, !session.stopped, !session.revokedChannels.contains(root.channelID) else { return }
-        if (window?.frame.width ?? 0) < 1000 {
-            app.open(session: session, channel: RavenChannel(raw: .object(["name": .string(root.id), "channel_name": .string("Thread · \(root.owner)"), "is_thread": .bool(true), "parent_channel_id": .string(root.channelID)])))
+        if (window?.frame.width ?? 0) < ThreadInspector.minimumWindowWidth {
+            // A deliberate request in a narrow window keeps the documented
+            // separate-window route. Resizing itself never opens that window.
+            app.open(session: session, channel: threadChannel(forRoot: root))
             return
         }
-        closeThreadInspector()
+        closeThreadInspector(); closeFileInspector()
         let inspector = ThreadInspector(session: session, rootMessage: root, conversation: self)
+        inspector.onInvalidated = { [weak self] in self?.closeThreadInspector() }
         threadInspector = inspector
         let item = NSSplitViewItem(inspectorWithViewController: inspector)
         item.minimumThickness = 280; item.maximumThickness = 520; item.canCollapse = false
         // Opens at 320 pt; below the divider-drag priority so it stays resizable.
         let width = inspector.view.widthAnchor.constraint(equalToConstant: 320); width.priority = NSLayoutConstraint.Priority(500); width.isActive = true
-        inspectorSplitItem = item; splitController.addSplitViewItem(item)
+        inspectorSplitItem = item; inspectorCollapsedByWidth = false
+        syncInspectorItems()
+        updateThreadInspectorHiddenAffordance()
         inspector.start()
     }
     func closeThreadInspector() {
-        threadInspector?.detach()
-        if let item = inspectorSplitItem { splitController.removeSplitViewItem(item) }
+        if let inspector = threadInspector {
+            inspector.onInvalidated = nil
+            inspector.detach()
+        }
+        if let item = inspectorSplitItem, splitController.splitViewItems.contains(item) {
+            splitController.removeSplitViewItem(item)
+        }
         inspectorSplitItem = nil; threadInspector = nil
+        inspectorCollapsedByWidth = false
+        updateThreadInspectorHiddenAffordance()
+    }
+    /// Hides the open inspector while the window is too narrow. The pane and
+    /// everything it preserves come back in `restoreThreadInspectorAfterWidening`.
+    func collapseThreadInspectorForNarrowWindow() {
+        guard !inspectorCollapsedByWidth, threadInspector?.isDetached == false,
+              (window?.frame.width ?? 0) < ThreadInspector.minimumWindowWidth else { return }
+        inspectorCollapsedByWidth = true
+        syncInspectorItems()
+        updateThreadInspectorHiddenAffordance()
+    }
+    /// Restores an inspector the window temporarily hid, with its root and
+    /// scroll position untouched.
+    func restoreThreadInspectorAfterWidening() {
+        guard inspectorCollapsedByWidth, threadInspector != nil else { return }
+        inspectorCollapsedByWidth = false
+        syncInspectorItems()
+        updateThreadInspectorHiddenAffordance()
+    }
+    /// Puts the thread and File panes in the split view as their state
+    /// asks. The File panel covers an open thread, and a narrow window
+    /// hides either until it widens; hidden panes keep their state.
+    private func syncInspectorItems() {
+        let wanted: [(NSSplitViewItem?, Bool)] = [
+            (fileSplitItem, fileInspector != nil && !fileInspectorCollapsedByWidth),
+            (inspectorSplitItem, threadInspector != nil && !inspectorCollapsedByWidth && fileInspector == nil),
+        ]
+        // Remove before adding, so the window never holds both panes.
+        for case let (item?, shown) in wanted where !shown && splitController.splitViewItems.contains(item) { splitController.removeSplitViewItem(item) }
+        for case let (item?, shown) in wanted where shown && !splitController.splitViewItems.contains(item) { splitController.addSplitViewItem(item) }
+    }
+    /// Keeps the narrow-window affordance and the key view loop in step with
+    /// whether the hidden thread is still reachable.
+    private func updateThreadInspectorHiddenAffordance() {
+        let hidden = inspectorCollapsedByWidth && threadInspector?.isDetached == false
+        threadInspectorHiddenButton.isHidden = !hidden
+        transcript.nextKeyView = hidden ? threadInspectorHiddenButton : attachButton
+        threadInspectorHiddenButton.nextKeyView = attachButton
     }
     func windowWillReturnFieldEditor(_ sender: NSWindow, to client: Any?) -> Any? {
         guard client is NSSearchField else { return nil }
@@ -1205,8 +1468,48 @@ import NevermoreCore
         window.saveFrame(usingName: name)
     }
     func windowDidMove(_ notification: Notification) { rememberWindowFrame() }
-    func windowDidResize(_ notification: Notification) { rememberWindowFrame(); if threadInspector != nil && (window?.frame.width ?? 0) < 1000 { closeThreadInspector() } }
-    @objc func toggleThreadInspector(_ sender: Any?) { if threadInspector != nil { closeThreadInspector() } else { openThread(sender) } }
+    func windowDidResize(_ notification: Notification) {
+        rememberWindowFrame()
+        let narrowForFile = (window?.frame.width ?? 0) < FileInspector.minimumWindowWidth
+        if fileInspector != nil, fileInspectorCollapsedByWidth != narrowForFile { fileInspectorCollapsedByWidth = narrowForFile; syncInspectorItems() }
+        guard threadInspector != nil else { return }
+        if inspectorCollapsedByWidth {
+            if (window?.frame.width ?? 0) >= ThreadInspector.minimumWindowWidth { restoreThreadInspectorAfterWidening() }
+        } else if (window?.frame.width ?? 0) < ThreadInspector.minimumWindowWidth {
+            collapseThreadInspectorForNarrowWindow()
+        }
+    }
+    @objc func toggleThreadInspector(_ sender: Any?) {
+        if inspectorCollapsedByWidth { openThreadInspectorInWindow(sender); return }
+        // A thread under the File panel comes back when the panel closes.
+        if threadInspector != nil, fileInspector != nil { closeFileInspector(); return }
+        if threadInspector != nil { closeThreadInspector() } else { openThread(sender) }
+    }
+
+    /// The local shape of a thread channel. An inspector has already attached
+    /// its room, so opening it elsewhere needs no further server round trip.
+    private func threadChannel(forRoot root: RavenMessage) -> RavenChannel {
+        RavenChannel(raw: .object(["name": .string(root.id), "channel_name": .string("Thread · \(root.owner)"), "is_thread": .bool(true), "parent_channel_id": .string(root.channelID)]))
+    }
+    /// Opens the open thread in its own window. This is the keyboard
+    /// affordance used while a narrow window has hidden the inline pane.
+    @objc func openThreadInspectorInWindow(_ sender: Any?) {
+        guard let session, let inspector = threadInspector else { return }
+        guard inspector.hasAccess else { closeThreadInspector(); return }
+        app.open(session: session, channel: threadChannel(forRoot: inspector.rootMessage))
+    }
+    /// A click on a reply's quote goes to the message it answers: in place
+    /// when it is loaded, otherwise with the messages around it, the way a
+    /// search result opens (Go ▸ Back returns).
+    func showQuotedMessage(_ id: String) {
+        guard let channel, editing == nil || messageRanges.contains(where: { $0.1.id == id }) else { return }
+        guard let range = messageRanges.first(where: { $0.1.id == id })?.0 else { select(channel, anchor: id); return }
+        isFollowing = false
+        scrollMessageIntoView(range)
+        transcript.setSelectedRange(NSRange(location: range.location, length: 0))
+        window?.makeFirstResponder(transcript)
+        updateMessageHighlight()
+    }
     func scrollTo(_ id: String) { if let range = messageRanges.first(where: { $0.1.id == id })?.0 { transcript.scrollRangeToVisible(range); scrollMessageIntoView(range); transcript.setSelectedRange(range); isFollowing = false } }
     func loadThreadContext() {
         guard let session, let channel, let parentID = channel.raw["parent_channel_id"].string else { return }
@@ -1285,12 +1588,26 @@ import NevermoreCore
     }
     func updateCompletions() {
         guard let session, composer.isEditable, !applyingDraft, channel != nil else { mentionPopover.close(); return }
+        // The pool covers every user and channel, so build it only when a
+        // trigger is actually at the caret; the query scan is a short
+        // backwards read, the pool is O(directory).
+        let editor = activeComposer
+        guard MentionCompletion.query(in: editor.string, selection: editor.selectedRange(), hasMarkedText: editor.hasMarkedText()) != nil else { mentionPopover.close(); return }
+        if let cache = mentionPoolCache, cache.directoryVersion == session.directoryVersion, cache.channelsVersion == session.channelsVersion,
+           cache.generation == session.generation, cache.revokedCount == session.revokedChannels.count {
+            mentionPopover.update(textView: editor, pool: cache.pool)
+            return
+        }
         let people = session.userNames.map { MentionCandidate(kind: .person, serverID: $0.key, title: $0.value, detail: $0.key) }
         let channels = session.channels.filter { !$0.isDM && !session.revokedChannels.contains($0.id) }.map { MentionCandidate(kind: .channel, serverID: $0.id, title: $0.title, detail: $0.workspace) }
-        mentionPopover.update(textView: activeComposer, pool: people + channels)
+        let pool = people + channels
+        mentionPoolCache = (session.directoryVersion, session.channelsVersion, session.generation, session.revokedChannels.count, pool)
+        mentionPoolBuilds += 1
+        mentionPopover.update(textView: editor, pool: pool)
     }
     func textViewDidChangeSelection(_ notification: Notification) {
         if notification.object as? NSTextView === composer { updateCompletions(); composerFormatting.updateSelection() }
+        if notification.object as? NSTextView === transcript { fileInspectorFollowSelection() }
     }
     func insertMention(_ candidate: MentionCandidate, query: MentionQuery) {
         if inlineComposer.mode == .markdown {
@@ -1598,16 +1915,58 @@ import NevermoreCore
     }
     @objc func markUnread(_ sender: Any?) { guard let session, let channel else { return }; action { try await session.markUnread(channelID: channel.id) } }
     @objc func react(_ sender: Any?) { guard let message = selectedMessage else { return }; showQuickReactions(for: message, focus: .first) }
-    @objc func saveForLater(_ sender: Any?) { guard let session, let message = selectedMessage else { return }; action { _ = try await session.mutate("raven.api.raven_message.save_message", ["message_id": .string(message.id), "add": .bool(true)]) } }
-    @objc func pin(_ sender: Any?) { guard let session, let message = selectedMessage else { return }; action { _ = try await session.mutate("raven.api.raven_channel.toggle_pin_message", ["channel_id": .string(message.channelID), "message_id": .string(message.id)]) } }
+    /// Saving sends the desired state, so a stale mark cannot invert it.
+    /// Pinning is a server-side toggle. Either way the conversation is
+    /// reconciled at once, so the mark follows without waiting for the
+    /// realtime event.
+    @objc func saveForLater(_ sender: Any?) {
+        guard let session, let message = selectedMessage else { return }
+        let add = !MessageMarks.isSaved(message, by: session.account.user)
+        action { _ = try await session.mutate("raven.api.raven_message.save_message", ["message_id": .string(message.id), "add": .bool(add)]); session.requestReconciliation() }
+    }
+    @objc func pin(_ sender: Any?) { guard let session, let message = selectedMessage else { return }; action { _ = try await session.mutate("raven.api.raven_channel.toggle_pin_message", ["channel_id": .string(message.channelID), "message_id": .string(message.id)]); session.requestReconciliation() } }
+    /// Whether the message is pinned, or nil when its conversation (a
+    /// thread, say) is not in the channel list that carries the pins.
+    func isPinned(_ message: RavenMessage) -> Bool? {
+        pinnedMessageIDs(in: message.channelID)?.contains(message.id)
+    }
+    private func pinnedMessageIDs(in channelID: String) -> Set<String>? {
+        let source = session?.channels.first { $0.id == channelID } ?? (channel?.id == channelID ? channel : nil)
+        return source.map { MessageMarks.pinnedMessageIDs(in: $0) }
+    }
+    static func saveTitle(saved: Bool) -> String { saved ? "Remove from Saved" : "Save for Later" }
+    static func pinTitle(pinned: Bool?) -> String { pinned.map { $0 ? "Unpin Message" : "Pin Message" } ?? "Pin / Unpin Message" }
     @objc func copyTranscript(_ sender: Any?) { copyFullTranscript(to: .general) }
+    var canCopyDisplayedTranscript: Bool {
+        // Navigation keeps the previous text on screen until the new render arrives.
+        guard !isUpdatingTranscript, let session, !session.stopped, let channel,
+              messages.first?.channelID == channel.id, !session.deletedIDs.contains(channel.id),
+              !session.channelIsRevoked(channel.id) else { return false }
+        return channel.raw["parent_channel_id"].string.map(session.channelIsRevoked) != true
+    }
     func copyFullTranscript(to pasteboard: NSPasteboard) {
-        guard let session, !session.stopped, let channel, !session.revokedChannels.contains(channel.id), channel.raw["parent_channel_id"].string.map(session.revokedChannels.contains) != true else { return }
+        guard canCopyDisplayedTranscript, let session else { return }
         let full: String = messages.map { message -> String in
-            let body: String = message.html.isEmpty ? (message.raw["file"].string.map { "[Attachment: \(URL(string: $0)?.lastPathComponent ?? "File")]" } ?? message.raw["content"].string ?? "[\(message.messageType)]") : (try? RichTextCodec.plainText(RichTextCodec.parse(message.html))) ?? "[Unsupported content]"
-            return "\(session.authorName(message)) · \(session.displayTimestamp(message.creation))\n\(body)"
+            "\(session.authorName(message)) · \(session.displayTimestamp(message.creation))\n\(Self.plainBody(of: message))"
         }.joined(separator: "\n\n")
         pasteboard.clearContents(); pasteboard.setString(full, forType: .string)
+    }
+    /// A message as plain text, the way Copy Transcript writes it: spoilers
+    /// stay masked and a file stands in as its name.
+    static func plainBody(of message: RavenMessage) -> String {
+        guard !message.html.isEmpty else { return message.raw["file"].string.map { "[Attachment: \(URL(string: $0)?.lastPathComponent ?? "File")]" } ?? message.raw["content"].string ?? "[\(message.messageType)]" }
+        return (try? RichTextCodec.plainText(RichTextCodec.parse(message.html))) ?? "[Unsupported content]"
+    }
+    /// Copies the selected message without having to select its text first.
+    @objc func copyMessageText(_ sender: Any?) { copyMessageText(to: .general) }
+    private var messageForCopy: RavenMessage? {
+        guard canCopyDisplayedTranscript, let message = selectedMessage,
+              message.channelID == channel?.id else { return nil }
+        return message
+    }
+    func copyMessageText(to pasteboard: NSPasteboard) {
+        guard let message = messageForCopy else { return }
+        pasteboard.clearContents(); pasteboard.setString(Self.plainBody(of: message), forType: .string)
     }
     /// Programmatic, unanimated toggle. Menu and toolbar commands reach the
     /// split view controller first and animate.
@@ -1686,42 +2045,213 @@ import NevermoreCore
     @objc func quickLook(_ sender: Any?) { previewAttachment() }
     @objc func saveAttachment(_ sender: Any?) { fetchAttachment(save: true) }
     func previewAttachment() { fetchAttachment(save: false) }
-    /// A click on an attachment line or thumbnail previews that message's
-    /// file; the click does not move the caret, so the message comes along.
-    func previewAttachment(for message: RavenMessage) { fetchAttachment(save: false, message: message) }
+    /// A click on an attachment line or thumbnail shows that message's file
+    /// in the File panel, or in Quick Look when the window is too narrow for
+    /// the panel. The click does not move the caret, so the message comes
+    /// along; the caret then moves to it, so Space and ⌘Y show the same file.
+    func previewAttachment(for message: RavenMessage) {
+        if let range = messageRanges.first(where: { $0.1.id == message.id })?.0 { transcript.setSelectedRange(NSRange(location: range.location, length: 0)) }
+        guard (window?.frame.width ?? 0) >= FileInspector.minimumWindowWidth else {
+            // A hidden panel with another file would come back stale.
+            if let inspector = fileInspector, inspector.source.messageID != message.id { closeFileInspector() }
+            fetchAttachment(save: false, message: message); return
+        }
+        showFileInspector(for: message)
+    }
+    /// While the File panel is on screen it follows the transcript's
+    /// selection to the next message with a file, as Finder's preview
+    /// follows its selection. Messages without a file leave it as it is.
+    private func fileInspectorFollowSelection() {
+        guard !restoringTranscriptSelection, let inspector = fileInspector, !fileInspectorCollapsedByWidth,
+              let message = selectedMessage, Self.hasFile(message), message.id != inspector.source.messageID else { return }
+        followSelectionTask?.cancel()
+        followSelectionTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self, self.fileInspector != nil, !self.fileInspectorCollapsedByWidth, self.selectedMessage?.id == message.id else { return }
+            self.showFileInspector(for: message)
+        }
+    }
+    /// Quick Look (`save` false) or Save As for a message's file: the given
+    /// message, else the selected one, else the File panel's. A file the
+    /// File panel already holds is not downloaded again.
     func fetchAttachment(save: Bool, message: RavenMessage? = nil) {
-        guard let session, let message = message ?? selectedMessage, let file = message.raw["file"].string, !file.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        attachmentDownload?.cancel(); attachmentAttempt = UUID(); let attempt = attachmentAttempt
-        status.stringValue = "Downloading attachment…"
-        attachmentDownload = Task { [weak self] in
+        guard let session else { return }
+        let target = message ?? selectedMessage.flatMap { Self.hasFile($0) ? $0 : nil }
+        if let inspector = fileInspector, let attachment = inspector.attachment, target == nil || target?.id == inspector.source.messageID {
+            // A panel the window hides has no window for its save sheet.
+            if save, fileInspectorCollapsedByWidth { saveWithoutPanel(attachment, channelID: inspector.source.channelID, session: session) }
+            else if save { inspector.saveAs() }
+            else { presentQuickLook(attachment, link: inspector.source.messageLink, channelID: inspector.source.channelID, session: session) }
+            return
+        }
+        guard let message = target, Self.hasFile(message) else { return }
+        if save, (window?.frame.width ?? 0) >= FileInspector.minimumWindowWidth { showFileInspector(for: message, thenSave: true); return }
+        downloadAttachment(of: message, session: session) { [weak self] file, link in
             guard let self else { return }
-            defer { if self.attachmentAttempt == attempt { self.attachmentDownload = nil; self.status.stringValue = session.state } }
+            if save { self.saveWithoutPanel(file, channelID: message.channelID, session: session) }
+            else { self.presentQuickLook(file, link: link, channelID: message.channelID, session: session) }
+        }
+    }
+    private static func hasFile(_ message: RavenMessage) -> Bool {
+        message.raw["file"].string.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+    }
+    /// Which of the window's two downloads a request uses.
+    private enum AttachmentDownloadSlot { case quickLook, filePanel }
+    /// Downloads a message's file for this window, one per slot at a time.
+    /// A newer request in the same slot, another conversation or a revoked
+    /// channel drops the result. `failed` replaces the error alert when given.
+    private func downloadAttachment(of message: RavenMessage, session: AccountSession, in slot: AttachmentDownloadSlot = .quickLook, failed: ((Error) -> Void)? = nil, then deliver: @escaping @MainActor (DownloadedAttachment, URL?) -> Void) {
+        guard Self.hasFile(message), let file = message.raw["file"].string else { return }
+        let attempt = UUID()
+        switch slot {
+        case .quickLook: attachmentDownload?.cancel(); attachmentAttempt = attempt
+        case .filePanel: fileDownload?.cancel(); fileAttempt = attempt
+        }
+        status.stringValue = "Downloading attachment…"
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.isLatest(attempt, in: slot) { self.endDownload(in: slot, state: session.state) } }
             do {
                 let url = try RavenAttachmentURL.resolve(file, origin: session.account.origin)
-                let file = try await session.client.download(url, to: FileManager.default.temporaryDirectory)
-                guard !Task.isCancelled, self.attachmentAttempt == attempt, self.isCurrent(session, channelID: message.channelID), !ChannelPolicy.isRevoked(channelID: message.channelID, revoked: session.revokedChannels, threadParents: session.threadParents) else { return }
+                let downloaded = try await session.client.download(url, to: FileManager.default.temporaryDirectory)
+                guard !Task.isCancelled, self.isLatest(attempt, in: slot), self.isCurrent(session, channelID: message.channelID), !ChannelPolicy.isRevoked(channelID: message.channelID, revoked: session.revokedChannels, threadParents: session.threadParents) else { return }
                 var allowed = CharacterSet.urlPathAllowed; allowed.remove(charactersIn: "/?#%")
                 let link = message.id.addingPercentEncoding(withAllowedCharacters: allowed).flatMap { URL(string: "/raven/message/" + $0, relativeTo: session.account.origin)?.absoluteURL }
-                let attachmentChannel = message.channelID
-                // A preview is Quick Look alone; saving shows the file actions.
-                let presentation: AttachmentPresentation = save ? .window : self.window.map { .quickLook(over: $0) } ?? .window
-                let controller = AttachmentWindow(attachment: file, messageLink: link, presentation: presentation, active: { [weak self, weak sourceSession = session] in
-                    guard let self, let sourceSession else { return false }
-                    return self.isCurrent(sourceSession) && !ChannelPolicy.isRevoked(channelID: attachmentChannel, revoked: sourceSession.revokedChannels, threadParents: sourceSession.threadParents)
-                }, reportError: { [weak self] error in self?.app.showError(error) })
-                controller.didClose = { [weak self, weak controller] in self?.attachmentWindows.removeAll { $0 === controller } }
-                for previous in self.attachmentWindows where !previous.showsOwnWindow { previous.close() }
-                if self.attachmentWindows.count >= 4 { self.attachmentWindows.removeFirst().close() }
-                self.attachmentWindows.append(controller); controller.present(save: save)
+                deliver(downloaded, link)
             } catch {
-                if !(error is CancellationError), self.attachmentAttempt == attempt, self.isCurrent(session) { self.app.showError(error) }
+                guard !(error is CancellationError), self.isLatest(attempt, in: slot), self.isCurrent(session) else { return }
+                if let failed { failed(error) } else { self.app.showError(error) }
             }
         }
+        switch slot {
+        case .quickLook: attachmentDownload = task
+        case .filePanel: fileDownload = task
+        }
+    }
+    private func isLatest(_ attempt: UUID, in slot: AttachmentDownloadSlot) -> Bool {
+        switch slot {
+        case .quickLook: attachmentAttempt == attempt
+        case .filePanel: fileAttempt == attempt
+        }
+    }
+    /// Forgets a slot's download; the status line returns to the account's
+    /// state once neither slot is downloading.
+    private func endDownload(in slot: AttachmentDownloadSlot, state: String) {
+        switch slot {
+        case .quickLook: attachmentDownload = nil
+        case .filePanel: fileDownload = nil
+        }
+        if attachmentDownloads.isEmpty { status.stringValue = state }
+    }
+    /// Whether a file from `channelID` may still be shown in this window.
+    private func attachmentActivity(channelID: String, messageID: String? = nil, session: AccountSession) -> () -> Bool {
+        { [weak self, weak session] in
+            guard let self, let session else { return false }
+            return self.isCurrent(session) && !ChannelPolicy.isRevoked(channelID: channelID, revoked: session.revokedChannels, threadParents: session.threadParents)
+                && !(messageID.map(session.deletedIDs.contains) ?? false)
+        }
+    }
+    /// Full-size Quick Look over this window.
+    private func presentQuickLook(_ file: DownloadedAttachment, link: URL?, channelID: String, session: AccountSession) {
+        let presentation: AttachmentPresentation = window.map { .quickLook(over: $0) } ?? .window
+        let controller = AttachmentWindow(attachment: file, messageLink: link, presentation: presentation, active: attachmentActivity(channelID: channelID, session: session), reportError: { [weak self] error in self?.app.showError(error) })
+        controller.didClose = { [weak self, weak controller] in self?.attachmentWindows.removeAll { $0 === controller } }
+        for previous in attachmentWindows where !previous.showsOwnWindow { previous.close() }
+        if attachmentWindows.count >= 4 { attachmentWindows.removeFirst().close() }
+        attachmentWindows.append(controller); controller.present(save: false)
+    }
+    /// Save As in a window too narrow for the File panel: the save sheet alone.
+    private func saveWithoutPanel(_ file: DownloadedAttachment, channelID: String, session: AccountSession) {
+        guard let window else { return }
+        let active = attachmentActivity(channelID: channelID, session: session)
+        let panel = NSSavePanel(); attachmentSavePanel = panel
+        Task { [weak self] in
+            defer { if self?.attachmentSavePanel === panel { self?.attachmentSavePanel = nil } }
+            do { _ = try await AttachmentExport.saveCopy(of: file, using: panel, over: window, isCurrent: active) }
+            catch { if active() { self?.app.showError(error) } }
+        }
+    }
+    /// Shows a message's file in the File panel, in the inspector pane the
+    /// thread inspector otherwise uses. `thenSave` asks where to save it as
+    /// soon as it has downloaded.
+    func showFileInspector(for message: RavenMessage, thenSave: Bool = false) {
+        guard !isClosed, let session, !session.stopped, Self.hasFile(message),
+              !session.channelIsRevoked(message.channelID), !session.deletedIDs.contains(message.id) else { return }
+        if let inspector = fileInspector, inspector.source.messageID == message.id, !inspector.isDetached {
+            if inspector.hasFailed {
+                inspector.retry(thenSave: thenSave)
+            } else if thenSave {
+                if inspector.attachment != nil { inspector.saveAs() }
+                else { saveWhenFileArrives = true }
+            }
+            return
+        }
+        // A replaced panel passes on the width the reader gave it.
+        let width = fileInspector.flatMap { $0.isViewLoaded && $0.view.window != nil ? $0.view.frame.width : nil } ?? 340
+        // Not closeFileInspector: a thread under the panel stays covered.
+        tearDownFileInspector()
+        let filename = message.raw["file"].string.flatMap { URL(string: $0)?.lastPathComponent } ?? "Attachment"
+        var allowed = CharacterSet.urlPathAllowed; allowed.remove(charactersIn: "/?#%")
+        let link = message.id.addingPercentEncoding(withAllowedCharacters: allowed).flatMap { URL(string: "/raven/message/" + $0, relativeTo: session.account.origin)?.absoluteURL }
+        let conversation = channel.map { $0.isDM ? $0.title : "#\($0.title)" }
+        let source = FileInspectorSource(messageID: message.id, channelID: message.channelID, filename: filename, sender: session.authorName(message), sent: session.displayTimestamp(message.creation), conversation: conversation, messageLink: link)
+        let inspector = FileInspector(source: source, active: attachmentActivity(channelID: message.channelID, messageID: message.id, session: session), reportError: { [weak self] error in self?.app.showError(error) }, makeSavePanel: makeFileInspectorSavePanel)
+        inspector.onQuickLook = { [weak self, weak inspector] file in
+            guard let self, let inspector else { return }
+            self.presentQuickLook(file, link: inspector.source.messageLink, channelID: inspector.source.channelID, session: session)
+        }
+        inspector.onShowMessage = { [weak self] id in self?.scrollTo(id) }
+        inspector.onClose = { [weak self] in self?.closeFileInspector() }
+        inspector.onRetry = { [weak self, weak inspector] thenSave in
+            guard let self, let inspector, self.fileInspector === inspector else { return }
+            self.startFileDownload(message, session: session, inspector: inspector, thenSave: thenSave)
+        }
+        fileInspector = inspector
+        let item = NSSplitViewItem(inspectorWithViewController: inspector)
+        item.minimumThickness = 280; item.maximumThickness = 640; item.canCollapse = false
+        // Opens at 340 pt; below the divider-drag priority so it stays resizable.
+        let widthConstraint = inspector.view.widthAnchor.constraint(equalToConstant: min(640, max(280, width))); widthConstraint.priority = NSLayoutConstraint.Priority(500); widthConstraint.isActive = true
+        fileSplitItem = item; fileInspectorCollapsedByWidth = false
+        syncInspectorItems()
+        inspector.start()
+        startFileDownload(message, session: session, inspector: inspector, thenSave: thenSave)
+    }
+
+    /// Both the first click and an authorized retry use the panel's single
+    /// download slot. A later Save As while loading sets the same intent.
+    private func startFileDownload(_ message: RavenMessage, session: AccountSession, inspector: FileInspector, thenSave: Bool) {
+        saveWhenFileArrives = thenSave
+        downloadAttachment(of: message, session: session, in: .filePanel, failed: { [weak self, weak inspector] error in
+            if self?.fileInspector === inspector { self?.saveWhenFileArrives = false }
+            inspector?.showFailure(error)
+        }) { [weak self, weak inspector] file, _ in
+            guard let self, let inspector, self.fileInspector === inspector else { return }
+            inspector.show(file)
+            guard self.saveWhenFileArrives else { return }
+            self.saveWhenFileArrives = false
+            if self.fileInspectorCollapsedByWidth { self.saveWithoutPanel(file, channelID: message.channelID, session: session) } else { inspector.saveAs() }
+        }
+    }
+    /// Closes the File panel and releases its file; a thread it covered
+    /// comes back. Safe to call when closed.
+    func closeFileInspector() {
+        tearDownFileInspector()
+        syncInspectorItems()
+    }
+    /// Stops the panel's download, releases its file and removes its pane.
+    private func tearDownFileInspector() {
+        followSelectionTask?.cancel(); followSelectionTask = nil
+        if fileDownload != nil { fileAttempt = UUID(); fileDownload?.cancel(); endDownload(in: .filePanel, state: session?.state ?? status.stringValue) }
+        fileInspector?.detach()
+        if let item = fileSplitItem, splitController.splitViewItems.contains(item) { splitController.removeSplitViewItem(item) }
+        fileSplitItem = nil; fileInspector = nil; fileInspectorCollapsedByWidth = false; saveWhenFileArrives = false
     }
     func clearPreview() {
         let wasDownloading = attachmentDownload != nil
         attachmentAttempt = UUID(); attachmentDownload?.cancel(); attachmentDownload = nil
         if wasDownloading { status.stringValue = session?.state ?? "Add an account to get started" }
+        attachmentSavePanel?.cancel(nil); attachmentSavePanel = nil
+        closeFileInspector()
         let windows = attachmentWindows; attachmentWindows.removeAll()
         for controller in windows { controller.close() }
     }
@@ -1743,18 +2273,29 @@ import NevermoreCore
         if menuItem.action == #selector(joinChannel(_:)) { return channel.map(ChannelPolicy.canJoin) == true && session?.readOnly == false && session?.stopped == false }
         if isArchivedConversation, [#selector(send(_:)), #selector(editMessage(_:)), #selector(deleteMessage(_:)), #selector(react(_:)), #selector(pin(_:)), #selector(schedule(_:)), #selector(createPoll(_:))].contains(menuItem.action) { return false }
         if menuItem.action == #selector(vote(_:)) { return selectedMessage?.messageType == "Poll" && session?.stopped == false }
-        if [#selector(quickLook(_:)), #selector(saveAttachment(_:))].contains(menuItem.action) { return selectedMessage?.raw["file"].string?.isEmpty == false && session?.stopped == false }
+        if [#selector(quickLook(_:)), #selector(saveAttachment(_:))].contains(menuItem.action) { return (selectedMessage?.raw["file"].string?.isEmpty == false || fileInspector?.attachment != nil) && session?.stopped == false }
 
         if [#selector(code(_:)), #selector(insertLink(_:)), #selector(mention(_:)), #selector(insertCustomEmoji(_:)), #selector(reply(_:)), #selector(editMessage(_:)), #selector(attachFiles(_:)), #selector(clearAttachments)].contains(menuItem.action), !composer.isEditable { return false }
         if menuItem.action == #selector(insertCustomEmoji(_:)), composer.hasMarkedText() || !NativeRichText.canAuthorSpoiler(composer.typingAttributes) { return false }
         if menuItem.action == #selector(sendGIF(_:)) { return canSendGIF }
-        if menuItem.action == #selector(openCodeReader(_:)) { guard let message = selectedMessage, let doc = try? RichTextCodec.parse(message.html) else { return false }; return !CodeBlocks.extract(from: doc).isEmpty }
+        // Menu validation runs on every lookup of a Message menu shortcut;
+        // the session's parsed-document cache keeps that from parsing HTML.
+        if menuItem.action == #selector(openCodeReader(_:)) { guard let message = selectedMessage, let session, case .parsed(let doc) = session.messageDocument(for: message) else { return false }; return !CodeBlocks.extract(from: doc).isEmpty }
         if menuItem.action == #selector(cancelPromisedFiles(_:)) { return !promisedReceives.isEmpty }
         if [#selector(editMessage(_:)), #selector(deleteMessage(_:))].contains(menuItem.action) { return selectedMessage?.owner == session?.account.user && selectedMessage != nil }
+        if menuItem.action == #selector(copyMessageText(_:)) { return messageForCopy != nil }
         if [#selector(reply(_:)), #selector(openThread(_:)), #selector(openThreadWindow(_:)), #selector(react(_:)), #selector(saveForLater(_:)), #selector(pin(_:)), #selector(remind(_:)), #selector(vote(_:))].contains(menuItem.action) { return selectedMessage != nil }
+        // Mark-all resolves through the app delegate from any window;
+        // mark-selected needs an Inbox selection, so it is disabled here.
+        if menuItem.action == #selector(AppDelegate.markAllNotificationsRead(_:)) { return session.map { !$0.readOnly && !$0.stopped && !$0.demo } ?? false }
+        if menuItem.action == #selector(CollectionWindow.markSelectedRead) { return false }
         return true
     }
     func isCurrent(_ expected: AccountSession, channelID: String? = nil) -> Bool { !isClosed && session === expected && !expected.stopped && (channelID == nil || channel?.id == channelID) }
+    /// Whether this window still shows the account an in-flight action started
+    /// for. Navigation to another conversation of the same account is current;
+    /// a switch to another account is not, and must not receive its feedback.
+    func isCurrentAccount(_ expected: AccountSession) -> Bool { !isClosed && session === expected && !expected.stopped }
     func action(_ work: @escaping @MainActor () async throws -> Void) {
         let source = session
         Task { guard !isClosed, session === source, source?.stopped != true else { return }; do { try await work() } catch { if !isClosed && session === source && !(error is CancellationError) { app.showError(error) } } }

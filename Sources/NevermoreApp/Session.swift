@@ -8,9 +8,15 @@ import ImageIO
 extension Notification.Name {
     static let sessionChanged = Notification.Name("NevermoreSessionChanged")
     static let draftChanged = Notification.Name("NevermoreDraftChanged")
+    /// `AccountSession.draftChannelIDs` gained or lost a conversation.
+    static let sessionDraftMarksChanged = Notification.Name("NevermoreSessionDraftMarksChanged")
     static let sessionStatusAttentionChanged = Notification.Name("NevermoreSessionStatusAttentionChanged")
     /// A profile photo arrived; transcripts redraw without re-rendering.
     static let sessionAvatarsChanged = Notification.Name("NevermoreSessionAvatarsChanged")
+    /// Someone became active or inactive. Presence shows on sidebar rows,
+    /// Home and People results, never in a transcript, so it does not post
+    /// `sessionChanged`, which re-renders every open transcript.
+    static let sessionPresenceChanged = Notification.Name("NevermoreSessionPresenceChanged")
 }
 
 private enum OutboxTargetError: LocalizedError {
@@ -40,9 +46,18 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     private(set) var account: Account
     let store: AccountStore
     var client: RavenClient
+    /// Reads used by history loads and membership refreshes. Self-checks
+    /// substitute deterministic responses; production calls go to the
+    /// account's client.
+    var readRPC: (@MainActor (String, [String: JSONValue]) async throws -> JSONValue)?
     var channels: [RavenChannel] = []
+    /// Bumped whenever `channels` is replaced, so mention pools and other
+    /// channel-derived caches can invalidate without rebuilding per keystroke.
+    var channelsVersion = 0
     var userNames: [String: String] = [:]
     var directory: [String: JSONValue] = [:]
+    /// Bumped whenever the user directory is replaced or cleared.
+    var directoryVersion = 0
     var workingHours: RavenQuietHoursConfig?
     var userPreferences: RavenUserPreferences?
     var roles = Set<String>()
@@ -51,6 +66,10 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     var lastPresenceRefresh = Date.distantPast
     var lastPresenceAttempt = Date.distantPast
     var presenceUnavailable = false
+    /// When the last presence refusal arrived. A refusal is a circuit
+    /// breaker, not a life sentence: after this delay one request may
+    /// retry, so a transient 403/404 self-heals without a per-minute storm.
+    var presenceFailedAt: Date?
     var knownThreads = Set<String>()
     var threadParents: [String: String] = [:]
     var threadCreations: [String: Task<RavenChannel, Error>] = [:]
@@ -64,14 +83,49 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     var realtime: RavenRealtime?
     var interests: [UUID: String] = [:]
     var generation = 0
+    /// Per-channel authorization epochs. A load captures its channel's epoch
+    /// before requesting history. Revoking or restoring a channel advances
+    /// its epoch, and the epochs of threads under it, so an in-flight response
+    /// cannot publish a page that is no longer authorized and a denial cannot
+    /// purge a channel that is authorized again.
+    private var historyWrite: Task<Void, Error>?
+    private var channelAccessEpochs: [String: Int] = [:]
     var deletedIDs = Set<String>() {
         didSet { if deletedIDs.count > oldValue.count || !deletedIDs.isSubset(of: oldValue) { clearMessageDocuments(); pruneTranscriptChannelState() } }
     }
     var revokedChannels = Set<String>() {
-        didSet { if revokedChannels.count > oldValue.count || !revokedChannels.isSubset(of: oldValue) { clearMessageDocuments(); pruneTranscriptChannelState() } }
+        didSet {
+            let added = revokedChannels.subtracting(oldValue)
+            let removed = oldValue.subtracting(revokedChannels)
+            guard !added.isEmpty || !removed.isEmpty else { return }
+            clearMessageDocuments()
+            pruneTranscriptChannelState()
+            for id in historyChannels(under: added.union(removed)) {
+                channelAccessEpochs[id, default: 0] += 1
+            }
+            // A revocation withdraws private content from memory at once; the
+            // durable purge belongs to the caller that owns the store write.
+            for id in historyChannels(under: added) { memoryMessages.removeValue(forKey: id) }
+            // Rooms follow access both ways: a conversation whose access
+            // returns while a window shows it joins its room again, instead
+            // of staying silent until the socket reconnects.
+            updateRooms()
+        }
     }
     var flushing = false
     var lastSeen: [String: String] = [:]
+    private struct VisitObservation: Hashable {
+        let timestamp: String
+        let generation: Int
+    }
+    /// Main-actor state shared by outstanding writes to a channel. Mark as
+    /// Unread advances the generation without losing track of writes that
+    /// still need to drain, even if the user cancels and tries again.
+    private final class VisitWrites {
+        var generation = 0
+        var observations = Set<VisitObservation>()
+    }
+    private var pendingVisitWrites: [String: VisitWrites] = [:]
     private var transcriptChannelState = TranscriptChannelStateCache()
     var intentionallyUnread = Set<String>()
     var approvedOldSends = Set<UUID>()
@@ -147,7 +201,8 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     /// Internal rather than private so the self-check can pin the live tick.
     var lastLiveRefresh = Date()
     var notificationChannels = Set<String>()
-    var notifiedIDs = Set<String>()
+    /// Messages and batches already notified, newest kept.
+    var notifiedIDs = RecentIdentifiers(capacity: 1000)
     var unread: JSONValue = .null
     var unreadNotificationIDs = Set<String>()
     /// Unread conversations in which a mention arrived while the app was
@@ -181,6 +236,10 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
             }
         }
     }
+    private func read(_ method: String, _ arguments: [String: JSONValue] = [:]) async throws -> JSONValue {
+        if let readRPC { return try await readRPC(method, arguments) }
+        return try await client.rpc(method, arguments: arguments)
+    }
     func recordAcceptedReaction() {
         reactionsAccepted += 1
         quickReactionUsage.invalidate()
@@ -213,14 +272,42 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         return RavenMessage(raw: .object(fields))
     }
     func messageDocument(for message: RavenMessage) -> MessageDocumentResult {
+        // A deletion or revocation already cleared the cache when it was
+        // recorded. Looking up a deleted row must not drop every other
+        // conversation's parsed documents and force them to parse again.
         guard !stopped, !deletedIDs.contains(message.id), !deletedIDs.contains(message.channelID),
               !ChannelPolicy.isRevoked(channelID: message.channelID, revoked: revokedChannels, threadParents: threadParents) else {
-            clearMessageDocuments()
             return .failed
         }
         return messageDocuments.document(channelID: message.channelID, messageID: message.id, html: message.html)
     }
     func clearMessageDocuments() { messageDocuments.removeAll() }
+    private func channelAccessEpoch(_ channelID: String) -> Int { channelAccessEpochs[channelID, default: 0] }
+    func channelIsRevoked(_ channelID: String) -> Bool {
+        ChannelPolicy.isRevoked(channelID: channelID, revoked: revokedChannels, threadParents: threadParents)
+    }
+    private func historyChannels(under roots: Set<String>) -> Set<String> {
+        guard !roots.isEmpty else { return [] }
+        return roots.union(threadParents.keys.filter {
+            ChannelPolicy.isRevoked(channelID: $0, revoked: roots, threadParents: threadParents)
+        })
+    }
+    /// Keep a purge in order with earlier and later page writes across actor
+    /// suspensions. A successful rejoin can then safely publish fresh history.
+    private func writeHistory(_ operation: @escaping @MainActor () async throws -> Void) async throws {
+        let previous = historyWrite
+        let next = Task { @MainActor in
+            _ = await previous?.result
+            try await operation()
+        }
+        historyWrite = next
+        try await next.value
+    }
+    /// True while a load's captured generation and channel epoch still
+    /// describe a channel whose history it may publish.
+    private func loadCanPublish(_ channelID: String, epoch: Int, access: Int) -> Bool {
+        !stopped && epoch == generation && access == channelAccessEpoch(channelID) && !channelIsRevoked(channelID)
+    }
     func transcriptVisit(for channelID: String) -> TranscriptReadPosition.Visit? { transcriptChannelState.visit(for: channelID) }
     func historicalMessageIDs(for channelID: String) -> TranscriptChannelStateCache.HistoricalPage? { transcriptChannelState.historicalPage(for: channelID) }
     func recordTranscriptVisit(_ visit: TranscriptReadPosition.Visit, channelID: String) {
@@ -273,12 +360,13 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         return activeUsers.contains(userID) ? "Active" : nil
     }
     func recordInteraction(now: Date = Date()) {
-        guard !demo, !stopped, !readOnly, !presenceUnavailable, NSApp.isActive, now.timeIntervalSince(lastPresenceAttempt) >= 60 else { return }
+        let retryAvailable = !presenceUnavailable || now.timeIntervalSince(presenceFailedAt ?? .distantPast) >= Self.presenceRetryDelay
+        guard !demo, !stopped, !readOnly, retryAvailable, NSApp.isActive, now.timeIntervalSince(lastPresenceAttempt) >= 60 else { return }
         guard userPreferences?.availabilityStatus != "Invisible" else { return }
         lastPresenceAttempt = now
         Task {
-            do { _ = try await client.rpc("raven.api.user_availability.refresh_user_active_state", arguments: ["deactivate": .bool(false)], mutation: true) }
-            catch { if let failure = error as? RavenError, failure.isPermissionDenied || failure == .http(404, nil) { presenceUnavailable = true } }
+            do { _ = try await client.rpc("raven.api.user_availability.refresh_user_active_state", arguments: ["deactivate": .bool(false)], mutation: true); presenceUnavailable = false; presenceFailedAt = nil }
+            catch { if let failure = error as? RavenError, failure.isPermissionDenied || failure == .http(404, nil) { presenceUnavailable = true; presenceFailedAt = Date() } }
         }
         // The server expires activity after 15 minutes. Do not send a global
         // deactivate on sleep/quit: that would also erase this user's phone activity.
@@ -286,7 +374,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     func reauthenticate(clientID: String, tokens: OAuthTokens) async throws {
         await client.invalidate()
         try KeychainTokenStore.save(tokens, accountID: account.id)
-        generation += 1; presenceUnavailable = false; account.clientID = clientID
+        generation += 1; presenceUnavailable = false; presenceFailedAt = nil; account.clientID = clientID
         client = RavenClient(origin: account.origin, tokens: tokens, clientID: clientID, accountID: account.id)
         realtime?.disconnect(); realtime = nil; realtimeToken = nil
         setStatusAttention(nil)
@@ -297,6 +385,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         do {
             try await store.recoverInterruptedOperations()
             channels = try await store.channels()
+            await loadDraftMarks()
             state = demo ? StatusLocalization.text(.demo) : StatusLocalization.text(.cachedConnecting); notify()
         } catch { fail(error) }
         if demo { return }
@@ -328,20 +417,30 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     }
     func refresh() async throws {
         guard !stopped else { return }
-        let boot = try await client.rpc("raven.api.native.boot")
+        let boot = try await read("raven.api.native.boot")
         guard !stopped else { return }
         readOnly = boot["read_only"].bool
         roles = Set(boot["user"]["roles"].array.compactMap(\.string))
         workingHours = boot["quiet_hours"] == .null ? nil : RavenQuietHoursConfig(raw: boot["quiet_hours"])
-        if userPreferences == nil, let raw = try? await client.rpc("raven.api.raven_users.get_current_raven_user"), raw["user"].string == account.user || raw["name"].string == account.user { userPreferences = RavenUserPreferences(raw: raw) }
-        if userNames.isEmpty, let directory = try? await client.rpc("raven.api.raven_users.get_list") {
+        if userPreferences == nil, let raw = try? await read("raven.api.raven_users.get_current_raven_user"), raw["user"].string == account.user || raw["name"].string == account.user { userPreferences = RavenUserPreferences(raw: raw) }
+        if userNames.isEmpty, let directory = try? await read("raven.api.raven_users.get_list") {
             for user in directory.array { if let id = user["name"].string { userNames[id] = user["full_name"].string ?? id; self.directory[id] = user } }
+            directoryVersion += 1
         }
-        if Date().timeIntervalSince(lastPresenceRefresh) >= 60, !presenceUnavailable {
+        if Date().timeIntervalSince(lastPresenceRefresh) >= 60,
+           !presenceUnavailable || Date().timeIntervalSince(presenceFailedAt ?? .distantPast) >= Self.presenceRetryDelay {
             lastPresenceRefresh = Date()
-            if let active = try? await client.rpc("raven.api.user_availability.get_active_users") { activeUsers = Set(active.array.compactMap(\.string)) }
+            do {
+                let active = try await read("raven.api.user_availability.get_active_users")
+                if let users = PresenceRead.activeUsers(from: active) { activeUsers = users }
+                presenceUnavailable = false; presenceFailedAt = nil
+            } catch {
+                if let failure = error as? RavenError, failure.isPermissionDenied || failure == .http(404, nil) {
+                    presenceUnavailable = true; presenceFailedAt = Date()
+                }
+            }
         }
-        let value = try await client.rpc("raven.api.raven_channel.get_all_channels", arguments: ["hide_archived": .bool(false)])
+        let value = try await read("raven.api.raven_channel.get_all_channels", ["hide_archived": .bool(false)])
         guard case .array = value["channels"], case .array = value["dm_channels"] else { throw AppError.message("The server returned an unsupported channel contract. Open Raven in your browser.") }
         let items = (value["channels"].array + value["dm_channels"].array).map { raw -> RavenChannel in
             var fields = raw.object
@@ -352,25 +451,39 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         }
         guard !stopped else { return }
         let allowed = Set(items.map(\.id))
-        // Thread rooms are separately authorized by their history endpoint.
+        // Thread rooms follow their parent's access: a thread whose parent is
+        // revoked is not allowed, even though its own history endpoint is
+        // separately authorized.
         let threads = Set(interests.values).subtracting(channels.map(\.id))
         let revoked = Set(channels.map(\.id)).subtracting(allowed)
         revokedChannels.formUnion(revoked); revokedChannels.subtract(allowed)
-        for id in revoked { memoryMessages.removeValue(forKey: id) }
         if !revoked.isEmpty { generation += 1; thumbnails.removeAll(); thumbnailOrder.removeAll(); forgetAnimatedImages() }
-        try await store.removeRevokedChannels(allowed: allowed.union(threads))
-        try await store.cacheChannels(items)
+        let permitted = allowed.union(threads.filter { !channelIsRevoked($0) })
+        let withdrawn = historyChannels(under: revoked)
+        try await writeHistory { [store] in
+            try await store.removeRevokedChannels(allowed: permitted, withdrawnHistory: withdrawn)
+            try await store.cacheChannels(items)
+        }
+        guard !stopped else { return }
         channels = items.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-        unread = (try? await client.rpc("raven.api.raven_message.get_unread_count_for_channels")) ?? .null
-        if let attention = try? await client.rpc("raven.api.notifications.get_unread_notification_message_ids") {
-            unreadNotificationIDs = Set(attention.array.compactMap(\.string))
-        } else {
-            // Older deployments lack the ID endpoint. A bounded inbox page is
-            // sufficient for an attention dot, never advertised as a count.
-            let attention = try? await client.rpc("raven.api.notifications.get_notifications", arguments: ["unread_only": .bool(true), "limit": .number(100)])
-            // Mention rows use their own name; only message_id identifies
-            // the underlying message in both notification variants.
-            unreadNotificationIDs = Set((attention?.array ?? []).compactMap { $0["message_id"].string })
+        channelsVersion += 1
+        // Failed and malformed snapshots leave the last known values intact.
+        if case let .array(counts)? = try? await read("raven.api.raven_message.get_unread_count_for_channels"),
+           counts.allSatisfy({ row in
+               guard let id = row["name"].string, !id.isEmpty, case .number(let count) = row["unread_count"] else { return false }
+               return count.isFinite && count >= 0
+           }) {
+            unread = .array(counts)
+        }
+        guard !stopped else { return }
+        if let response = try? await read("raven.api.notifications.get_unread_notification_message_ids") {
+            if case let .array(ids) = response, ids.allSatisfy({ $0.string?.isEmpty == false }) {
+                unreadNotificationIDs = Set(ids.compactMap(\.string))
+            }
+        } else if !stopped, case let .array(rows)? = try? await read("raven.api.notifications.get_notifications", ["unread_only": .bool(true), "limit": .number(100)]) {
+            // Older deployments expose only the inbox page. Its message_id
+            // identifies the underlying message for both notification types.
+            unreadNotificationIDs = Set(rows.compactMap { $0["message_id"].string })
         }
         guard !stopped else { return }
         mentionedChannels.formIntersection(UnreadFlock.perching(channels: channels, unread: unread).keys)
@@ -392,14 +505,17 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
             realtime?.connect(); updateRooms()
         }
     }
-    func updateRooms() { realtime?.setChannels(Set(interests.values).subtracting(revokedChannels)) }
+    func updateRooms() { realtime?.setChannels(Set(interests.values.filter { !channelIsRevoked($0) })) }
     func event(_ name: String, _ payload: JSONValue) {
         if name == "raven:user_active_state_updated", let user = payload["user"].string {
-            if payload["active"].bool { activeUsers.insert(user) } else { activeUsers.remove(user) }
-            notify(); return
+            let changed = payload["active"].bool ? activeUsers.insert(user).inserted : activeUsers.remove(user) != nil
+            if changed { NotificationCenter.default.post(name: .sessionPresenceChanged, object: self) }
+            return
         }
-        if payload["doctype"].string == "Raven User" { userNames.removeAll(); directory.removeAll(); userPreferences = nil; avatars.removeAll(); avatarLastUse.removeAll(); avatarFailures.removeAll(); avatarRequests.subtract(avatarQueue); avatarQueue.removeAll() }
-        if name == "connect" { realtimeLive = true; avatarFailures.removeAll(); updateRooms(); state = readOnly ? StatusLocalization.text(.maintenance) : StatusLocalization.text(.live) }
+        if payload["doctype"].string == "Raven User" { userNames.removeAll(); directory.removeAll(); directoryVersion += 1; userPreferences = nil; avatars.removeAll(); avatarLastUse.removeAll(); avatarFailures.removeAll(); avatarRequests.subtract(avatarQueue); avatarQueue.removeAll() }
+        // A live socket is the evidence an earlier 403/404 is stale, so
+        // presence refreshes resume without waiting for a re-login.
+        if name == "connect" { realtimeLive = true; avatarFailures.removeAll(); presenceUnavailable = false; presenceFailedAt = nil; updateRooms(); state = readOnly ? StatusLocalization.text(.maintenance) : StatusLocalization.text(.live) }
         if name == "disconnect" || name == "error" { realtimeLive = false; ensureRealtime(); state = StatusLocalization.text(.realtimeUnavailable) }
         if name == "raven_mention", let channel = payload["channel_id"].string, mentionedChannels.count < 512 { mentionedChannels.insert(channel) }
         if ["message_deleted", "disconnect"].contains(name) { generation += 1 }
@@ -446,13 +562,14 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     func load(channelID: String, olderThan: String? = nil, anchor: String? = nil) async throws {
         if demo { notify(); return }
         let epoch = generation
+        let access = channelAccessEpoch(channelID)
         var args: [String: JSONValue] = ["channel_id": .string(channelID), "limit": .number(100), "update_last_visit": .bool(false)]
         var method = "raven.api.chat_stream.get_messages"
         if let olderThan { method = "raven.api.chat_stream.get_older_messages"; args["from_message"] = .string(olderThan); args.removeValue(forKey: "update_last_visit") }
         if let anchor { args["base_message"] = .string(anchor) }
         do {
-            let result = try await client.rpc(method, arguments: args)
-            guard !stopped, epoch == generation else { return }
+            let result = try await read(method, args)
+            guard loadCanPublish(channelID, epoch: epoch, access: access) else { return }
             guard case .array = result["messages"] else { throw AppError.message("Unsupported message history response.") }
             // The history contract returns the caller's watermark even when
             // update_last_visit=false. Missing optional fields stay unknown.
@@ -465,33 +582,111 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
             }
             sentLinkPreviews.ingest(result["previews"])
             let rows = result["messages"].array.map(RavenMessage.init(raw:)).filter { !deletedIDs.contains($0.id) && $0.channelID == channelID }
+            // Recheck at the storage boundary: a revocation while the durable
+            // page was read must not be followed by this page's commits.
+            guard loadCanPublish(channelID, epoch: epoch, access: access) else { return }
             if olderThan != nil, transcriptChannelIsEligible(channelID) {
                 recordHistoricalMessageIDs(rows.map(\.id), channelID: channelID)
             }
-            if olderThan == nil && anchor == nil {
-                let existing = try await store.messages(channelID: channelID, limit: 5000)
-                let absent = MessageReconciliation.observedDeletions(existing: existing, snapshot: rows, channelID: channelID, authoritative: true)
-                if !absent.isEmpty { clearMessageDocuments() }
-                try await store.deleteMessages(ids: absent)
-                let removed = Set(absent); memoryMessages[channelID]?.removeAll { removed.contains($0.id) }
+            try await writeHistory { [self] in
+                guard loadCanPublish(channelID, epoch: epoch, access: access) else { return }
+                if olderThan == nil && anchor == nil {
+                    let existing = try await store.messages(channelID: channelID, limit: 5000)
+                    guard loadCanPublish(channelID, epoch: epoch, access: access) else { return }
+                    let absent = MessageReconciliation.observedDeletions(existing: existing, snapshot: rows, channelID: channelID, authoritative: true)
+                    if !absent.isEmpty {
+                        try await store.deleteMessages(ids: absent)
+                        guard loadCanPublish(channelID, epoch: epoch, access: access) else { return }
+                        clearMessageDocuments()
+                        let removed = Set(absent)
+                        memoryMessages[channelID]?.removeAll { removed.contains($0.id) }
+                    }
+                }
+                if retainHistory { try await store.cacheMessages(rows) }
             }
-            if retainHistory { try await store.cacheMessages(rows) }
+            guard loadCanPublish(channelID, epoch: epoch, access: access) else { return }
             var merged = Dictionary(uniqueKeysWithValues: (memoryMessages[channelID] ?? []).map { ($0.id, $0) })
             for row in rows { merged[row.id] = row }
             let ordered = merged.values.sorted(by: Self.order)
             memoryMessages[channelID] = olderThan == nil ? Array(ordered.suffix(1500)) : Array(ordered.prefix(1500))
             notify()
         } catch {
-            // An authoritative access denial invalidates private cached content.
+            // Only a denial from the current authorization epoch is
+            // authoritative. A stale denial must not purge a channel that has
+            // since been authorized again.
             if let e = error as? RavenError, e.isPermissionDenied {
-                revokedChannels.insert(channelID); memoryMessages.removeValue(forKey: channelID); thumbnails.removeAll(); forgetAnimatedImages(); updateRooms()
-                let rows = try await store.messages(channelID: channelID, limit: 5000)
-                try await store.deleteMessages(ids: rows.map(\.id)); notify()
+                guard !stopped, access == channelAccessEpoch(channelID) else { throw error }
+                revokedChannels.insert(channelID)
+                thumbnails.removeAll(); forgetAnimatedImages(); updateRooms()
+                let targets = historyChannels(under: [channelID])
+                let deniedAccess = channelAccessEpoch(channelID)
+                notify()
+                try await writeHistory { [self] in
+                    guard !stopped, channelAccessEpoch(channelID) == deniedAccess, channelIsRevoked(channelID) else { return }
+                    try await store.withdrawHistory(channelIDs: targets.filter { channelIsRevoked($0) })
+                }
             }
             throw error
         }
     }
     static func order(_ a: RavenMessage, _ b: RavenMessage) -> Bool { MessageReconciliation.ordered(a, b) }
+    /// Clear only the scheduled revision. A failed cleanup keeps that
+    /// original draft in the same recovery path as a failed editor save.
+    func clearScheduledDraft(_ original: Draft, revision: Int) async throws -> Bool {
+        let id = original.channelID
+        guard !stopped, draftRevisions[id, default: 0] == revision else { return false }
+        let clearingRevision = revision + 1
+        draftRevisions[id] = clearingRevision
+        do {
+            try await save(Draft(channelID: id), revision: clearingRevision)
+        } catch {
+            if !stopped, draftRevisions[id] == clearingRevision { recoverableDrafts[id] = original }
+            throw error
+        }
+        return !stopped && draftRevisions[id] == clearingRevision
+    }
+
+    /// Conversations whose saved draft holds text or files, for the
+    /// sidebar's pencil. Filled from the store at start, then kept in step
+    /// one conversation at a time as drafts change.
+    private(set) var draftChannelIDs = Set<String>() {
+        didSet { if draftChannelIDs != oldValue { NotificationCenter.default.post(name: .sessionDraftMarksChanged, object: self) } }
+    }
+    /// The newest read per conversation; an older read that finishes late
+    /// must not undo a newer one.
+    private var draftMarkReads: [String: Int] = [:]
+
+    /// - Parameter saved: the draft now in the store, when the caller has it;
+    ///   otherwise the store is read. Saves pass it, as they run per keystroke.
+    private func draftDidChange(_ channelID: String, saved: Draft? = nil) {
+        NotificationCenter.default.post(name: .draftChanged, object: self, userInfo: ["channel": channelID])
+        let read = draftMarkReads[channelID, default: 0] + 1
+        draftMarkReads[channelID] = read
+        if let saved {
+            if Self.holdsContent(saved) { draftChannelIDs.insert(channelID) } else { draftChannelIDs.remove(channelID) }
+            return
+        }
+        Task { [weak self] in
+            guard let self, !self.stopped else { return }
+            let draft: Draft?
+            do { draft = try await self.store.draft(channelID: channelID) }
+            catch { return } // A failed read changes nothing; the next draft change reconciles.
+            guard !self.stopped, self.draftMarkReads[channelID] == read else { return }
+            if let draft, Self.holdsContent(draft) { self.draftChannelIDs.insert(channelID) } else { self.draftChannelIDs.remove(channelID) }
+        }
+    }
+
+    func loadDraftMarks() async {
+        guard let drafts = try? await store.drafts(), !stopped else { return }
+        draftChannelIDs = Set(drafts.filter(Self.holdsContent).map(\.channelID))
+    }
+
+    /// Text, or staged files without text. A draft that cannot be parsed
+    /// still holds something the reader wrote.
+    static func holdsContent(_ draft: Draft) -> Bool {
+        !draft.attachments.isEmpty || ((try? ConversationWindow.hasText(draft)) ?? true)
+    }
+
     func save(_ draft: Draft, revision: Int? = nil) async throws {
         guard !stopped else { throw AppError.message("This account is no longer active.") }
         if let revision, draftRevisions[draft.channelID, default: 0] != revision { return }
@@ -509,7 +704,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         catch { if draftRevisions[draft.channelID, default: 0] == savingRevision { draftPersistenceFailures[draft.channelID] = error.localizedDescription }; throw error }
         guard !stopped, draftRevisions[draft.channelID, default: 0] == savingRevision else { return }
         draftPersistenceFailures.removeValue(forKey: draft.channelID); unpersistedDraftRevisions.removeValue(forKey: draft.channelID); recoverableDrafts.removeValue(forKey: draft.channelID); invalidDraftChannels.remove(draft.channelID)
-        NotificationCenter.default.post(name: .draftChanged, object: self, userInfo: ["channel": draft.channelID])
+        draftDidChange(draft.channelID, saved: draft)
     }
     @discardableResult func send(_ draft: Draft, sendSilently: Bool = false) async throws -> SendOperation {
         guard !stopped else { throw AppError.message("This account is no longer active.") }
@@ -527,7 +722,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         draftRevisions[draft.channelID, default: 0] += 1
         draftPersistenceFailures.removeValue(forKey: draft.channelID); unpersistedDraftRevisions.removeValue(forKey: draft.channelID); recoverableDrafts.removeValue(forKey: draft.channelID); invalidDraftChannels.remove(draft.channelID)
         sharedTextStorage[draft.channelID]?.setAttributedString(NSAttributedString(string: ""))
-        NotificationCenter.default.post(name: .draftChanged, object: self, userInfo: ["channel": draft.channelID])
+        draftDidChange(draft.channelID)
         notify()
         if let demoWire { demoWire.deliver() } else { Task { await flush() } }
         return accepted
@@ -546,37 +741,25 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         return accepted
     }
     /// Raven's idempotent send refuses a body without text, so a GIF goes
-    /// through `send_message`, which has no client ID. A first attempt
-    /// sends; a later one first looks for the GIF an unanswered attempt may
-    /// have posted, so a lost answer does not post it twice.
+    /// through `send_message`, which has no client ID. A lost answer may
+    /// still have been delivered, so the caller parks an uncertain attempt
+    /// for review instead of replaying it; a deliberate retry posts again.
     private func deliverGIF(_ operation: SendOperation) async throws -> RavenMessage? {
-        if operation.attempts > 1, let posted = try await postedGIF(operation) { return posted }
         var args: [String: JSONValue] = ["channel_id": .string(operation.channelID), "text": .string(operation.html)]
         if operation.sendSilently == true { args["send_silently"] = .bool(true) }
         if let reply = operation.replyTo { args["is_reply"] = .bool(true); args["linked_message"] = .string(reply) }
         let row = Self.gifRow(try await client.rpc("raven.api.raven_message.send_message", arguments: args, mutation: true))
-        guard !row.id.isEmpty, row.channelID == operation.channelID, row.owner == account.user, GIFMessage.source(in: row.html) == GIFMessage.source(in: operation.html) else { return nil }
+        guard !row.id.isEmpty, row.channelID == operation.channelID, row.owner == account.user,
+              GIFMessage.source(in: row.html) == GIFMessage.source(in: operation.html),
+              Self.replyTarget(in: row) == operation.replyTo else { return nil }
         return row
     }
-    /// The reader's message carrying this operation's GIF, posted since the
-    /// operation was accepted, if the conversation's latest page has one.
-    /// A message another send already delivered is not it, so the same GIF
-    /// sent twice in a row is not taken for one.
-    private func postedGIF(_ operation: SendOperation) async throws -> RavenMessage? {
-        guard let source = GIFMessage.source(in: operation.html) else { return nil }
-        let result = try await client.rpc("raven.api.chat_stream.get_messages", arguments: ["channel_id": .string(operation.channelID), "limit": .number(50), "update_last_visit": .bool(false)])
-        // Sends older than a day wait for approval, so a week covers all but rare approved ones.
-        let delivered = try await store.deliveredMessageIDs(channelID: operation.channelID, since: operation.createdAt.addingTimeInterval(-7 * 86400))
-        // Clocks differ between this Mac and the site; a minute of slack.
-        let earliest = operation.createdAt.addingTimeInterval(-60)
-        return result["messages"].array.map(Self.gifRow).first { row in
-            !delivered.contains(row.id) && row.channelID == operation.channelID && row.owner == account.user
-                && row.raw["linked_message"].string.flatMap({ $0.isEmpty ? nil : $0 }) == operation.replyTo
-                && GIFMessage.source(in: row.html) == source && (messageDate(row.creation).map { $0 >= earliest } ?? false)
-        }
+    /// The reply a message row answers, if any. An empty field is no reply.
+    private static func replyTarget(in row: RavenMessage) -> String? {
+        row.raw["linked_message"].string.flatMap { $0.isEmpty ? nil : $0 }
     }
-    /// A message from `send_message` or the history. These sends have no
-    /// batch, and an empty batch field would read as another send's.
+    /// A message from `send_message`. These sends have no batch, and an
+    /// empty batch field would read as another send's.
     private static func gifRow(_ value: JSONValue) -> RavenMessage {
         var fields = value.object
         if fields["message_batch_id"]?.string?.isEmpty == true { fields.removeValue(forKey: "message_batch_id") }
@@ -629,7 +812,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         }
         draftRevisions[channelID, default: 0] += 1
         draftPersistenceFailures.removeValue(forKey: channelID)
-        NotificationCenter.default.post(name: .draftChanged, object: self, userInfo: ["channel": channelID])
+        draftDidChange(channelID)
         return operation
     }
 
@@ -669,8 +852,23 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
                         guard !readOnly else { throw AppError.message("The site is read only. Your queued send is preserved.") }
                         if ChannelPolicy.isRevoked(channelID: op.channelID, revoked: revokedChannels, threadParents: threadParents) { throw OutboxTargetError.accessChanged }
                         if ChannelPolicy.isArchived(channelID: op.channelID, channels: channels, threadParents: threadParents) { throw OutboxTargetError.archived }
-                        guard let row = try await deliverGIF(op) else {
-                            op.state = .needsReview; op.error = StatusLocalization.text(.outboxAcknowledgementReview); try await store.updateOperation(op); continue
+                        let row: RavenMessage?
+                        do {
+                            row = try await deliverGIF(op)
+                        } catch {
+                            // The plain GIF POST may have reached the server.
+                            // A permanent refusal certainly was not delivered;
+                            // anything else waits for a deliberate review.
+                            guard !stopped else { return }
+                            let refused = (error as? RavenError)?.definitivelyRefusedMutation == true
+                            op.state = refused ? .rejected : .needsReview
+                            op.error = refused ? StatusLocalization.errorDescription(error) : StatusLocalization.text(.outboxGifReview)
+                            try await store.updateOperation(op)
+                            fail(error)
+                            continue
+                        }
+                        guard let row else {
+                            op.state = .needsReview; op.error = StatusLocalization.text(.outboxGifReview); try await store.updateOperation(op); continue
                         }
                         try await store.acknowledge(id: op.id, messages: [row])
                         if !retainHistory { memoryMessages[op.channelID, default: []].append(row); try await store.clearHistory(); clearMessageDocuments() }
@@ -719,20 +917,54 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         for row in memoryMessages[channelID] ?? [] { merged[row.id] = row }
         return Array(merged.values.sorted(by: Self.order).suffix(limit))
     }
+    func cachedMessage(id: String, channelID: String) async throws -> RavenMessage? {
+        if let row = memoryMessages[channelID]?.last(where: { $0.id == id }) { return row }
+        guard retainHistory || demo else { return nil }
+        let stored = try await store.message(id: id, channelID: channelID)
+        // An in-memory edit may have arrived while the disk read was suspended.
+        return memoryMessages[channelID]?.last(where: { $0.id == id }) ?? ((retainHistory || demo) ? stored : nil)
+    }
+
     func markSeen(channelID: String, timestamp: String) async {
         if let demoWire { demoWire.markSeen(channelID: channelID, timestamp: timestamp); return }
         guard !stopped, !demo, !readOnly, !intentionallyUnread.contains(channelID),
               ServerTimestampParser(siteTimeZone: .gmt).date(from: timestamp) != nil,
               timestamp > (lastSeen[channelID] ?? "") else { return }
-        lastSeen[channelID] = timestamp
-        do { try await store.pendingVisit(channelID: channelID, timestamp: timestamp); await flush() } catch { fail(error) }
+        let writes = pendingVisitWrites[channelID] ?? VisitWrites()
+        let observation = VisitObservation(timestamp: timestamp, generation: writes.generation)
+        guard writes.observations.insert(observation).inserted else { return }
+        pendingVisitWrites[channelID] = writes
+        defer {
+            writes.observations.remove(observation)
+            if writes.observations.isEmpty, pendingVisitWrites[channelID] === writes {
+                pendingVisitWrites.removeValue(forKey: channelID)
+            }
+        }
+        do {
+            try await store.pendingVisit(channelID: channelID, timestamp: timestamp)
+            guard !stopped, writes.generation == observation.generation else { return }
+            lastSeen[channelID] = max(lastSeen[channelID] ?? "", timestamp)
+            await flush()
+        } catch { fail(error) }
     }
     func markUnread(channelID: String) async throws {
         intentionallyUnread.insert(channelID)
+        let earlierWrites = pendingVisitWrites[channelID]
+        let priorGeneration = earlierWrites?.generation ?? 0
+        earlierWrites?.generation += 1
         lastSeen.removeValue(forKey: channelID)
         transcriptChannelState.removeVisit(for: channelID)
-        // Let an already transmitted visit settle before the explicit backward mutation.
-        while flushing { try await Task.sleep(for: .milliseconds(25)) }
+        // Drain earlier local writes as well as transmitted visits before the
+        // backwards mutation. Their completions cannot repopulate lastSeen.
+        let deadline = ContinuousClock.now + .seconds(5)
+        while flushing || earlierWrites?.observations.contains(where: { $0.generation <= priorGeneration }) == true {
+            guard !stopped else { throw CancellationError() }
+            guard ContinuousClock.now < deadline else {
+                throw AppError.message("The read receipt is still syncing. Try again to mark this conversation unread.")
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard !stopped else { throw CancellationError() }
         try await store.markUnread(channelID: channelID)
         _ = try await client.rpc("raven.api.raven_channel_member.mark_channel_as_unread", arguments: ["channel_id": .string(channelID)], mutation: true)
         try await refresh()
@@ -846,6 +1078,8 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     /// then keep nothing.
     func forgetAnimatedImages() { animatedImages.removeAll(); animatedSources.removeAll(); inlineImageFailures.removeAll() }
     static let inlineImageRetryDelay: TimeInterval = 300
+    /// How long a presence refusal is respected before one retry.
+    static let presenceRetryDelay: TimeInterval = 300
     /// Whether a GIF embedded in a message failed recently; it then shows
     /// its text fallback.
     func inlineImageFailed(_ url: URL) -> Bool {
@@ -974,8 +1208,33 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
               !ChannelPolicy.isArchived(channelID: channelID, channels: channels, threadParents: threadParents), !channel.raw["muted"].bool,
               channel.raw["allow_notifications"] == .null || channel.raw["allow_notifications"].bool else { return false }
         let controller = (NSApp.keyWindow?.windowController ?? NSApp.keyWindow?.sheetParent?.windowController) as? ConversationWindow
-        let reading = NSApp.isActive && controller?.session === self && (controller?.channel?.id == channelID || controller?.threadInspector?.rootMessage.id == channelID)
+        let reading = NSApp.isActive && controller?.session === self && controller?.displaysConversation(channelID) == true
         return NotificationPolicy.shouldNotify(now: Date(), quietHours: NotificationPreferenceStore.quietHours(accountID: account.id), isForeground: reading, enabled: UserDefaults.standard.bool(forKey: "notifications"), muted: userPreferences?.availabilityStatus == "Do not disturb")
+    }
+    /// What a notification shows. By default the body stays generic for
+    /// privacy; Settings ▸ Notifications can add the sender and conversation,
+    /// or the message itself with spoilers masked. The thread identifier
+    /// lets Notification Center stack a conversation's notifications
+    /// without revealing anything.
+    func notificationContent(for message: RavenMessage, level: NotificationPreview = .current()) -> UNMutableNotificationContent {
+        let channelID = message.channelID
+        let channel = channels.first { $0.id == channelID }
+        let accountName = account.displayName.isEmpty ? account.user : account.displayName
+        var text: String?
+        if level == .message, !message.html.isEmpty, case .parsed(let document) = messageDocument(for: message) { text = RichTextCodec.plainText(document) }
+        else if level == .message, message.html.isEmpty, ["File", "Image", "Poll"].contains(message.messageType) { text = NotificationText.structuredTeaser(message.raw["content"].string) }
+        let file = message.raw["file"].string.flatMap { URL(string: $0)?.lastPathComponent }
+        // A conversation not in the list yet has no title or kind to show;
+        // its raw ID is no name, and a direct message must not read as a channel.
+        let preview = NotificationText.make(level: channel == nil ? .generic : level, account: accountName, multipleAccounts: (NSApp.delegate as? AppDelegate).map { $0.sessions.filter { !$0.stopped }.count > 1 } ?? false,
+                                            conversation: channel?.title ?? channelID, isDirect: channel?.isDM ?? false, sender: authorName(message), text: text, file: file)
+        let content = UNMutableNotificationContent()
+        content.title = preview.title
+        content.subtitle = preview.subtitle
+        content.body = preview.body
+        content.threadIdentifier = "\(account.id.uuidString)-\(channelID)"
+        content.userInfo = ["account": account.id.uuidString, "channel": channelID, "message": message.id]
+        return content
     }
     func deliverNotification(channelID: String) async {
         guard shouldDeliverNotification(channelID: channelID) else { return }
@@ -985,12 +1244,14 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
             let message = RavenMessage(raw: raw)
             let notificationID = message.batchID ?? message.id
             guard message.channelID == channelID, message.owner != account.user, !notifiedIDs.contains(notificationID), shouldDeliverNotification(channelID: channelID) else { return }
-            notifiedIDs.insert(notificationID); if notifiedIDs.count > 1000 { notifiedIDs = [notificationID] }
-            let content = UNMutableNotificationContent()
-            content.title = account.displayName.isEmpty ? account.user : account.displayName
-            content.body = "New activity in Raven"
-            content.userInfo = ["account": account.id.uuidString, "channel": channelID, "message": message.id]
-            try await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "\(account.id)-\(notificationID)", content: content, trigger: nil))
+            // Claimed before the await, so a concurrent delivery for the same
+            // batch stops at the check above.
+            notifiedIDs.insert(notificationID)
+            let content = notificationContent(for: message)
+            do { try await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "\(account.id)-\(notificationID)", content: content, trigger: nil)) }
+            // Not shown (for instance before permission was granted): the
+            // batch may notify on its next message.
+            catch { notifiedIDs.remove(notificationID) }
         } catch { /* Notifications are hints. They never mark history read or expose a failed fetch. */ }
     }
 

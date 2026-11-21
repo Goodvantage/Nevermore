@@ -36,10 +36,27 @@ import RavenProtocol
         #expect(ChannelPolicy.isArchived(channelID: "thread", channels: [parent], threadParents: ["thread": "c"]))
         #expect(ChannelPolicy.isArchived(channelID: "nested", channels: [parent], threadParents: ["nested": "thread", "thread": "c"]))
         #expect(!ChannelPolicy.isArchived(channelID: "thread", channels: [channel()], threadParents: ["thread": "c"]))
+        // A cyclic ancestry is unreadable, so it must fail closed like
+        // revocation instead of treating the conversation as sendable.
+        #expect(ChannelPolicy.isArchived(channelID: "thread", channels: [channel()], threadParents: ["thread": "parent", "parent": "thread"]))
+        #expect(ChannelPolicy.isArchived(channelID: "thread", channels: [], threadParents: ["thread": "thread"]))
+        // Over-deep but acyclic ancestry trips the depth guard and also
+        // fails closed.
+        #expect(ChannelPolicy.isArchived(channelID: "n1", channels: [], threadParents: [
+            "n1": "n2", "n2": "n3", "n3": "n4", "n4": "n5",
+            "n5": "n6", "n6": "n7", "n7": "n8", "n8": "n9",
+        ]))
     }
     @Test func revokedOrCyclicThreadAncestorsNeverAuthorizeTransmission() {
         #expect(ChannelPolicy.isRevoked(channelID: "thread", revoked: ["parent"], threadParents: ["thread": "parent"]))
         #expect(!ChannelPolicy.isRevoked(channelID: "thread", revoked: ["unrelated"], threadParents: ["thread": "parent"]))
         #expect(ChannelPolicy.isRevoked(channelID: "thread", revoked: [], threadParents: ["thread": "parent", "parent": "thread"]))
+    }
+    @Test func distantRevocationAndChannelSelfParentFailClosed() {
+        let parents = Dictionary(uniqueKeysWithValues: (0..<20).map { ("n\($0)", "n\($0 + 1)") })
+        #expect(ChannelPolicy.isRevoked(channelID: "n0", revoked: ["n20"], threadParents: parents))
+        #expect(ChannelPolicy.isRevoked(channelID: "n0", revoked: [], threadParents: parents))
+        let selfParent = channel(["parent_channel_id": .string("c")])
+        #expect(ChannelPolicy.isArchived(channelID: "c", channels: [selfParent], threadParents: [:]))
     }
 }

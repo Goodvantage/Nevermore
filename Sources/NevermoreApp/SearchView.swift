@@ -10,7 +10,7 @@ import RavenProtocol
 ///
 /// Searching and previewing never mark anything read: previews load with
 /// `update_last_visit: false`, and only opening a conversation counts.
-@MainActor final class SearchView: NSView, NSTableViewDataSource, NSTableViewDelegate {
+@MainActor final class SearchView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     enum Item {
         case conversation(id: String, count: Int)
         case hit(SearchHit)
@@ -44,6 +44,13 @@ import RavenProtocol
 
     let tabs = NSSegmentedControl()
     private let chips = NSStackView()
+    private let chipScroll = NSScrollView()
+    /// The chip row's overflow menu, shown only when the chips themselves
+    /// do not fit the pane.
+    private let filtersButton = NSButton()
+    private static let contentInset: CGFloat = 20
+    private let chipRow = NSStackView()
+    private let filterSpacer = NSView()
     private let orderPopup = NSPopUpButton()
     let table = SearchResultsTable()
     private let tableScroll = NSScrollView()
@@ -54,6 +61,11 @@ import RavenProtocol
     private let emptyAction = NSButton()
     private var emptyHandler: (() -> Void)?
     let side = SearchSideColumn()
+    /// The compact window's preview affordance, in the footer below the
+    /// side-pane threshold.
+    let previewButton = NSButton(title: "Preview Context", target: nil, action: nil)
+    private(set) var compactPreviewPopover: NSPopover?
+    private(set) var compactPreviewView: SearchCompactPreviewView?
     private let sidePanel = NSGlassEffectView()
     private let status = NSTextField(labelWithString: "")
     private let hints = NSTextField(labelWithString: "")
@@ -67,6 +79,9 @@ import RavenProtocol
     /// Below this pane width the side column hides.
     static let sideColumnMinimumWidth: CGFloat = 900
     static let sideColumnWidth: CGFloat = 320
+    /// The compact preview popover's widest content, still inside a
+    /// 650-point window.
+    static let compactPreviewWidth: CGFloat = 420
 
     init(owner: ConversationWindow) {
         self.owner = owner
@@ -86,7 +101,7 @@ import RavenProtocol
                     guard let self, source === self.owner?.session else { return }
                     // Sessions change often; rebuild only when access did.
                     // Hidden results narrow too, for Back to bring them up.
-                    if self.feed.restrict(), !self.isHidden { self.reload() }
+                    if self.feed.restrict(), !self.isHidden { self.closeCompactPreview(); self.reload() }
                 }
             })
         }
@@ -119,7 +134,6 @@ import RavenProtocol
         chips.spacing = 6
         chips.alignment = .centerY
         chips.setHuggingPriority(.defaultLow, for: .horizontal)
-        let chipScroll = NSScrollView()
         chipScroll.drawsBackground = false
         chipScroll.hasHorizontalScroller = false
         chipScroll.hasVerticalScroller = false
@@ -137,7 +151,25 @@ import RavenProtocol
             chipScroll.heightAnchor.constraint(equalToConstant: 30)
         ])
         orderPopup.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let chipRow = NSStackView(views: [chipScroll, orderPopup])
+        filtersButton.title = "Filters"
+        filtersButton.target = self
+        filtersButton.action = #selector(filtersButtonPressed)
+        let filterMenu = NSMenu(title: "Filters")
+        filterMenu.delegate = self
+        filtersButton.menu = filterMenu
+        filtersButton.bezelStyle = .glass
+        filtersButton.controlSize = .small
+        filtersButton.setAccessibilityLabel("Filters")
+        // The window's key loop covers the conversation controls, so the
+        // menu also answers a chord while the pane is focused.
+        filtersButton.keyEquivalent = "f"
+        filtersButton.keyEquivalentModifierMask = [.control, .option, .command]
+        filtersButton.toolTip = "Filters (⌃⌥⌘F), with the active count"
+        filtersButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        filtersButton.setContentHuggingPriority(.required, for: .horizontal)
+        filtersButton.isHidden = true
+        filterSpacer.isHidden = true
+        chipRow.setViews([chipScroll, filtersButton, filterSpacer, orderPopup], in: .leading)
         chipRow.orientation = .horizontal
         chipRow.alignment = .centerY
         chipRow.spacing = 8
@@ -157,8 +189,9 @@ import RavenProtocol
         table.onOpen = { [weak self] in self?.openSelected() }
         table.onQuickLook = { [weak self] in self?.quickLookSelected() }
         table.onSave = { [weak self] in self?.saveSelectedFile() }
-        table.onCancel = { [weak self] in self?.owner?.leaveSearch() }
+        table.onCancel = { [weak self] in self?.cancelSearchOrPreview() }
         table.onFocusField = { [weak self] in self?.owner?.focusSearchField() }
+        table.onTogglePreview = { [weak self] in self?.toggleCompactPreview() }
         let menu = NSMenu(title: "Result")
         menu.delegate = table
         table.menu = menu
@@ -215,6 +248,17 @@ import RavenProtocol
         hints.stringValue = "↑↓ Move · Return Open · Space Quick Look · ⇧⌘S Save File · ⌘[ Back to Results · Esc Close"
         footerButtons.orientation = .horizontal
         footerButtons.spacing = 6
+        previewButton.bezelStyle = .glass
+        previewButton.controlSize = .small
+        previewButton.setAccessibilityLabel("Preview context")
+        previewButton.toolTip = "Show the messages around the selected result (⌘L)"
+        previewButton.keyEquivalent = "l"
+        previewButton.keyEquivalentModifierMask = .command
+        previewButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        previewButton.target = self
+        previewButton.action = #selector(toggleCompactPreview)
+        previewButton.isHidden = true
+        footerButtons.addArrangedSubview(previewButton)
         let footerText = NSStackView(views: [status, hints])
         footerText.orientation = .vertical
         footerText.alignment = .leading
@@ -228,10 +272,10 @@ import RavenProtocol
         stack.distribution = .fill
         stack.alignment = .leading
         stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 20, bottom: 12, right: 20)
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: Self.contentInset, bottom: 12, right: Self.contentInset)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
-        for view in [top, chipRow, body, footer] { view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true }
+        for view in [top, chipRow, body, footer] { view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -2 * Self.contentInset).isActive = true }
         // The screen shares the conversation pane even while hidden, so it
         // must never hold the window wider: below its content's width the
         // trailing edge gives way and the pane clips.
@@ -255,9 +299,20 @@ import RavenProtocol
     override func layout() {
         super.layout()
         let wide = bounds.width >= Self.sideColumnMinimumWidth
-        if sidePanel.isHidden == wide { sidePanel.isHidden = !wide; if wide { reloadSide() } }
+        if sidePanel.isHidden == wide {
+            sidePanel.isHidden = !wide
+            if wide { closeCompactPreview(); reloadSide() } else { updatePreviewAffordance() }
+        }
         let compact = bounds.width < Self.compactWidth
         if compact != isCompact { isCompact = compact; tabs.controlSize = compact ? .small : .regular; if let session = owner?.session { updateTabLabels(session) } }
+        let available = bounds.width - 2 * Self.contentInset - (orderPopup.isHidden ? 0 : orderPopup.fittingSize.width + chipRow.spacing)
+        guard available > 0 else { return }
+        let overflow = chips.fittingSize.width > available + 1
+        if overflow != chipScroll.isHidden {
+            chipScroll.isHidden = overflow
+            filtersButton.isHidden = !overflow
+            filterSpacer.isHidden = !overflow
+        }
     }
 
     /// Below this width the tabs shrink and drop their counts.
@@ -315,6 +370,7 @@ import RavenProtocol
     /// The account changed or the window closed.
     func reset(session: AccountSession?) {
         feed.cancel(); previewTask?.cancel(); attachments.cancel()
+        closeCompactPreview()
         feed = SearchFeed(session: session)
         feed.onChange = { [weak self] in self?.reload() }
         criteria = SearchCriteria(); tab = .messages; expanded = []; origin = nil; previewCache.removeAll()
@@ -355,6 +411,7 @@ import RavenProtocol
     // MARK: Chips
 
     private func rebuildChips() {
+        updateFiltersButton()
         guard let session = owner?.session else { chips.setViews([], in: .leading); return }
         var views: [NSView] = []
         let local = [.conversations, .people].contains(tab)
@@ -371,18 +428,85 @@ import RavenProtocol
             }
             views.append(SearchChip(toggle: "Saved by Me", on: criteria.savedOnly) { [weak self] in self?.change { $0.savedOnly.toggle() } })
             views.append(SearchChip(toggle: "Mentions Me", on: criteria.mentionsMe) { [weak self] in self?.change { $0.mentionsMe.toggle() } })
-            if criteria.scopeHasThreads, !(tab == .links && { if case .workspace = criteria.scope { return true }; return false }()) {
+            if criteria.scopeHasThreads, !(tab == .links && linksWorkspaceScope) {
                 views.append(SearchChip(toggle: "Include Threads", on: criteria.includeThreads) { [weak self] in self?.change { $0.includeThreads.toggle() } })
             }
         }
-        if criteria.scope != .account || criteria.author != nil || criteria.date != nil || criteria.attribute != nil || criteria.savedOnly || criteria.mentionsMe || [.text, .polls, .images].contains(criteria.kind) {
-            views.append(HomeLinkButton("Clear Filters") { [weak self] in
-                self?.change { $0 = SearchCriteria(query: $0.query, kind: $0.kind == .images ? .files : [.text, .polls].contains($0.kind) ? .all : $0.kind) }
-            })
+        if activeFilterCount > 0 {
+            views.append(HomeLinkButton("Clear Filters") { [weak self] in self?.clearFilters() })
         }
         chips.setViews(views, in: .leading)
         tabs.selectedSegment = SearchTab.allCases.firstIndex(of: tab) ?? 0
         orderPopup.isHidden = ![.messages, .files].contains(tab)
+    }
+
+    /// The chips that are active, the same set that shows Clear Filters.
+    private var activeFilterCount: Int {
+        var count = 0
+        if criteria.scope != .account { count += 1 }
+        if criteria.author != nil { count += 1 }
+        if criteria.date != nil { count += 1 }
+        if criteria.attribute != nil { count += 1 }
+        if [.text, .polls, .images].contains(criteria.kind) { count += 1 }
+        if criteria.savedOnly { count += 1 }
+        if criteria.mentionsMe { count += 1 }
+        return count
+    }
+
+    /// Whether the Links tab's workspace scope, which cannot take threads.
+    private var linksWorkspaceScope: Bool { if case .workspace = criteria.scope { return true }; return false }
+
+    /// The chip row's Filters menu, built from the chips' own menus and
+    /// toggles so a narrow pane still reaches every filter.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === filtersButton.menu else { return }
+        menu.removeAllItems()
+        guard let session = owner?.session else { return }
+        func section(_ title: String, _ builder: () -> NSMenu) {
+            let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            let built = builder()
+            for item in built.items { built.removeItem(item); menu.addItem(item) }
+        }
+        func toggle(_ title: String, on: Bool, _ handler: @escaping () -> Void) {
+            menu.addItem(SearchMenuItem(title, on: on, handler: handler))
+        }
+        section("In") { self.scopeMenu(session) }
+        if ![.conversations, .people].contains(tab) {
+            section("From") { self.authorMenu(session) }
+            if tab != .links { section("Date") { self.dateMenu() } }
+            switch tab {
+            case .messages: section("Has") { self.hasMenu() }
+            case .files: section("Type") { self.fileTypeMenu() }
+            default: break
+            }
+            toggle("Saved by Me", on: criteria.savedOnly) { [weak self] in self?.change { $0.savedOnly.toggle() } }
+            toggle("Mentions Me", on: criteria.mentionsMe) { [weak self] in self?.change { $0.mentionsMe.toggle() } }
+            if criteria.scopeHasThreads, !(tab == .links && linksWorkspaceScope) {
+                toggle("Include Threads", on: criteria.includeThreads) { [weak self] in self?.change { $0.includeThreads.toggle() } }
+            }
+        }
+        if activeFilterCount > 0 {
+            menu.addItem(.separator())
+            toggle("Clear Filters", on: false) { [weak self] in self?.clearFilters() }
+        }
+    }
+
+    private func updateFiltersButton() {
+        let count = activeFilterCount
+        filtersButton.title = count > 0 ? "Filters (\(count)) ▾" : "Filters ▾"
+        filtersButton.setAccessibilityLabel(count > 0 ? "Filters, \(count) active" : "Filters")
+        filtersButton.bezelColor = count > 0 ? .themeAccent.withAlphaComponent(0.45) : nil
+    }
+
+    @objc private func filtersButtonPressed() {
+        guard !filtersButton.isHidden, let menu = filtersButton.menu else { return }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: filtersButton.bounds.height + 4), in: filtersButton)
+    }
+
+    private func clearFilters() {
+        change { $0 = SearchCriteria(query: $0.query, kind: $0.kind == .images ? .files : [.text, .polls].contains($0.kind) ? .all : $0.kind) }
     }
 
     private var hasTitle: String {
@@ -584,6 +708,11 @@ import RavenProtocol
             emptyDetail.stringValue = tab == .conversations || tab == .people ? "Type a name to find conversations and people." : "Type in the search field to find messages, files and links. Filters narrow the results."
             return
         }
+        if feed.results.pendingIndexTabs.contains(tab) {
+            emptyTitle.stringValue = "Searching…"
+            emptyDetail.stringValue = ""
+            return
+        }
         switch part {
         case .loading?, .idle?:
             emptyTitle.stringValue = "Searching…"
@@ -611,14 +740,15 @@ import RavenProtocol
         let list: SearchFeed.Part<[SearchHit]>? = tab == .messages ? results.messages : tab == .files ? results.files : nil
         if let list {
             if list.isLoading { parts.append("Searching…") }
-            else if results.fromCache, !criteria.query.isEmpty {
-                let demo = owner?.session?.demo == true
-                parts.append(results.serverError.map { "The server search failed (\($0)). Showing matches saved on this Mac, which may be incomplete." }
-                    ?? (demo ? "The demo searches the messages saved on this Mac." : feed.isRunning ? "Showing matches saved on this Mac · searching the server…" : "Showing matches saved on this Mac, which may be incomplete."))
+            else if results.pendingIndexTabs.contains(tab) { parts.append("Searching the server…") }
+            else if let error = results.indexErrors[tab], list.value?.isEmpty == false {
+                parts.append("The server search failed (\(error)). Showing available matches, which may be incomplete.")
+            } else if owner?.session?.demo == true, !criteria.query.isEmpty {
+                parts.append("The demo searches the messages saved on this Mac.")
             } else if let serverCount = results.serverHits[tab], serverCount >= SearchFeed.serverLimit {
                 parts.append("Showing the \(SearchFeed.serverLimit) best matches.")
             }
-            if !list.isLoading, !results.fromCache, results.cacheOnly.contains(tab) {
+            if results.cacheOnly.contains(tab) {
                 parts.append("Includes matches saved on this Mac that the server's search did not find.")
             }
             if let note = results.threadNote, criteria.includeThreads { parts.append(note) }
@@ -644,8 +774,28 @@ import RavenProtocol
         }
         if !attachments.status.isEmpty { parts.insert(attachments.status, at: 0) }
         status.stringValue = parts.joined(separator: " ")
-        status.textColor = results.serverError != nil && list != nil ? .systemRed : .themeSecondaryText
-        footerButtons.setViews(buttons, in: .trailing)
+        status.textColor = results.indexErrors[tab] != nil ? .systemRed : .themeSecondaryText
+        // The preview affordance stays ahead of the footer buttons, which a
+        // reload replaces.
+        for arranged in footerButtons.arrangedSubviews where arranged !== previewButton {
+            footerButtons.removeArrangedSubview(arranged)
+            arranged.removeFromSuperview()
+        }
+        for view in buttons { footerButtons.addArrangedSubview(view) }
+        updatePreviewAffordance()
+    }
+
+    /// The compact preview affordance follows the selected result and the
+    /// side column's visibility.
+    private func updatePreviewAffordance() {
+        let visible = selectedHit != nil && !showsSideColumn
+        previewButton.isHidden = !visible
+        previewButton.isEnabled = visible
+    }
+
+    private var selectedHit: SearchHit? {
+        if case .hit(let hit)? = selectedItem { return hit }
+        return nil
     }
 
     // MARK: Table
@@ -693,6 +843,10 @@ import RavenProtocol
         guard key != selectionKey else { return }
         selectionKey = key
         attachments.cancel()
+        // A different result invalidates the compact preview; the wide
+        // column follows the selection in reloadSide().
+        if !showsSideColumn { closeCompactPreview() }
+        updatePreviewAffordance()
     }
     private var selectionKey: String?
 
@@ -750,7 +904,12 @@ import RavenProtocol
     // MARK: Side column
 
     func reloadSide() {
-        guard showsSideColumn, let owner, let session = owner.session else { return }
+        if !showsSideColumn {
+            if compactPreviewPopover?.isShown == true, selectedHitID == nil { closeCompactPreview() }
+            updatePreviewAffordance()
+            return
+        }
+        guard let owner, let session = owner.session else { return }
         previewTask?.cancel()
         switch selectedItem {
         case .hit(let hit)?:
@@ -768,6 +927,71 @@ import RavenProtocol
         default:
             side.showTopHits(query: criteria.query, session: session, saved: SavedSearchStore.load(session.account.id), current: criteria)
         }
+    }
+
+    // MARK: Compact preview
+
+    var showsCompactPreview: Bool { compactPreviewPopover?.isShown == true }
+
+    @objc private func toggleCompactPreview() {
+        if compactPreviewPopover?.isShown == true { closeCompactPreview() } else { openCompactPreview() }
+    }
+
+    /// Esc closes the compact preview first, then leaves search.
+    private func cancelSearchOrPreview() {
+        if compactPreviewPopover?.isShown == true { closeCompactPreview() } else { owner?.leaveSearch() }
+    }
+
+    /// Opens the selected result's context in a popover, using the same
+    /// messages and actions as the wide side column.
+    private func openCompactPreview() {
+        guard !showsSideColumn, let hit = selectedHit, let owner, let session = owner.session,
+              compactPreviewPopover?.isShown != true else { return }
+        previewTask?.cancel()
+        let content = SearchCompactPreviewView()
+        content.onOpen = { [weak self] in self?.closeCompactPreview(); self?.openSelected() }
+        content.onQuickLook = { [weak self] in self?.quickLookSelected() }
+        content.onCopyLink = { [weak self] in self?.owner?.copySearchResultLink(messageID: hit.id) }
+        content.onClose = { [weak self] in self?.closeCompactPreview() }
+        let controller = NSViewController()
+        controller.view = content
+        let popover = NSPopover()
+        popover.contentViewController = controller
+        popover.behavior = .transient
+        popover.animates = false
+        let width = min(Self.compactPreviewWidth, max(300, bounds.width - 24))
+        let height = min(520, max(240, bounds.height - 60))
+        let size = NSSize(width: width, height: height)
+        popover.contentSize = size
+        controller.preferredContentSize = size
+        let cached = previewCache[hit.id]
+        content.show(hit, context: cached ?? [], loading: cached == nil, owner: owner, session: session, size: size)
+        popover.show(relativeTo: previewButton.bounds, of: previewButton, preferredEdge: .minY)
+        compactPreviewPopover = popover
+        compactPreviewView = content
+        // The preview takes key focus so Escape dismisses it, not the search.
+        content.window?.makeKey()
+        content.window?.makeFirstResponder(content)
+        previewTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self, self.selectedHitID == hit.id, self.compactPreviewPopover === popover else { return }
+            let context = await Self.context(for: hit, session: session)
+            guard !Task.isCancelled, self.selectedHitID == hit.id, self.compactPreviewPopover === popover else { return }
+            if !context.isEmpty { self.previewCache[hit.id] = context }
+            if self.previewCache.count > 50 { self.previewCache.removeAll() }
+            content.show(hit, context: context, loading: false, owner: owner, session: session, size: size)
+        }
+    }
+
+    private func closeCompactPreview() {
+        guard let popover = compactPreviewPopover else { return }
+        let wasShown = popover.isShown
+        previewTask?.cancel()
+        if wasShown { popover.close() }
+        compactPreviewPopover = nil
+        compactPreviewView = nil
+        // The selection never moved; put the focus back on the results.
+        if wasShown { window?.makeFirstResponder(table) }
     }
 
     /// A few messages around a hit. The cache answers when it has the
@@ -1061,11 +1285,13 @@ import RavenProtocol
     var onSave: (() -> Void)?
     var onCancel: (() -> Void)?
     var onFocusField: (() -> Void)?
+    var onTogglePreview: (() -> Void)?
     var menuProvider: ((Int) -> NSMenu?)?
 
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection([.shift, .control, .option, .command])
         if event.keyCode == 1, flags == [.command, .shift] { onSave?(); return }
+        if flags == [.command], event.charactersIgnoringModifiers == "l" { onTogglePreview?(); return }
         guard flags.isEmpty || event.keyCode == 126 else { super.keyDown(with: event); return }
         switch event.keyCode {
         case 36, 76: onOpen?()

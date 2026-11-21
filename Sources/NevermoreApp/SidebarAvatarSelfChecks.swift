@@ -44,6 +44,18 @@ import RavenProtocol
         NotificationCenter.default.post(name: .sessionAvatarsChanged, object: session)
         results.append(("self-message portraits use the username rather than the You label", cell(own)?.imageView?.image === session.avatarImage(for: "self") && cell(own)?.imageView?.image !== session.avatarImage(for: "You")))
         results.append(("a profile photo keeps the presence label and dot", directCell.accessibilityLabel()?.contains("Active") == true && directCell.subviews.contains { !$0.isHidden && $0.layer?.cornerRadius == 3.5 }))
+        // A presence ping updates the rows that show it, without a
+        // session-wide change that would re-render every open transcript.
+        // The peer starts active, so the first ping really takes it away.
+        session.activeUsers.insert("peer"); controller.refreshSidebarAvatars()
+        let startedActive = directCell.accessibilityLabel()?.contains("Active") == true
+        var sessionChanges = 0
+        let counter = NotificationCenter.default.addObserver(forName: .sessionChanged, object: session, queue: nil) { _ in sessionChanges += 1 }
+        session.event("raven:user_active_state_updated", .object(["user": .string("peer"), "active": .bool(false)]))
+        let wentAway = directCell.accessibilityLabel()?.contains("Active") == false
+        session.event("raven:user_active_state_updated", .object(["user": .string("peer"), "active": .bool(true)]))
+        NotificationCenter.default.removeObserver(counter)
+        results.append(("presence pings update sidebar rows without re-rendering transcripts", startedActive && wentAway && directCell.accessibilityLabel()?.contains("Active") == true && sessionChanges == 0))
         directCell.backgroundStyle = .emphasized
         icon.cell?.backgroundStyle = .emphasized
         // Compare with an independent, ordinary AppKit image view in the same

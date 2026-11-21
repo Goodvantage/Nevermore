@@ -103,7 +103,7 @@ jobs:
         run: |
           date +%s > "$RUNNER_TEMP/nevermore-native-start"
           SIGN_IDENTITY=- CONFIGURATION=release scripts/build-app.sh
-          python3 scripts/check-native-attachments.py --user-session --polls --reactions --avatars
+          python3 scripts/check-native-attachments.py --user-session --polls --reactions --avatars --search
       - name: Validate packaging inputs
         run: |
           plutil -lint Resources/Info.plist Resources/Nevermore.entitlements

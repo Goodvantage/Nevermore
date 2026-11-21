@@ -1,4 +1,5 @@
 import AppKit
+import QuickLookUI
 import NevermoreCore
 
 /// Keeps a transcript's bottom edge where the reader left it while its pane
@@ -166,6 +167,10 @@ import NevermoreCore
 /// start of the drag back to the top of the pane. The keeper lets it, then
 /// puts the reader's bottom line back.
 @MainActor class LiveResizeTextView: NSTextView {
+    /// NSTextView takes Quick Look whenever it is first responder, ahead of
+    /// an attachment preview that joins the window's responder chain, so
+    /// a clicked file opened the file actions window instead of a preview.
+    override nonisolated func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { false }
     var liveResizeWillEnd: (() -> Void)?
     var liveResizeDidEnd: (() -> Void)?
     /// True while AppKit tracks a press: link clicks and selection drags
@@ -180,11 +185,20 @@ import NevermoreCore
     private var textUnderPress: NSAttributedString?
 
     override func mouseDown(with event: NSEvent) {
+        _ = trackPress { super.mouseDown(with: event); return true }
+    }
+
+    /// Runs a press as tracked. Presses the app follows by hand, such as a
+    /// reaction chip's peel, run their own nested event loop and need the
+    /// same protection: replacing the text under them would move what
+    /// they are holding.
+    func trackPress(_ press: () -> Bool) -> Bool {
         isTrackingPress = true
-        super.mouseDown(with: event)
+        let handled = press()
         isTrackingPress = false
         textUnderPress = nil
         pressDidEnd?()
+        return handled
     }
 
     /// Empties the text at once, also under a press: what the owner may no

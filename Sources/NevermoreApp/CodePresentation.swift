@@ -29,6 +29,7 @@ struct CodeCommand {
         let commands: [URL: CodeCommand]
         let references: [CodeReference]
     }
+    static func lineCount(_ count: Int) -> String { count == 1 ? "1 line" : "\(count) lines" }
     static func render(_ document: RichDocument, message: RavenMessage, fontSize: CGFloat, expanded: Set<String>, parentChannelID: String? = nil) -> Output {
         let blocks = CodeBlocks.extract(from: document)
         guard !blocks.isEmpty else { return Output(text: NativeRichText.readingString(document: document, fontSize: fontSize), commands: [:], references: []) }
@@ -52,11 +53,11 @@ struct CodeCommand {
             guard range.location != NSNotFound else { continue }
             let reference = CodeReference(messageID: message.id, channelID: message.channelID, block: block, parentChannelID: parentChannelID)
             references.append(reference)
-            let replacement = NSMutableAttributedString(string: "Code\(block.language.map { " · \($0)" } ?? "") · \(block.lineCount) lines · ", attributes: [.font: NSFont.systemFont(ofSize: max(11, fontSize - 2)), .foregroundColor: NSColor.secondaryLabelColor])
+            let replacement = NSMutableAttributedString(string: "Code\(block.language.map { " · \($0)" } ?? "") · \(lineCount(block.lineCount)) · ", attributes: [.font: NSFont.systemFont(ofSize: max(11, fontSize - 2)), .foregroundColor: NSColor.themeSecondaryText])
             func link(_ title: String, _ action: CodeCommand.Action) {
                 let url = URL(string: "nevermore-code://block/\(UUID().uuidString)")!
                 commands[url] = CodeCommand(reference: reference, action: action)
-                replacement.append(NSAttributedString(string: title, attributes: [.font: NSFont.systemFont(ofSize: max(11, fontSize - 2)), .foregroundColor: NSColor.linkColor, .link: url]))
+                replacement.append(NSAttributedString(string: title, attributes: [.font: NSFont.systemFont(ofSize: max(11, fontSize - 2)), .foregroundColor: NSColor.themeLink, .link: url]))
             }
             link("Open Reader", .open); replacement.append(NSAttributedString(string: " · ")); link("Copy Code", .copy)
             let isExpanded = !block.isLong || expanded.contains(reference.key)
@@ -103,7 +104,7 @@ struct CodeCommand {
         let parent = channel?.raw["parent_channel_id"].string
         Task { [weak self] in
             guard let self else { return }
-            let index = blocks.count == 1 ? 0 : await self.choose("Open Code Block", items: blocks.map { "Code \($0.index + 1) · \($0.language ?? "plain text") · \($0.lineCount) lines" }, confirm: "Open")
+            let index = blocks.count == 1 ? 0 : await self.choose("Open Code Block", items: blocks.map { "Code \($0.index + 1) · \($0.language ?? "plain text") · \(CodePresentation.lineCount($0.lineCount))" }, confirm: "Open")
             guard let index, blocks.indices.contains(index), !self.isClosed else { return }
             self.executeCode(CodeCommand(reference: CodeReference(messageID: message.id, channelID: message.channelID, block: blocks[index], parentChannelID: parent), action: .open))
         }

@@ -12,6 +12,21 @@ final class StoreTests: XCTestCase {
         super.tearDown()
     }
 
+    func testExactMessageLookupRespectsChannelAndDeletion() async throws {
+        let store = try AccountStore(directory: track(makeStoreDirectory()))
+        let row = makeMessage(id: "message", channel: "first", creation: creation(1), text: "<p>Cached</p>")
+        try await store.cacheMessages([row])
+
+        let found = try await store.message(id: row.id, channelID: "first")
+        let otherChannel = try await store.message(id: row.id, channelID: "second")
+        XCTAssertEqual(found?.raw, row.raw)
+        XCTAssertNil(otherChannel)
+
+        try await store.deleteMessages(ids: [row.id])
+        let deleted = try await store.message(id: row.id, channelID: "first")
+        XCTAssertNil(deleted)
+    }
+
     // MARK: Helpers
 
     private func makeStoreDirectory() -> URL {
@@ -119,7 +134,7 @@ final class StoreTests: XCTestCase {
 
         let q = try openDB(dir)
         let applied = try await fetchStrings(q, "SELECT identifier FROM grdb_migrations ORDER BY rowid")
-        XCTAssertEqual(applied, ["v1", "v2"])
+        XCTAssertEqual(applied, ["v1", "v2", "v3_review_legacy_gif_retries"])
         let fts = try await fetchString(q, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'")
         XCTAssertEqual(fts, "messages_fts")
 
@@ -129,7 +144,32 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(draft?.html, "<p>keep</p>")
         // Re-running migrations on an up-to-date store is a no-op, not an error.
         let appliedAgain = try await fetchStrings(q, "SELECT identifier FROM grdb_migrations ORDER BY rowid")
-        XCTAssertEqual(appliedAgain, ["v1", "v2"])
+        XCTAssertEqual(appliedAgain, ["v1", "v2", "v3_review_legacy_gif_retries"])
+    }
+
+    func testUpgradeProtectsPreviouslyAttemptedGIFRetries() async throws {
+        let directory = track(makeStoreDirectory())
+        var store: AccountStore? = try AccountStore(directory: directory)
+        let html = #"<p><img src="https://media.tenor.com/a/b.gif"></p>"#
+        var previous = try await store!.acceptGIF(channelID: "c", html: html)
+        previous.state = .retryable
+        previous.attempts = 1
+        try await store!.updateOperation(previous)
+        var requeued = try await store!.acceptGIF(channelID: "c", html: html)
+        // The previous Outbox's Retry action persisted queued and retained
+        // the attempt count before starting the next flush.
+        requeued.attempts = 1
+        try await store!.updateOperation(requeued)
+        let fresh = try await store!.acceptGIF(channelID: "c", html: html)
+        let db = try openDB(directory)
+        try await db.write { try $0.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v3_review_legacy_gif_retries'") }
+        store = nil
+
+        let upgraded = try reopen(directory: directory)
+        let rows = try await upgraded.operations()
+        XCTAssertEqual(rows.first { $0.id == previous.id }?.state, .needsReview)
+        XCTAssertEqual(rows.first { $0.id == requeued.id }?.state, .needsReview)
+        XCTAssertEqual(rows.first { $0.id == fresh.id }?.state, .queued)
     }
 
     func testDirectoryIsExclusivelyAccountScopedWithUserOnlyPermissions() async throws {

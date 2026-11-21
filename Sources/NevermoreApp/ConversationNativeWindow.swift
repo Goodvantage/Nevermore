@@ -1,4 +1,5 @@
 import AppKit
+import QuickLookUI
 
 /// A file dropped anywhere outside the editor uses the same attachment
 /// pipeline as a drop into it. Ordinary text drags remain text-system work.
@@ -56,6 +57,10 @@ import AppKit
 /// destination. Forward files instead of inserting their paths into a query;
 /// leave ordinary text dragging and all editing to AppKit.
 @MainActor private final class ConversationFileFieldEditor: NSTextView {
+    /// NSTextView takes Quick Look whenever it is first responder, ahead of
+    /// an attachment preview that joins the window's responder chain, so
+    /// a clicked file opened the file actions window instead of a preview.
+    override nonisolated func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { false }
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
         guard ConversationNativeWindow.containsFiles(sender.draggingPasteboard) else { return super.draggingEntered(sender) }
         return (window as? ConversationNativeWindow)?.draggingEntered(sender) ?? []

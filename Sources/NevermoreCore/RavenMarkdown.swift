@@ -31,9 +31,11 @@ public enum RavenMarkdown {
         guard original.utf8.count <= RichTextCodec.maximumBytes,
               try RichTextCodec.parse(original).canEdit else { throw RichTextError.unsafeEdit }
         let expected = normalized(document.nodes)
-        let candidate = document.nodes.map(block).joined(separator: "\n\n")
-        if candidate.utf8.count <= RichTextCodec.maximumBytes,
-           let roundTrip = try? Self.document(from: candidate), normalized(roundTrip.nodes) == expected { return candidate }
+        for escaping in [Escaping.readable, .full] {
+            let candidate = document.nodes.map { block($0, escaping) }.joined(separator: "\n\n")
+            if candidate.utf8.count <= RichTextCodec.maximumBytes,
+               let roundTrip = try? Self.document(from: candidate), normalized(roundTrip.nodes) == expected { return candidate }
+        }
         // HTML block syntax preserves rich cells, adjacent emphasis and Raven
         // entities when ordinary Markdown would change their meaning.
         let preserved = document.nodes.map(island).joined(separator: "\n\n")
@@ -127,15 +129,21 @@ public enum RavenMarkdown {
         RichTextCodec.html(RichDocument(nodes: [node])).replacingOccurrences(of: "\r", with: "&#13;").replacingOccurrences(of: "\n", with: "&#10;")
     }
 
-    private static func block(_ node: RichNode) -> String {
+    /// How exported text is escaped. Readable source escapes only what could
+    /// start markup where it stands; full source escapes every ASCII
+    /// punctuation mark. Either is offered only after its round trip matched,
+    /// so readable source falls back to full where its rules fall short.
+    private enum Escaping { case readable, full }
+
+    private static func block(_ node: RichNode, _ escaping: Escaping) -> String {
         guard case .element(let tag, let attrs, let children) = node else { return island(node) }
         switch tag {
         case "p" where attrs.isEmpty:
-            let text = children.map(inline).joined()
+            let text = lineStart(children.map { inline($0, escaping) }.joined(), escaping)
             return text.isEmpty ? "<p></p>" : text
         case "hr" where attrs.isEmpty: return "---"
         case "blockquote" where attrs.isEmpty:
-            return children.map(block).joined(separator: "\n\n").split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n")
+            return children.map { block($0, escaping) }.joined(separator: "\n\n").split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n")
         case "ul", "ol":
             guard attrs.isEmpty || (tag == "ol" && attrs.keys.allSatisfy({ $0 == "start" })), let start = Int(attrs["start"] ?? "1") else { return island(node) }
             var lines: [String] = []
@@ -143,7 +151,7 @@ public enum RavenMarkdown {
                 guard case .element("li", let itemAttrs, var content) = child, itemAttrs.isEmpty else { return island(node) }
                 if content.count == 1, case .element("p", let pAttrs, let pChildren) = content[0], pAttrs.isEmpty { content = pChildren }
                 guard content.allSatisfy(isInline) else { return island(node) }
-                lines.append((tag == "ul" ? "- " : "\(start + index). ") + content.map(inline).joined())
+                lines.append((tag == "ul" ? "- " : "\(start + index). ") + lineStart(content.map { inline($0, escaping) }.joined(), escaping))
             }
             return lines.joined(separator: "\n")
         case "pre" where attrs.isEmpty:
@@ -163,7 +171,7 @@ public enum RavenMarkdown {
                     guard case .element(let tag, let attributes, var content) = cell.node, tag == (row == 0 ? "th" : "td"), attributes.isEmpty else { return island(node) }
                     if content.count == 1, case .element("p", let attributes, let kids) = content[0], attributes.isEmpty { content = kids }
                     guard content.allSatisfy(isInline) else { return island(node) }
-                    cells.append(content.map(inline).joined().replacingOccurrences(of: "|", with: "&#124;"))
+                    cells.append(content.map { inline($0, escaping) }.joined().replacingOccurrences(of: "|", with: "&#124;"))
                 }
                 lines.append("| " + cells.joined(separator: " | ") + " |")
                 if row == 0 { lines.append("|" + String(repeating: " --- |", count: layout.columns)) }
@@ -178,19 +186,31 @@ public enum RavenMarkdown {
         return ["strong", "em", "u", "s", "mark", "span", "code", "a", "img", "br"].contains(tag) && children.allSatisfy(isInline)
     }
 
-    private static func inline(_ node: RichNode) -> String {
+    private static func inline(_ node: RichNode, _ escaping: Escaping) -> String {
         switch node {
         case .text(let value):
-            return value.map { character in
+            let characters = Array(value)
+            return characters.indices.map { index in
+                let character = characters[index]
                 if character == "\n" { return "&#10;" }
                 if character == "\r" { return "&#13;" }
                 if character == "\t" { return "&#9;" }
                 if character == " " { return " " }
-                let punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
-                return punctuation.contains(character) ? "\\\(character)" : String(character)
+                switch escaping {
+                case .full:
+                    let punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+                    return punctuation.contains(character) ? "\\\(character)" : String(character)
+                case .readable:
+                    // Emphasis, code, links, HTML and strikethrough can start
+                    // anywhere; `&` only where it would read as an entity.
+                    // Table cells encode `|` themselves.
+                    let markup = "\\`*_[]<~"
+                    let escaped = markup.contains(character) || (character == "&" && startsEntity(characters[(index + 1)...]))
+                    return escaped ? "\\\(character)" : String(character)
+                }
             }.joined()
         case .element(let tag, let attrs, let children):
-            let inner = children.map(inline).joined()
+            let inner = children.map { inline($0, escaping) }.joined()
             if attrs.isEmpty {
                 if tag == "strong" { return "**\(inner)**" }
                 if tag == "em" { return "*\(inner)*" }
@@ -209,6 +229,35 @@ public enum RavenMarkdown {
             }
             return island(node)
         }
+    }
+
+    /// Escapes what would start a block where a line begins: a heading, a
+    /// quote, a bullet, a rule or an ordered-list number. Inline escaping
+    /// already covers `*`, `_`, backticks and `~`.
+    private static func lineStart(_ line: String, _ escaping: Escaping) -> String {
+        guard escaping == .readable, let first = line.first else { return line }
+        let rest = line.dropFirst()
+        let breaks = rest.first.map { $0 == " " || $0 == "\t" } ?? true
+        switch first {
+        case ">": return "\\" + line
+        case "#":
+            let hashes = line.prefix { $0 == "#" }.count
+            let after = line.dropFirst(hashes).first
+            return hashes <= 6 && (after == nil || after == " " || after == "\t") ? "\\" + line : line
+        case "-", "+": return breaks || rest.first == first ? "\\" + line : line
+        default:
+            let digits = line.prefix { $0.isASCII && $0.isNumber }
+            guard (1...9).contains(digits.count), let marker = line.dropFirst(digits.count).first, marker == "." || marker == ")" else { return line }
+            let after = line.dropFirst(digits.count + 1).first
+            return after == nil || after == " " || after == "\t" ? digits + "\\" + line.dropFirst(digits.count) : line
+        }
+    }
+
+    /// True when `&` followed by these characters would read as an entity
+    /// reference such as `&amp;` or `&#124;`.
+    private static func startsEntity(_ following: ArraySlice<Character>) -> Bool {
+        let name = following.prefix { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "#") }
+        return !name.isEmpty && name.count <= 32 && following.dropFirst(name.count).first == ";"
     }
 
     private static func longestRun(_ delimiter: Character, in text: String) -> Int {

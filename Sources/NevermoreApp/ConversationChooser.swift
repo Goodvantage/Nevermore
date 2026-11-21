@@ -23,7 +23,11 @@ import NevermoreCore
     /// `only` limits the list to conversations or to people, for picking
     /// a search filter rather than opening something.
     init(session: AccountSession, only: MentionCandidate.Kind? = nil) {
-        let all = session.channels.filter { !session.revokedChannels.contains($0.id) }.map { MentionCandidate(kind: .channel, serverID: $0.id, title: $0.title, detail: $0.isDM ? "Direct message" : $0.workspace) } + session.userNames.map { MentionCandidate(kind: .person, serverID: $0.key, title: $0.value, detail: only == .person ? $0.key : "Direct message · \($0.key)") }
+        // Opening a conversation never lists the account user as a person:
+        // picking yourself would ask the server for a self-DM, which the
+        // member roster refuses. Search filters ("from me") keep you.
+        let people = only == .person ? session.userNames : session.userNames.filter { $0.key != session.account.user }
+        let all = session.channels.filter { !session.revokedChannels.contains($0.id) }.map { MentionCandidate(kind: .channel, serverID: $0.id, title: $0.title, detail: $0.isDM ? "Direct message" : $0.workspace) } + people.map { MentionCandidate(kind: .person, serverID: $0.key, title: $0.value, detail: only == .person ? $0.key : "Direct message · \($0.key)") }
         candidates = only.map { kind in all.filter { $0.kind == kind } } ?? all
         let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 580, height: 410), styleMask: [.titled,.closable], backing: .buffered, defer: false)
         super.init(window: window); window.delegate = self
@@ -48,11 +52,8 @@ import NevermoreCore
         let kind: MentionCandidate.Kind? = text.hasPrefix("#") ? .channel : text.hasPrefix("@") ? .person : nil
         if kind != nil { text.removeFirst() }
         let before = matches.indices.contains(table.selectedRow) ? matches[table.selectedRow].id : nil
-        var result: [MentionCandidate] = []
-        for candidateKind in [MentionCandidate.Kind.channel, .person] where kind == nil || kind == candidateKind {
-            result += MentionCompletion.matches(candidates, query: MentionQuery(kind: candidateKind, range: NSRange(location: 0, length: 0), text: text), limit: 100)
-        }
-        matches = Array(result.prefix(100)); table.reloadData()
+        matches = MentionCompletion.matches(candidates, text: text, kind: kind)
+        table.reloadData()
         if !matches.isEmpty { table.selectRowIndexes(IndexSet(integer: matches.firstIndex { $0.id == before } ?? 0), byExtendingSelection: false) }
     }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {

@@ -168,6 +168,7 @@ import AppKit
         item(go, "Next Conversation", #selector(ConversationWindow.nextConversation(_:)), arrowDown, [.command, .option])
         item(go, "Previous Conversation", #selector(ConversationWindow.previousConversation(_:)), arrowUp, [.command, .option])
         item(go, "Next Unread Conversation", #selector(ConversationWindow.nextUnreadConversation(_:)), arrowDown, [.command, .option, .shift])
+        item(go, "Previous Unread Conversation", #selector(ConversationWindow.previousUnreadConversation(_:)), arrowUp, [.command, .option, .shift])
         go.addItem(.separator())
         item(go, "Next Message", #selector(ConversationWindow.nextMessage(_:)), "]", [.command, .control])
         item(go, "Previous Message", #selector(ConversationWindow.previousMessage(_:)), "[", [.command, .control])
@@ -211,6 +212,7 @@ import AppKit
         item(message, "Pin / Unpin Message", #selector(ConversationWindow.pin(_:)))
         item(message, "Remind Me…", #selector(ConversationWindow.remind(_:)))
         item(message, "Forward…", #selector(ConversationWindow.forward(_:)))
+        item(message, "Copy Message Text", #selector(ConversationWindow.copyMessageText(_:)))
         item(message, "Copy Message Link", #selector(ConversationWindow.copyMessageLink(_:)))
         message.addItem(.separator())
         item(message, "Who Has Read This?", #selector(ConversationWindow.readers(_:)))
@@ -218,7 +220,11 @@ import AppKit
         item(message, "Open Code Reader…", #selector(ConversationWindow.openCodeReader(_:)))
         item(message, "View / Vote in Poll…", #selector(ConversationWindow.vote(_:)))
         message.addItem(.separator())
+        // Mark-all is account-wide and resolves through the app delegate, so
+        // it works from conversation windows too; mark-selected needs an
+        // Inbox selection and is only enabled while an Inbox window is key.
         item(message, "Mark Selected Notifications Read", #selector(CollectionWindow.markSelectedRead))
+        item(message, "Mark All Notifications Read", #selector(AppDelegate.markAllNotificationsRead(_:)))
 
         let format = menu("Format")
         item(format, "Bold", #selector(ComposerView.toggleBoldface(_:)), "b")

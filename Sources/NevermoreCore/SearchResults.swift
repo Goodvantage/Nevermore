@@ -269,7 +269,13 @@ public struct SearchHit: Equatable, Sendable, Identifiable {
         // The index's title is already the file name, percent-encoded.
         fileName = isFile && !title.isEmpty ? SearchSnippet.marked(title).removingPercentEncoding() : nil
         // A file's content is its caption, or the file name when it has none.
-        snippet = isFile && content.text == fileName?.text ? SearchSnippet(text: "") : content
+        // Compare decoded forms: the index title is percent-encoded and the
+        // caption can still carry those escapes, so a raw comparison would
+        // leave the encoded name on screen twice. A caption that decodes to
+        // the same name counts as an echo of it, not as distinct text. Only
+        // this test decodes; the displayed caption stays as the index wrote
+        // it, because genuine captions are user text and may contain `%`.
+        snippet = isFile && (content.text == fileName?.text || content.removingPercentEncoding().text == fileName?.text) ? SearchSnippet(text: "") : content
         fileSize = Self.integer(row["file_size"])
         hasReactions = row["has_reactions"].bool
         startsThread = row["is_thread"].bool
@@ -434,13 +440,26 @@ extension SearchCriteria {
 /// rows: the thread is `name`, its parent conversation `channel_id`.
 public enum SearchThreads {
     /// Thread IDs whose parent is one of `parents`, newest activity first,
-    /// without repeats.
+    /// without repeats. Equal timestamps break by ascending thread id, so the
+    /// order is deterministic even when the input row order changes.
     public static func ids(_ rows: [JSONValue], parents: Set<String>) -> [String] {
         var seen = Set<String>()
-        return rows.sorted { ($0["last_message_timestamp"].string ?? "") > ($1["last_message_timestamp"].string ?? "") }.compactMap { row in
-            guard let id = row["name"].string, !id.isEmpty, let parent = row["channel_id"].string, parents.contains(parent), seen.insert(id).inserted else { return nil }
-            return id
-        }
+        // Newest activity first, then the thread id: equal timestamps are
+        // common (one burst, a whole day at minute precision) and Swift's sort
+        // is not stable, so without the tiebreak the list could reorder itself
+        // with no new data. The timestamp is compared as text, which is only
+        // correct while every row uses the same zero-padded site-local format.
+        // The sort keys are read once per row, not once per comparison, and
+        // the filter consumes the same entry instead of re-reading the id.
+        // The id tiebreak is textual too: "t10" sorts before "t2", so it is
+        // chronological only while every thread id has the same width.
+        return rows
+            .map { row in (row: row, time: row["last_message_timestamp"].string ?? "", id: row["name"].string ?? "") }
+            .sorted { $0.time != $1.time ? $0.time > $1.time : $0.id < $1.id }
+            .compactMap { entry in
+                guard !entry.id.isEmpty, let parent = entry.row["channel_id"].string, parents.contains(parent), seen.insert(entry.id).inserted else { return nil }
+                return entry.id
+            }
     }
 
     /// Each thread with its parent, for placing cached replies.

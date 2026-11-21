@@ -21,7 +21,13 @@ import NevermoreCore
     static let overlayDuration: TimeInterval = 4.5
 
     static func play(_ theme: Theme, over host: NSView?) {
-        guard let host, host.bounds.width > 0, let palette = theme.palette, theme.celebration != .none else { return }
+        guard let host, host.bounds.width > 0 else { return }
+        // Arrowing through the Theme menu can start a new celebration before
+        // the previous one's timer removes it. Replace it so the window never
+        // stacks several emitters and bursts. Selecting a theme without a
+        // celebration retires a lingering overlay too.
+        for old in host.subviews where old is CelebrationOverlay { old.removeFromSuperview() }
+        guard let palette = theme.palette, theme.celebration != .none else { return }
         let (motifs, flow) = recipe(for: theme.celebration)
         let colors = celebrationColors(theme, palette: palette)
         let overlay = CelebrationOverlay(frame: host.bounds)

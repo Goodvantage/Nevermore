@@ -103,7 +103,14 @@ extension ConversationWindow {
         return await SheetPrompt.date(title, message: "Site timezone: \(zone). Scheduled messages use five-minute slots; the accepted server time is authoritative.", timeZone: TimeZone(identifier: zone) ?? .gmt, confirm: confirm, on: parent ?? window)
     }
     func timestamp(_ date: Date) -> String {
-        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.timeZone = TimeZone(identifier: session?.account.timezone ?? "UTC"); formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"; return formatter.string(from: date)
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.timeZone = TimeZone(identifier: session?.account.timezone ?? "UTC") ?? .gmt; formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"; return formatter.string(from: date)
+    }
+    func scheduledTimestamp(_ selection: Date) throws -> String {
+        let zone = TimeZone(identifier: session?.account.timezone ?? "UTC") ?? .gmt
+        guard let slot = ScheduledMessagePolicy.slot(for: selection, in: zone) else {
+            throw AppError.message("Choose a scheduled time in the future.")
+        }
+        return timestamp(slot)
     }
     @objc func remind(_ sender: Any?) {
         guard let session, let message = selectedMessage else { return }
@@ -118,19 +125,55 @@ extension ConversationWindow {
         // fixed before the date sheet and must be unchanged when it closes.
         let draft: Draft
         if inlineComposer.mode == .visual { composer.flushPendingShortcut(); composer.linkAllAddresses() }
-        do { draft = try currentDraft() } catch { status.stringValue = error.localizedDescription; return }
+        do {
+            draft = try currentDraft()
+            guard try ConversationWindow.hasText(draft) else { status.stringValue = "Write a message before scheduling it."; return }
+        } catch { status.stringValue = error.localizedDescription; return }
         let draftRevision = session.draftRevisions[channel.id, default: 0]
         action {
             guard let date = await self.pickDate("Schedule Message", confirm: "Schedule"), self.isCurrent(session, channelID: channel.id) else { return }
             guard (try? self.currentDraft()) == draft, session.draftRevisions[channel.id, default: 0] == draftRevision else { throw AppError.message("The message changed while you chose a time. Nothing was scheduled; check the draft and schedule it again.") }
-            let rounded = Date(timeIntervalSince1970: ceil(date.timeIntervalSince1970 / 300) * 300)
-            let response = try await session.mutate("raven.api.scheduled_message.create_scheduled_message", ["channel_id": .string(channel.id), "text": .string(draft.html), "scheduled_time": .string(self.timestamp(rounded))])
-            guard self.isCurrent(session, channelID: channel.id) else { return }
-            if (try? self.currentDraft()) == draft && session.draftRevisions[channel.id, default: 0] == draftRevision {
-                try await session.save(Draft(channelID: channel.id))
-                session.sharedTextStorage[channel.id]?.setAttributedString(NSAttributedString(string: "")); self.displayedHTML = ""; self.restoreDraft()
+            let scheduledTime = try self.scheduledTimestamp(date)
+            guard !session.readOnly, !session.demo else { throw AppError.message("This account is read only.") }
+            let response: JSONValue
+            do {
+                response = try await session.mutate("raven.api.scheduled_message.create_scheduled_message", ["channel_id": .string(channel.id), "text": .string(draft.html), "scheduled_time": .string(scheduledTime)])
+            } catch {
+                // Creation is deliberately attempted once. An ambiguous answer
+                // may already exist on the server, so review it there instead of
+                // posting the same message a second time.
+                if ScheduledMessagePolicy.completion(for: error) == .indeterminate, self.isCurrentAccount(session) {
+                    self.status.stringValue = "The scheduled message result is uncertain. Check Go ▸ Scheduled Messages before scheduling it again."
+                    return
+                }
+                throw error
             }
-            self.status.stringValue = "Scheduled on server: \(response["scheduled_time"].string ?? self.timestamp(rounded)). Manage it in Go ▸ Scheduled Messages."
+            // The server accepted the row even when the draft cannot be cleared
+            // or this window now shows another conversation of the same account.
+            // A different account owns the window, so it receives nothing.
+            guard self.isCurrentAccount(session) else { return }
+            var feedback = "Scheduled on server: \(response["scheduled_time"].string ?? scheduledTime). Manage it in Go ▸ Scheduled Messages."
+            let visible = self.isCurrent(session, channelID: channel.id)
+            let revisionUnchanged = session.draftRevisions[channel.id, default: 0] == draftRevision
+            let draftUnchanged = visible && (try? self.currentDraft()) == draft
+            switch ScheduledMessagePolicy.clearance(originatingConversationVisible: visible, revisionUnchanged: revisionUnchanged, draftUnchanged: draftUnchanged) {
+            case .clear:
+                do {
+                    if try await session.clearScheduledDraft(draft, revision: draftRevision) {
+                        session.sharedTextStorage[channel.id]?.setAttributedString(NSAttributedString(string: ""))
+                        if self.isCurrent(session, channelID: channel.id) {
+                            self.displayedHTML = ""
+                            self.restoreDraft()
+                        }
+                    } else { feedback += " Your newer draft was preserved." }
+                } catch {
+                    feedback += " Your draft was kept because it could not be cleared: \(error.localizedDescription)"
+                }
+            case .newerRevision: feedback += " Your newer draft was preserved."
+            case .changedDraft: feedback += " Your edited draft was preserved."
+            case .differentContext: break
+            }
+            if self.isCurrentAccount(session) { self.status.stringValue = feedback }
         }
     }
     @objc func createPoll(_ sender: Any?) {
@@ -179,6 +222,7 @@ extension ConversationWindow {
     func populateConversationMenu(_ menu: NSMenu) {
         menu.removeAllItems()
         func add(_ title: String, _ action: Selector) { menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self }
+        if channel != nil { add("Channel Details", #selector(showChannelDetails(_:))) }
         add("Members…", #selector(showMembers(_:)))
         add("Pinned Messages", #selector(showPinnedMessages(_:)))
         add("Files", #selector(showChannelFiles(_:)))
@@ -197,21 +241,35 @@ extension ConversationWindow {
         add("Open in New Window", #selector(openConversationWindow(_:)))
         add("Open in New Tab", #selector(openConversationTab(_:)))
     }
+    /// Conversation Info ▸ Channel Details: the name, channel ID, type,
+    /// workspace and description the session already has for this
+    /// conversation. It is scoped to the open channel and performs no request.
+    @objc func showChannelDetails(_ sender: Any?) {
+        guard let session, let channel, let window, window.attachedSheet == nil else { return }
+        let details = ChannelDetailsSheet(session: session, channel: channel)
+        channelDetailsSheet = details
+        details.onClose = { [weak self, weak details] in
+            if self?.channelDetailsSheet === details { self?.channelDetailsSheet = nil }
+        }
+        details.present(on: window)
+    }
     @objc func copyConversationLink(_ sender: Any?) { if let channel { copyChannelLink(channel) } }
     @objc func showMembers(_ sender: Any?) {
-        guard let session, let channel else { return }
-        action {
+        guard memberRoster == nil, let session, let channel, let parent = window, parent.attachedSheet == nil else { return }
+        action { [weak self] in
+            guard let self else { return }
             let value = try await session.client.rpc("raven.api.raven_channel_member.get_channel_members", arguments: ["channel_id": .string(channel.id)])
-            guard self.isCurrent(session, channelID: channel.id) else { return }
-            let members = value.object.keys.sorted { (session.userNames[$0] ?? $0).localizedCaseInsensitiveCompare(session.userNames[$1] ?? $1) == .orderedAscending }
-            let lines = members.prefix(200).map { id -> String in
-                let entry = value[id]
-                let name = entry["full_name"].string ?? session.userNames[id] ?? id
-                return entry["is_admin"].bool ? "\(name) — admin" : name
-            }
-            let detail = members.isEmpty ? String(self.summary(value).prefix(5000)) : lines.joined(separator: "\n") + (members.count > 200 ? "\n…and \(members.count - 200) more" : "")
-            await SheetPrompt.inform("\(members.count) Members of \(channel.title)", message: detail, on: self.window)
+            guard self.isCurrent(session, channelID: channel.id), self.memberRoster == nil, parent.attachedSheet == nil else { return }
+            guard case .object = value else { throw AppError.message("The server returned an unsupported channel member contract.") }
+            let roster = MemberRosterWindow(owner: self, session: session, channel: channel, response: value)
+            self.presentMemberRoster(roster, on: parent)
         }
+    }
+    func presentMemberRoster(_ roster: MemberRosterWindow, on parent: NSWindow) {
+        roster.onClose = { [weak self, weak roster] in if self?.memberRoster === roster { self?.memberRoster = nil } }
+        roster.onMessage = { [weak self] userID in self?.openDirectMessage(with: userID) }
+        memberRoster = roster
+        roster.present(on: parent)
     }
     @objc func showPinnedMessages(_ sender: Any?) {
         guard let session, let channel else { return }

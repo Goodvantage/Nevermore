@@ -26,6 +26,37 @@ public enum JSONValue: Codable, Sendable, Equatable {
     public var string: String? { if case .string(let s) = self { return s }; return nil }
     public var array: [JSONValue] { if case .array(let a) = self { return a }; return [] }
     public var object: [String: JSONValue] { if case .object(let a) = self { return a }; return [:] }
+    /// A count or byte size from a Raven row. Integer strings through
+    /// Int64.max retain their precision without a round trip through Double.
+    public var nonnegativeCount: Int64? {
+        switch self {
+        case .number(let number) where number >= 0: return Int64(exactly: number)
+        case .string(let text):
+            if let count = Int64(text) { return count >= 0 ? count : nil }
+            return Self.integralDecimal(text)
+        default: return nil
+        }
+    }
+    /// Some adapters return decimal or scientific notation. Work in decimal
+    /// digits so underflow and rounded fractions cannot become valid counts.
+    private static func integralDecimal(_ text: String) -> Int64? {
+        guard let match = text.wholeMatch(of: #/([+-]?)([0-9]*)(?:\.([0-9]*))?(?:[eE]([+-]?[0-9]+))?/#) else { return nil }
+        let (_, sign, whole, fraction, power) = match.output
+        let digits = whole + (fraction ?? "")
+        guard !digits.isEmpty else { return nil }
+        let significant = digits.drop(while: { $0 == "0" })
+        guard !significant.isEmpty else { return 0 }
+        guard sign != "-", let exponent = Int(power ?? "0") else { return nil }
+        let (scale, overflow) = exponent.subtractingReportingOverflow(fraction?.count ?? 0)
+        guard !overflow else { return nil }
+        if scale < 0 {
+            guard scale >= -significant.count, significant.suffix(-scale).allSatisfy({ $0 == "0" }) else { return nil }
+            return Int64(significant.dropLast(-scale))
+        }
+        guard significant.count <= 19, scale <= 19 - significant.count else { return nil }
+        return Int64(String(significant) + String(repeating: "0", count: scale))
+    }
+
     public var bool: Bool { switch self { case .bool(let b): return b; case .number(let n): return n != 0; case .string(let s): return s == "1" || s == "true"; default: return false } }
     public var nested: JSONValue { if let s = string, let data = s.data(using: .utf8), let value = try? JSONDecoder().decode(Self.self, from: data) { return value }; return self }
 }

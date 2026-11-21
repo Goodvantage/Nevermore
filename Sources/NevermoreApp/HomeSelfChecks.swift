@@ -1,10 +1,54 @@
 import AppKit
+import SQLite3
 import NevermoreCore
 import RavenProtocol
 
 /// Home in a real window with a disposable demo account: what it shows,
 /// what it leaves alone, and the way back and forth to a conversation.
 @MainActor enum HomeSelfChecks {
+    @MainActor private static func draftRow(in controller: ConversationWindow) -> HomeRow? {
+        let later = InteractionSelfChecks.descendants(controller.home, of: HomeCard.self).first { $0.accessibilityLabel() == HomeModule.later.title }
+        return InteractionSelfChecks.descendants(later ?? NSView(), of: HomeRow.self).first { ($0.accessibilityLabel() ?? "").contains("draft") }
+    }
+
+    @MainActor private static func pressDraftRow(in controller: ConversationWindow) {
+        _ = draftRow(in: controller)?.accessibilityPerformPress()
+    }
+
+    @MainActor private static func sheetButtons(_ sheet: NSWindow?) -> [NSButton] {
+        sheet?.contentView.map { InteractionSelfChecks.descendants($0, of: NSButton.self) } ?? []
+    }
+
+    @MainActor private static func waitForSheet(_ window: NSWindow?) async -> NSWindow? {
+        for _ in 0..<100 {
+            if let sheet = window?.attachedSheet { return sheet }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return nil
+    }
+
+    @MainActor private static func waitForSheetToClose(_ window: NSWindow?) async {
+        for _ in 0..<100 where window?.attachedSheet != nil { try? await Task.sleep(for: .milliseconds(10)) }
+    }
+
+    /// Stores the two synthetic drafts and shows Home with the Later row
+    /// built from them. The ghost draft belongs to no channel and must stay
+    /// out of the destinations.
+    @MainActor private static func seedDrafts(_ session: AccountSession, attachment: StagedAttachment, controller: ConversationWindow) async throws {
+        try await session.store.saveDraft(Draft(channelID: "news", html: "<p>First draft body</p>"))
+        try await session.store.saveDraft(Draft(channelID: "quiet", html: "<p>Second draft body</p>", attachments: [attachment]))
+        for _ in 0..<250 {
+            session.home.refreshLocal()
+            if session.home.snapshot.drafts.contains(where: { $0.channelID == "news" }),
+               session.home.snapshot.drafts.contains(where: { $0.channelID == "quiet" }) { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        controller.showHome()
+        for _ in 0..<100 where controller.home.isHidden { try? await Task.sleep(for: .milliseconds(10)) }
+        controller.home.reloadNow()
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+    }
+
     static func run(app: AppDelegate) async throws -> [(String, Bool)] {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("NevermoreHomeCheck-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -51,7 +95,7 @@ import RavenProtocol
         controller.home.reloadNow()
         controller.window?.contentView?.layoutSubtreeIfNeeded()
 
-        var results: [(String, Bool)] = []
+        var results = HomeOrderSelfChecks.run()
         func cards() -> [HomeCard] { InteractionSelfChecks.descendants(controller.home, of: HomeCard.self) }
         func card(_ module: HomeModule) -> HomeCard? { cards().first { $0.accessibilityLabel() == module.title } }
         func rows(_ module: HomeModule) -> [String] { card(module).map { InteractionSelfChecks.descendants($0, of: HomeRow.self).compactMap { $0.accessibilityLabel() } } ?? [] }
@@ -114,13 +158,208 @@ import RavenProtocol
         let bars = InteractionSelfChecks.descendants(card(.week) ?? NSView(), of: HomeBars.self).first
         let tips = bars.map { bars in bars.toolTipTexts.keys.sorted().map { bars.view(bars, stringForToolTip: $0, point: .zero, userData: nil) } } ?? []
         results.append(("each day in Your Week has a tooltip with its count", tips.count == 7 && tips.allSatisfy { $0.contains("message") }))
-        results.append(("an empty Later card never says nothing is saved when a part failed or still loads",
-                        HomeView.emptyLaterNote(reminders: .loaded([]), saved: .failed("offline")) == nil
-                            && HomeView.emptyLaterNote(reminders: .failed("offline"), saved: .loaded([])) == nil
-                            && HomeView.emptyLaterNote(reminders: .loaded([]), saved: .loading) == "Loading…"
-                            && HomeView.emptyLaterNote(reminders: .loaded([]), saved: .loaded([]))?.hasPrefix("Nothing saved") == true))
-        results.append(("You Talk with Most finds the person the reader writes to",
+        var later = HomeFeed.Snapshot()
+        later.saved = .loaded([]); later.reminders = .loaded([])
+        results.append(("an empty Later card waits for local sources", HomeView.emptyLaterNote(later) == "Loading…"))
+        later.draftRead = .loaded([]); later.outboxRead = .loaded([])
+        results.append(("a fully loaded empty Later card explains how to save", HomeView.emptyLaterNote(later)?.hasPrefix("Nothing saved") == true))
+        later.saved = .failed("offline")
+        results.append(("a failed saved-message read cannot produce an empty Later message", HomeView.emptyLaterNote(later) == nil))
+        later.saved = .loaded([]); later.reminders = .failed("offline")
+        results.append(("a failed reminder read cannot produce an empty Later message", HomeView.emptyLaterNote(later) == nil))
+
+        // Later's draft destinations: one opens directly, several offer a
+        // native chooser, and a choice rechecks the session, Home and access.
+        let fixtureFile = root.appendingPathComponent("draft-fixture.txt")
+        try Data("Second draft staged attachment".utf8).write(to: fixtureFile)
+        let staged = try await session.store.stage(file: fixtureFile)
+        try await session.store.saveDraft(Draft(channelID: "ghost", html: "<p>Ghost draft</p>"))
+        try await seedDrafts(session, attachment: staged, controller: controller)
+        let listed = draftRow(in: controller)?.accessibilityLabel() ?? ""
+        results.append(("Later lists every eligible draft destination once",
+                        listed.contains("2 drafts") && listed.contains("# news") && listed.contains("# quiet") && !listed.contains("ghost")))
+
+        pressDraftRow(in: controller)
+        let choices = await waitForSheet(controller.window)
+        let choiceButtons = sheetButtons(choices)
+        results.append(("multiple drafts open a native chooser with every eligible destination",
+                        choices != nil && choiceButtons.contains { $0.title == "# news" } && choiceButtons.contains { $0.title == "# quiet" }
+                            && !choiceButtons.contains { $0.title == "ghost" }))
+        let cancel = choiceButtons.first { $0.title == "Cancel" }
+        cancel?.performClick(nil)
+        await waitForSheetToClose(controller.window)
+        results.append(("cancelling the draft chooser leaves Home as it was",
+                        cancel != nil && controller.window?.attachedSheet == nil && controller.channel == nil && !controller.home.isHidden))
+
+        pressDraftRow(in: controller)
+        let secondChoice = await waitForSheet(controller.window)
+        let secondButtons = sheetButtons(secondChoice)
+        let secondDraftKept: Bool
+        if let quietButton = secondButtons.first(where: { $0.title == "# quiet" }), let choose = secondButtons.first(where: { $0.title == "Choose" }) {
+            quietButton.performClick(nil)
+            choose.performClick(nil)
+            for _ in 0..<250 where controller.channel?.id != "quiet" { try? await Task.sleep(for: .milliseconds(20)) }
+            for _ in 0..<250 where controller.composer.string != "Second draft body" || controller.attachments != [staged] { try? await Task.sleep(for: .milliseconds(20)) }
+            secondDraftKept = controller.channel?.id == "quiet" && controller.composer.string == "Second draft body" && controller.attachments == [staged]
+        } else { secondDraftKept = false }
+        results.append(("choosing the second draft opens it with its text and staged attachment", secondDraftKept))
+
+        // The chip must not collapse into one accessibility element, or
+        // VoiceOver cannot reach Remove.
+        let chips = InteractionSelfChecks.descendants(controller.attachmentsRow, of: AttachmentChip.self)
+        @MainActor func exposesRemove(_ view: NSView) -> Bool {
+            if let button = view as? NSButton {
+                return !button.isHiddenOrHasHiddenAncestor && button.isEnabled
+                    && button.accessibilityLabel() == "Remove \(staged.filename)"
+                    && button.action == #selector(ConversationWindow.removeAttachment(_:))
+                    && button.target === controller
+            }
+            return (view.accessibilityChildren() ?? []).compactMap { $0 as? NSView }.contains { exposesRemove($0) }
+        }
+        let removeExposed = !chips.isEmpty && chips.allSatisfy { chip in
+            NSAccessibility.unignoredChildren(from: [chip]).compactMap { $0 as? NSView }.contains { exposesRemove($0) }
+        }
+        results.append(("the attachment chip exposes its Remove control to VoiceOver", removeExposed))
+        // AppKit controls report isAccessibilityElement() == false even when
+        // they are exposed, so assert the readable filename itself.
+        let nameExposed = !chips.isEmpty && chips.allSatisfy { chip in
+            InteractionSelfChecks.descendants(chip, of: NSTextField.self).contains { field in
+                field.stringValue == staged.filename
+            }
+        }
+        results.append(("the attachment chip exposes its file name to VoiceOver", nameExposed))
+
+        // One draft opens directly, with no chooser.
+        try await session.store.saveDraft(Draft(channelID: "quiet"))
+        for _ in 0..<250 {
+            session.home.refreshLocal()
+            if !session.home.snapshot.drafts.contains(where: { $0.channelID == "quiet" }) { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        controller.showHome()
+        for _ in 0..<100 where controller.home.isHidden { try? await Task.sleep(for: .milliseconds(10)) }
+        controller.home.reloadNow()
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        let singleLabel = draftRow(in: controller)?.accessibilityLabel() ?? ""
+        pressDraftRow(in: controller)
+        let singleSheet = await waitForSheet(controller.window)
+        for _ in 0..<250 where controller.channel?.id != "news" { try? await Task.sleep(for: .milliseconds(20)) }
+        for _ in 0..<250 where controller.composer.string != "First draft body" { try? await Task.sleep(for: .milliseconds(20)) }
+        results.append(("one draft opens directly without a chooser",
+                        singleLabel.contains("1 draft") && singleSheet == nil && controller.channel?.id == "news" && controller.composer.string == "First draft body"))
+
+        // Eligibility is rechecked when the choice is made.
+        try await seedDrafts(session, attachment: staged, controller: controller)
+        pressDraftRow(in: controller)
+        let eligibilityChoice = await waitForSheet(controller.window)
+        let eligibilityButtons = sheetButtons(eligibilityChoice)
+        let eligibilityKept: Bool
+        if let quietButton = eligibilityButtons.first(where: { $0.title == "# quiet" }), let choose = eligibilityButtons.first(where: { $0.title == "Choose" }) {
+            session.revokedChannels.insert("quiet")
+            quietButton.performClick(nil)
+            choose.performClick(nil)
+            await waitForSheetToClose(controller.window)
+            eligibilityKept = controller.channel == nil && !controller.home.isHidden
+            session.revokedChannels.remove("quiet")
+        } else { eligibilityKept = false }
+        results.append(("a destination that loses eligibility while choosing is not opened", eligibilityKept))
+
+        // Home's state is rechecked when the choice is made.
+        try await seedDrafts(session, attachment: staged, controller: controller)
+        pressDraftRow(in: controller)
+        let stateChoice = await waitForSheet(controller.window)
+        let stateButtons = sheetButtons(stateChoice)
+        let homeStateKept: Bool
+        if let quietButton = stateButtons.first(where: { $0.title == "# quiet" }), let choose = stateButtons.first(where: { $0.title == "Choose" }) {
+            controller.select(news)
+            quietButton.performClick(nil)
+            choose.performClick(nil)
+            await waitForSheetToClose(controller.window)
+            homeStateKept = controller.channel?.id == "news" && controller.home.isHidden
+        } else { homeStateKept = false }
+        results.append(("choosing while Home is no longer shown does not navigate", homeStateKept))
+        controller.showHome()
+
+        // The original session is rechecked when the choice is made.
+        let otherRoot = FileManager.default.temporaryDirectory.appendingPathComponent("NevermoreHomeOther-\(UUID())")
+        let other = try AccountSession(account: Account(origin: URL(string: "https://other.invalid")!, user: "other", siteName: "Other", clientID: "other", displayName: "Other"), directory: otherRoot, demo: true)
+        defer { other.stop(); try? FileManager.default.removeItem(at: otherRoot) }
+        try await seedDrafts(session, attachment: staged, controller: controller)
+        pressDraftRow(in: controller)
+        let identityChoice = await waitForSheet(controller.window)
+        let identityButtons = sheetButtons(identityChoice)
+        let identityKept: Bool
+        if let quietButton = identityButtons.first(where: { $0.title == "# quiet" }), let choose = identityButtons.first(where: { $0.title == "Choose" }) {
+            controller.use(other)
+            quietButton.performClick(nil)
+            choose.performClick(nil)
+            await waitForSheetToClose(controller.window)
+            identityKept = controller.session === other && controller.channel == nil
+            controller.use(session)
+        } else { identityKept = false }
+        results.append(("choosing for a session the window no longer shows does not navigate", identityKept))
+
+        results.append(("People You Talk With Most finds the person the reader writes to",
                          InteractionSelfChecks.descendants(card(.people) ?? NSView(), of: HomePerson.self).first?.accessibilityLabel()?.hasPrefix("Pat Peer") == true))
+
+        // The retry check expects an empty Later after its outbox is cleared.
+        // Remove the chooser's remaining draft destinations from this fixture.
+        try await session.store.saveDraft(Draft(channelID: quiet.id))
+        try await session.store.saveDraft(Draft(channelID: "ghost"))
+
+        // Change only the disposable fixture database. A missing table forces
+        // a real read failure while the other three Later sources stay usable.
+        var fixture: OpaquePointer?
+        guard sqlite3_open_v2(root.appendingPathComponent(AccountStore.databaseFileName).path, &fixture,
+                              SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            sqlite3_close(fixture)
+            throw AppError.message("Could not open the Home fixture database.")
+        }
+        defer { sqlite3_close(fixture) }
+        func renameFixtureTable(_ sql: String) throws {
+            guard sqlite3_exec(fixture, sql, nil, nil, nil) == SQLITE_OK else {
+                throw AppError.message("Could not change the disposable Home fixture table.")
+            }
+        }
+        func waitForLater(_ matches: () -> Bool) async throws -> Bool {
+            for _ in 0..<80 {
+                controller.home.reloadNow()
+                if matches() { return true }
+                try await Task.sleep(for: .milliseconds(15))
+            }
+            return false
+        }
+        try await session.store.saveDraft(Draft(channelID: news.id, html: "<p>Queue fixture</p>"))
+        var unsent = try await session.store.acceptDraft(channelID: news.id)
+        unsent.state = .retryable
+        try await session.store.updateOperation(unsent)
+        try renameFixtureTable("ALTER TABLE drafts RENAME TO unavailable_drafts")
+        session.home.refreshLocal()
+        let partial = try await waitForLater {
+            labels(card(.later)).contains("Drafts could not be loaded.")
+                && rows(.later).contains { $0.contains("1 message not sent") }
+        }
+        results.append(("Later reports draft read failures and keeps the working outbox visible", partial))
+        try renameFixtureTable("ALTER TABLE unavailable_drafts RENAME TO drafts")
+        unsent.state = .cancelled
+        try await session.store.updateOperation(unsent)
+        try renameFixtureTable("ALTER TABLE operations RENAME TO unavailable_operations")
+        session.home.refreshLocal()
+        let unavailable = try await waitForLater {
+            let text = labels(card(.later))
+            return text.contains("The outbox could not be loaded.")
+                && !text.contains { $0.hasPrefix("Nothing saved") }
+        }
+        results.append(("an unavailable outbox cannot produce an empty Later message", unavailable))
+        try renameFixtureTable("ALTER TABLE unavailable_operations RENAME TO operations")
+        session.home.refreshLocal()
+        let recovered = try await waitForLater { labels(card(.later)).contains { $0.hasPrefix("Nothing saved") } }
+        results.append(("Later returns to its empty state after a successful retry", recovered))
+        try await session.store.saveDraft(Draft(channelID: quiet.id, html: "<p>Recovered draft</p>"))
+        session.home.refreshLocal()
+        let draftRestored = try await waitForLater { rows(.later).contains { $0.contains("1 draft") && $0.contains("quiet") } }
+        results.append(("a new draft appears after a failed local read recovers", draftRestored))
+
 
         // Into a conversation and back.
         controller.select(news)

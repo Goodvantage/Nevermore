@@ -194,8 +194,9 @@ final class GIFMessageTests: XCTestCase {
         catch { XCTAssertEqual(error as? RichTextError, .unsafeEdit) }
     }
 
-    /// A retry's lookup skips messages another send delivered, so the same
-    /// GIF sent twice in a row is not taken for one.
+    /// A plain GIF POST has no idempotency key, so an interruption after the
+    /// POST began cannot be replayed automatically. One before it stays
+    /// retryable.
     func testAcknowledgementRecordsTheMessagesASendDelivered() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NevermoreGIFDelivered-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -212,6 +213,27 @@ final class GIFMessageTests: XCTestCase {
         XCTAssertEqual(delivered, ["posted-1"], "only acknowledged sends to this conversation count")
         let later = try await store.deliveredMessageIDs(channelID: "general", since: Date().addingTimeInterval(3600))
         XCTAssertTrue(later.isEmpty, "sends accepted before the window are left out")
+    }
+
+    func testInterruptedGIFSendWaitsForReviewOnlyAfterItsPostBegan() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NevermoreGIFRecovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try AccountStore(directory: directory)
+        let posted = try await store.acceptGIF(channelID: "general", html: GIFMessage.html(for: item))
+        var sending = posted
+        sending.state = .sending
+        sending.attempts = 1
+        try await store.updateOperation(sending)
+        let notYetPosted = try await store.acceptGIF(channelID: "general", html: GIFMessage.html(for: item))
+        var uploading = notYetPosted
+        uploading.state = .uploading
+        uploading.attempts = 1
+        try await store.updateOperation(uploading)
+
+        try await store.recoverInterruptedOperations()
+        let operations = try await store.operations()
+        XCTAssertEqual(operations.first { $0.id == posted.id }?.state, .needsReview)
+        XCTAssertEqual(operations.first { $0.id == notYetPosted.id }?.state, .retryable)
     }
 }
 

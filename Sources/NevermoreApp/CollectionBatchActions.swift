@@ -6,6 +6,7 @@ import RavenProtocol
 
     struct Transport {
         let markRead: @MainActor ([String]) async throws -> Void
+        let markAllRead: @MainActor () async throws -> Void
         let unreadIDs: @MainActor () async throws -> Set<String>
     }
 
@@ -27,6 +28,9 @@ import RavenProtocol
     static func transport(session: AccountSession) -> Transport {
         Transport(markRead: { ids in
             _ = try await session.mutate("raven.api.notifications.mark_message_notifications_read", ["message_ids": .array(ids.map(JSONValue.string))])
+        }, markAllRead: {
+            // Account-wide: no row, filter or page argument. One no-argument POST.
+            _ = try await session.mutate("raven.api.notifications.mark_all_notifications_read", [:])
         }, unreadIDs: {
             let value = try await session.client.rpc("raven.api.notifications.get_unread_notification_message_ids")
             guard case .array(let values) = value,
@@ -39,6 +43,8 @@ import RavenProtocol
 extension CollectionWindow: NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(markSelectedRead) { return canMarkSelectedRead }
+        if item.action == #selector(markAllRead) { return canMarkAllRead }
+        if item.action == #selector(AppDelegate.markAllNotificationsRead(_:)) { return session.map { !$0.readOnly && !$0.stopped && !$0.demo } ?? false }
         return active
     }
 }
@@ -55,23 +61,59 @@ extension CollectionWindow {
         return CollectionBatchActions.messageIDs(selectedBatchRows) != nil
     }
 
+    var canMarkAllRead: Bool {
+        guard kind == .inbox, active, !isLoading, !isBatchRunning,
+              let session, !session.readOnly,
+              !session.demo || batchTransport != nil else { return false }
+        return true
+    }
+
+    /// Marks every notification for the current account read, including rows
+    /// hidden by the current filter or later pages. The server call carries no
+    /// row identities, so it is deliberately independent of the selection.
+    @objc func markAllRead() {
+        guard canMarkAllRead, let session else { return }
+        let transport = batchTransport ?? CollectionBatchActions.transport(session: session)
+        runNotificationBatch(transport: transport, markAll: true, mutation: transport.markAllRead)
+    }
+
     @objc func markSelectedRead() {
         guard canMarkSelectedRead, let session,
               let ids = CollectionBatchActions.messageIDs(selectedBatchRows) else { return }
         // Capture the immutable snapshot before suspension. Selection changes
         // cannot redirect the mutation to another row or another account.
         let transport = batchTransport ?? CollectionBatchActions.transport(session: session)
+        runNotificationBatch(transport: transport, markAll: false) { try await transport.markRead(ids) }
+    }
+
+    /// Runs one notification mutation, then reconciles the canonical unread
+    /// message-ID set. The mutation is attempted once; an uncertain outcome is
+    /// never replayed, and a failed canonical read keeps the last known state.
+    /// `markAll` also refreshes the inbox list, which the selected-row action
+    /// leaves as it is.
+    private func runNotificationBatch(transport: CollectionBatchActions.Transport, markAll: Bool,
+                                      mutation: @MainActor @escaping () async throws -> Void) {
         let generation = UUID(); batchGeneration = generation
-        isBatchRunning = true; statusMessage = ""; updateChrome()
+        isBatchRunning = true; batchIsMarkAll = markAll; statusMessage = ""; updateChrome()
         batchTask = Task { [weak self] in
-            guard let self, self.active, self.batchGeneration == generation, !Task.isCancelled else { return }
+            guard let self else { return }
+            defer {
+                if self.batchGeneration == generation, self.isBatchRunning {
+                    self.isBatchRunning = false
+                    self.batchIsMarkAll = false
+                    self.batchTask = nil
+                    self.updateChrome()
+                }
+            }
+            guard let session = self.session, self.active,
+                  self.batchGeneration == generation, !Task.isCancelled else { return }
             var acknowledged = false
             do {
-                try await transport.markRead(ids)
+                try await mutation()
                 acknowledged = true
             } catch {
-                // Do not replay a mutation with an uncertain outcome. A
-                // canonical read below can heal attention state independently.
+                // Do not replay a mutation with an uncertain outcome. The
+                // canonical read below still reports what the server applied.
             }
             guard self.active, self.batchGeneration == generation, !Task.isCancelled else { return }
             var reconciled = false
@@ -90,9 +132,13 @@ extension CollectionWindow {
             guard self.active, self.batchGeneration == generation, !Task.isCancelled else { return }
             self.isBatchRunning = false; self.batchTask = nil
             if !acknowledged {
-                self.statusMessage = "Could not confirm that the selected notifications were marked read. Refresh before trying again."
+                self.statusMessage = markAll
+                    ? "Could not confirm that all notifications were marked read. Refresh before trying again."
+                    : "Could not confirm that the selected notifications were marked read. Refresh before trying again."
             } else if !reconciled {
                 self.statusMessage = "Notifications were marked read, but unread status could not be refreshed. Refresh this account to check."
+            } else if markAll {
+                self.statusMessage = ""; self.refresh()
             } else { self.statusMessage = "" }
             self.updateChrome()
         }

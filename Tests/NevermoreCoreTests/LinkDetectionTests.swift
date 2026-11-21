@@ -11,6 +11,30 @@ final class LinkDetectionTests: XCTestCase {
         XCTAssertEqual(plain.range, NSRange(location: 0, length: 16))
     }
 
+    func testWWWAddressesOpenOverHTTPS() throws {
+        let text = "see www.example.com/path"
+        let match = try XCTUnwrap(LinkDetection.webAddress(in: text, endingAt: text.utf16.count))
+        XCTAssertEqual(match.url, "https://www.example.com/path")
+        XCTAssertEqual(match.range, NSRange(location: 4, length: 20))
+        let wrapped = try XCTUnwrap(LinkDetection.webAddresses(in: "(WWW.Example.co.uk).").first)
+        XCTAssertEqual(wrapped.url, "https://WWW.Example.co.uk")
+        XCTAssertEqual(wrapped.range, NSRange(location: 1, length: 17))
+        XCTAssertEqual(LinkDetection.webAddresses(in: "https://www.example.com").first?.url, "https://www.example.com")
+    }
+
+    func testWWWAddressMayCarryAnotherAddress() throws {
+        let match = try XCTUnwrap(LinkDetection.webAddresses(in: "see www.example.com/out?u=https://example.org").first)
+        XCTAssertEqual(match.url, "https://www.example.com/out?u=https://example.org")
+        XCTAssertEqual(LinkDetection.webAddresses(in: "https://www.example.com/a").first?.url, "https://www.example.com/a")
+    }
+
+    func testWWWLookalikesStayText() {
+        for text in ["www.", "www.example", "awww.example.com", "x/www.example.com", "www.example.c0m", "www..example.com", "www.example.com:notaport", "www.ex ample.com"] {
+            XCTAssertTrue(LinkDetection.webAddresses(in: text).isEmpty, text)
+        }
+        XCTAssertNil(LinkDetection.soleWebAddress("www.example.com"), "pasting over a selection still needs a scheme")
+    }
+
     func testUppercaseScheme() throws {
         let text = "HTTPS://A.EXAMPLE/X"
         let match = try XCTUnwrap(LinkDetection.webAddress(in: text, endingAt: text.utf16.count))

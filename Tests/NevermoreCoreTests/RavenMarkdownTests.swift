@@ -75,4 +75,57 @@ struct RavenMarkdownTests {
         #expect(throws: (any Error).self) { try RavenMarkdown.source(from: RichDocument(nodes: [deep])) }
         #expect(throws: (any Error).self) { try RavenMarkdown.source(from: RichDocument(nodes: [], canEdit: false)) }
     }
+
+    @Test func sourceLeavesOrdinaryPunctuationReadable() throws {
+        let sentence = "Hello, world! It's 3 o'clock (really): see https://example.com/a-b?x=1. 50% off; a > b, \"quoted\" $5 #general @alice R&D {x}"
+        #expect(try RavenMarkdown.source(from: RichTextCodec.parse("<p>\(RichTextCodec.escape(sentence))</p>")) == sentence)
+    }
+
+    @Test func sourceStillEscapesWhatWouldBecomeMarkup() throws {
+        for (text, expected) in [
+            ("2 * 3 * 4", ##"2 \* 3 \* 4"##), ("snake_case_name", ##"snake\_case\_name"##), ("[not a link]", ##"\[not a link\]"##),
+            ("`tick`", ##"\`tick\`"##), ("<b>", ##"\<b>"##), ("~~old~~", ##"\~\~old\~\~"##), ("back\\slash", ##"back\\slash"##),
+            ("&amp; stays text", ##"\&amp; stays text"##),
+            ("# not a heading", ##"\# not a heading"##), ("- not a bullet", ##"\- not a bullet"##), ("+ not a bullet", ##"\+ not a bullet"##),
+            ("--- not a rule", ##"\--- not a rule"##), ("> not a quote", ##"\> not a quote"##), ("2024. A good year", ##"2024\. A good year"##),
+            ("1) not a list", ##"1\) not a list"##)
+        ] {
+            let document = try RichTextCodec.parse("<p>\(RichTextCodec.escape(text))</p>")
+            let source = try RavenMarkdown.source(from: document)
+            #expect(source == expected, "\(text)")
+            #expect(RichTextCodec.html(try RavenMarkdown.document(from: source)) == RichTextCodec.html(document), "\(text)")
+        }
+    }
+
+    @Test func listItemsAndTableCellsUseReadableSource() throws {
+        let list = try RavenMarkdown.source(from: RichTextCodec.parse("<ul><li>Ready, set: go!</li><li>- dash</li></ul>"))
+        #expect(list == "- Ready, set: go!\n- \\- dash")
+        let table = try RichTextCodec.parse("<table><tr><th>A|B</th><th>C</th></tr><tr><td>d, e</td><td>f</td></tr></table>")
+        let source = try RavenMarkdown.source(from: table)
+        #expect(source.hasPrefix("| A&#124;B | C |") && source.contains("| d, e | f |"))
+        #expect(Self.unwrapped(try RavenMarkdown.document(from: source)) == Self.unwrapped(table))
+    }
+
+    /// HTML without the paragraph and row-group wrappers that Markdown adds
+    /// to list items and tables, which the exporter treats as equivalent.
+    private static func unwrapped(_ document: RichDocument) -> String {
+        ["<p>", "</p>", "<thead>", "</thead>", "<tbody>", "</tbody>"].reduce(RichTextCodec.html(document)) { $0.replacingOccurrences(of: $1, with: "") }
+    }
+
+    /// Readable source must never change what the text says: every export,
+    /// readable or not, parses back to the same document.
+    @Test func everyExportRoundTrips() throws {
+        let alphabet: [String] = ["a", "B", "1", "9", " ", ".", ")", "#", "-", "+", "=", "*", "_", "`", "[", "]", "(", "<", ">", "&", ";", "!", "|", "~", "\\", ":", "/", "@", "w", "\"", "'", "amp", "#1", "é", "😀"]
+        var seed: UInt64 = 0x5EED
+        func next(_ bound: Int) -> Int { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Int((seed >> 33) % UInt64(bound)) }
+        for _ in 0..<600 {
+            let text = (0..<(1 + next(14))).map { _ in alphabet[next(alphabet.count)] }.joined()
+            for html in ["<p>\(RichTextCodec.escape(text))</p>", "<ul><li>\(RichTextCodec.escape(text))</li></ul>", "<p><strong>x</strong>\(RichTextCodec.escape(text))</p>"] {
+                let document = try RichTextCodec.parse(html)
+                // Every one of these has a source form; a throw is a failure.
+                let source = try RavenMarkdown.source(from: document)
+                #expect(Self.unwrapped(try RavenMarkdown.document(from: source)) == Self.unwrapped(document), "\(html) -> \(source)")
+            }
+        }
+    }
 }

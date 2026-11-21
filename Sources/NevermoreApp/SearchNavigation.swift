@@ -10,6 +10,7 @@ extension ConversationWindow {
     /// and Forward; restoring from there does not.
     func showSearch(_ criteria: SearchCriteria, record: Bool = true, immediately: Bool, origin: RavenChannel? = nil) {
         guard let session, !session.stopped else { return }
+        cancelSidebarKeyboardOpen()
         let origin = origin ?? channel
         if channel != nil {
             if window?.isVisible == true { app.interfaceSounds.play(.selection) }
@@ -125,7 +126,7 @@ extension ConversationWindow {
 
     /// Opens, or starts, the direct message with `user`.
     func openDirectMessage(with user: String) {
-        guard let session else { return }
+        guard let session, !user.isEmpty, user != session.account.user else { return }
         if let existing = session.channels.first(where: { $0.isDM && $0.raw["peer_user_id"].string == user }) {
             openSearchResult(channelID: existing.id, messageID: nil, parentID: nil)
             return

@@ -38,7 +38,7 @@ import NevermoreCore
         limit.addItem(withTitle: "No limit")
         for count in 2...19 { limit.addItem(withTitle: "Up to \(count)") }
         limit.setAccessibilityLabel("Maximum choices")
-        deadline.datePickerStyle = .textFieldAndStepper; deadline.datePickerElements = [.yearMonthDay, .hourMinute]; deadline.timeZone = timeZone; deadline.dateValue = Date().addingTimeInterval(86400); deadline.setAccessibilityLabel("Poll closing time in site timezone")
+        deadline.datePickerStyle = .textFieldAndStepper; deadline.datePickerElements = [.yearMonthDay, .hourMinute]; deadline.timeZone = timeZone; deadline.dateValue = Date().addingTimeInterval(86400); deadline.minDate = Date(); deadline.setAccessibilityLabel("Poll closing time in site timezone")
         let timing = NSStackView(views: [deadline, NSTextField(labelWithString: timeZone.identifier)]); timing.spacing = 8
         let choices = NSStackView(views: [multiple, limit]); choices.spacing = 8
         status.textColor = .systemRed
@@ -54,7 +54,14 @@ import NevermoreCore
         }
         panel.initialFirstResponder = question; settingsChanged()
     }
-    @objc private func settingsChanged() { limit.isEnabled = multiple.state == .on; deadline.isEnabled = timed.state == .on }
+    @objc private func settingsChanged() {
+        limit.isEnabled = multiple.state == .on
+        deadline.isEnabled = timed.state == .on
+        // The picker was created when the sheet opened; refresh the floor
+        // when it becomes relevant. accept() still rejects a deadline that
+        // has passed since the reader chose it.
+        if timed.state == .on { deadline.minDate = Date() }
+    }
     private func present(_ continuation: CheckedContinuation<PollDraft?, Never>) {
         guard let parent, !finished else { continuation.resume(returning: nil); return }
         self.continuation = continuation

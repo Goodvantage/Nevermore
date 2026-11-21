@@ -20,6 +20,7 @@
 "outbox.error.permission_review" = "Access to this conversation changed. Recover your text or verify permission before retrying.";
 "outbox.error.old_review" = "Queued over 24 hours ago. Review before retrying.";
 "outbox.error.acknowledgement_review" = "The server acknowledgement could not be matched. Check Raven before retrying.";
+"outbox.error.gif_review" = "The GIF may already have been delivered. Check the conversation before sending it again.";
 "error.protocol.invalid_site" = "Enter the site’s origin only, for example https://chat.example.com. HTTPS is required outside local development.";
 "error.protocol.transport" = "The site could not be reached. Check your network connection and the site address.";
 "error.protocol.oauth" = "The site did not complete authorization (%@). Check the dedicated OAuth client registration and try signing in again.";
@@ -30,7 +31,7 @@
 "error.protocol.http_failed" = "The site failed to answer (HTTP %ld%@). It may be restarting or overloaded.";
 "error.protocol.http_refused" = "The site refused the request (HTTP %ld%@).";
 "error.protocol.invalid_response" = "The site returned a response Nevermore could not understand.";
-"error.protocol.resource_limit" = "This file or response exceeds Nevermore’s safe size limit (64 MB per attachment).";
+"error.protocol.resource_limit" = "This file or response exceeds Nevermore’s safe size limit (%@).";
 "error.protocol.cross_origin" = "This request points at a different site. Nevermore only sends account credentials to the account’s own site.";
 "error.protocol.keychain" = "Secure credential storage failed (Keychain error %@).";
 "error.store.directory_in_use" = "This account store directory is already open by another store: %@";

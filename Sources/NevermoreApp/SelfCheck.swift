@@ -27,6 +27,13 @@ import NevermoreCore
         #endif
         var failures: [String] = []
         func check(_ value: Bool, _ label: String) { if !value { failures.append(label) }; print("\(value ? "PASS" : "FAIL") \(label)"); fflush(nil) }
+        if CommandLine.arguments.contains("--schedule-only") {
+            guard let index = CommandLine.arguments.firstIndex(of: "--schedule-fixture-origin"), CommandLine.arguments.indices.contains(index + 1) else { print("FAIL schedule fixture origin is missing"); return 1 }
+            do { for (label, result) in try await ScheduleNetworkSelfChecks.run(app: app, origin: CommandLine.arguments[index + 1]) { check(result, label) } }
+            catch { check(false, "schedule RPC fixture: \(error.localizedDescription)") }
+            print("Native schedule self-check: \(failures.isEmpty ? "PASS" : "FAIL") (\(failures.count) failures)")
+            return failures.isEmpty ? 0 : 1
+        }
         let expectedCoreResources = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources", isDirectory: true).resolvingSymlinksInPath()
         let resolvedCoreBundle = StatusLocalization.resourceBundleURL.resolvingSymlinksInPath()
         check(Bundle.main.bundleURL.pathExtension == "app" && Bundle.main.resourceURL?.resolvingSymlinksInPath() == expectedCoreResources && resolvedCoreBundle.deletingLastPathComponent() == expectedCoreResources && resolvedCoreBundle.lastPathComponent == "Nevermore_NevermoreCore.bundle", "Core localization resolves inside the packaged app Resources directory")
@@ -79,6 +86,26 @@ import NevermoreCore
         check(first.transcript.selectedRange().length == first.transcript.string.utf16.count && first.transcript.selectedRange().length > 100, "Select All spans message boundaries")
         check(first.transcript.isSelectable && !first.transcript.isEditable, "transcript uses native read-only text selection")
         check(first.composer.allowsUndo, "composer has native Undo")
+        func noticeMessage(_ id: String, _ html: String) -> RavenMessage {
+            RavenMessage(raw: .object(["name": .string(id), "channel_id": .string(channel.id), "owner": .string("notice-fixture@example.invalid"), "text": .string(html), "message_type": .string("Text")]))
+        }
+        let secret = noticeMessage("notice-fixture", #"<p>Ship it, the code is <span data-spoiler="true">hunter2</span></p>"#)
+        let notice = session.notificationContent(for: secret, level: .generic)
+        let sibling = session.notificationContent(for: noticeMessage("notice-fixture-2", "<p>Second</p>"), level: .generic)
+        check(notice.threadIdentifier == "\(session.account.id.uuidString)-\(channel.id)" && notice.threadIdentifier == sibling.threadIdentifier && notice.body == "New activity in Raven", "a conversation's notifications stack together and keep a generic body")
+        let sender = session.authorName(secret)
+        let conversationTitle = channel.isDM ? sender : "#" + channel.title
+        let named = session.notificationContent(for: secret, level: .sender)
+        check(named.title == conversationTitle && !named.body.contains("Ship") && (channel.isDM || named.body.contains(sender)), "a sender preview names the sender and conversation without the text")
+        let full = session.notificationContent(for: secret, level: .message)
+        check(full.title == conversationTitle && full.body.hasSuffix("Ship it, the code is [Spoiler]") && !full.body.contains("hunter2"), "a message preview shows the text with its spoiler masked")
+        check(full.userInfo["message"] as? String == "notice-fixture" && full.threadIdentifier == notice.threadIdentifier, "every preview level routes the click to the same message")
+        let unknown = RavenMessage(raw: .object(["name": .string("unknown"), "channel_id": .string(channel.id),
+                                                "message_type": .string("Unknown"), "content": .string("private fixture")]))
+        check(!session.notificationContent(for: unknown, level: .message).body.contains("private fixture"), "an unknown message type omits its raw notification content")
+        let stranger = RavenMessage(raw: .object(["name": .string("notice-fixture-3"), "channel_id": .string("not-listed-yet"), "owner": .string("notice-fixture@example.invalid"), "text": .string("<p>Hello</p>"), "message_type": .string("Text")]))
+        let unlisted = session.notificationContent(for: stranger, level: .message)
+        check(unlisted.body == "New activity in Raven" && !unlisted.title.contains("not-listed-yet") && unlisted.userInfo["channel"] as? String == "not-listed-yet", "a conversation not in the list yet gets a generic notification that still opens it")
         check(NSApp.mainMenu?.items.count ?? 0 >= 8, "standard application menus installed")
         app.open(session: session, channel: channel)
         guard let second = app.windows.last else { print("FAIL second window missing"); return 1 }
@@ -164,6 +191,27 @@ import NevermoreCore
             if let event = InteractionSelfChecks.key(36, window: second.window!, modifiers: .shift) { second.composer.keyDown(with: event) }
             check(openForNewline && sends == 2 && second.composer.string.count > beforeNewline.count, "Shift-Return inserts a line break while suggestions are open")
             second.mentionPopover.close()
+            // Markdown source is all fixed pitch; only its code spans and
+            // fences suppress suggestions. A chosen mention goes into the
+            // source as its HTML.
+            second.inlineComposer.switchMode(.markdown)
+            if second.inlineComposer.mode == .markdown, let source = second.inlineComposer.textView {
+                let sourceBefore = source.string
+                second.window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); second.window?.makeFirstResponder(source)
+                for _ in 0..<100 { if second.window?.isKeyWindow == true { break }; try await Task.sleep(for: .milliseconds(10)) }
+                source.insertText(" @Al", replacementRange: NSRange(location: source.string.utf16.count, length: 0))
+                second.updateCompletions()
+                let offered = second.mentionPopover.popover.isShown && second.mentionPopover.candidates.first?.serverID == "alex@example.com"
+                if let candidate = second.mentionPopover.candidates.first, let query = MentionCompletion.query(in: source.string, selection: source.selectedRange()) { second.insertMention(candidate, query: query) }
+                check(offered && source.string.contains("data-id=\"alex@example.com\""), "Markdown mode offers mention suggestions and inserts the chosen one")
+                second.window?.makeFirstResponder(source)
+                source.insertText(" ` @Al", replacementRange: NSRange(location: source.string.utf16.count, length: 0))
+                second.updateCompletions()
+                check(!second.mentionPopover.popover.isShown, "Markdown mode offers no mention suggestions inside a code span")
+                second.mentionPopover.close()
+                second.inlineComposer.setSource(sourceBefore, selection: NSRange(location: sourceBefore.utf16.count, length: 0))
+                second.inlineComposer.switchMode(.visual)
+            } else { check(false, "Markdown mode offers mention suggestions and inserts the chosen one") }
             guard let parent = first.messages.first else { throw AppError.message("Thread parent fixture missing") }
             let reply = RavenMessage(raw: .object(["name": .string("inspector-reply"), "channel_id": .string(parent.id), "owner": .string("alex@example.com"), "creation": .string("2026-11-07 13:00:00.000001"), "text": .string("<p>Thread inspector fixture</p>"), "message_type": .string("Text")]))
             try await session.store.cacheMessages([reply])
@@ -213,6 +261,26 @@ import NevermoreCore
         catch { check(false, "Reaction Undo self-checks: \(error.localizedDescription)") }
         do { for (label, result) in try await DelightSelfChecks.run(app: app) { check(result, label) } }
         catch { check(false, "raven and sticker checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await RealtimeRoomSelfChecks.run() { check(result, label) } }
+        catch { check(false, "realtime room checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await DraftMarkSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "sidebar draft mark checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await SidebarMenuSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "sidebar context menu checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await UnreadNavigationSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "unread navigation checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await VisibleMessageSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "visible message search checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await MessageMarkSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "pinned and saved mark checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await MessageCopySelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "Copy Message Text checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await FloatingDayPillSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "floating day pill checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await SecondaryLineSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "secondary transcript line checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await SidebarKeyboardSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "sidebar keyboard checks: \(error.localizedDescription)") }
         do { for (label, result) in try await TranscriptLayoutSelfChecks.run(app: app) { check(result, label) } }
         catch { check(false, "transcript layout checks: \(error.localizedDescription)") }
         do { for (label, result) in try await AnimatedImageSelfChecks.run(app: app) { check(result, label) } }
@@ -225,6 +293,8 @@ import NevermoreCore
         catch { check(false, "transcript placement checks: \(error.localizedDescription)") }
         do { for (label, result) in try await AccessibilitySelfChecks.run(owner: first) { check(result, label) } }
         catch { check(false, "native message accessibility checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await ChannelDetailsSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "channel details checks: \(error.localizedDescription)") }
         do { for (label, result) in try await StatusAnnouncementSelfChecks.run(owner: first) { check(result, label) } }
         catch { check(false, "native status announcement checks: \(error.localizedDescription)") }
         if let resources = Bundle.main.resourceURL, Bundle.main.bundleIdentifier != nil {
@@ -236,11 +306,12 @@ import NevermoreCore
         catch { check(false, "draft lifecycle checks: \(error.localizedDescription)") }
         do { for (label, result) in try await ReconciliationSelfChecks.run() { check(result, label) } }
         catch { check(false, "reconciliation checks: \(error.localizedDescription)") }
+        for (label, result) in await HistoryCacheSelfChecks.run() { check(result, label) }
         for (label, result) in ClipboardAttachmentSelfChecks.run() { check(result, label) }
         if let index = CommandLine.arguments.firstIndex(of: "--attachment-fixture-origin") {
             do {
                 guard CommandLine.arguments.indices.contains(index + 1) else { throw AppError.message("Missing local attachment fixture origin.") }
-                for (label, result) in try await AttachmentSelfChecks.run(origin: CommandLine.arguments[index + 1]) { check(result, label) }
+                for (label, result) in try await AttachmentSelfChecks.run(app: app, origin: CommandLine.arguments[index + 1]) { check(result, label) }
             } catch { check(false, "attachment fixture: \(error.localizedDescription)") }
         }
         for (label, result) in RavenPortraitSelfChecks.run() { check(result, label) }
@@ -252,6 +323,12 @@ import NevermoreCore
         catch { check(false, "home fixture: \(error.localizedDescription)") }
         do { for (label, result) in try await SearchSelfChecks.run(app: app) { check(result, label) } }
         catch { check(false, "search fixture: \(error.localizedDescription)") }
+        if let index = CommandLine.arguments.firstIndex(of: "--search-fixture-origin") {
+            do {
+                guard CommandLine.arguments.indices.contains(index + 1) else { throw AppError.message("Missing local search fixture origin.") }
+                for (label, result) in try await SearchNetworkSelfChecks.run(app: app, origin: CommandLine.arguments[index + 1]) { check(result, label) }
+            } catch { check(false, "search RPC fixture: \(error.localizedDescription)") }
+        }
         for (label, result) in ConversationGeometrySelfChecks.run() { check(result, label) }
         for (label, result) in ComposerSizingSelfChecks.run(app: app) { check(result, label) }
         for (label, result) in await composerFormattingChecks(in: first) { check(result, label) }
@@ -260,6 +337,9 @@ import NevermoreCore
         catch { check(false, "conversation file drops: \(error.localizedDescription)") }
         do { for (label, result) in try await UpdateSelfChecks.run(app: app) { check(result, label) } }
         catch { check(false, "native update checks: \(error.localizedDescription)") }
+        check(AppDelegate.removalContents(unsentMessages: 0).hasSuffix("cached history and drafts"), "account removal names no unsent messages when the outbox is empty")
+        check(AppDelegate.removalContents(unsentMessages: 1).hasSuffix("drafts and 1 unsent message"), "account removal says 1 unsent message")
+        check(AppDelegate.removalContents(unsentMessages: 3).hasSuffix("drafts and 3 unsent messages"), "account removal says 3 unsent messages")
         do { for (label, result) in try await NativeShellSelfChecks.run(app: app) { check(result, label) } }
         catch { check(false, "native shell: \(error.localizedDescription)") }
         do { for (label, result) in try await PollSelfChecks.run(owner: first) { check(result, label) } }
@@ -274,11 +354,23 @@ import NevermoreCore
         catch { check(false, "emoji checks: \(error.localizedDescription)") }
         do { for (label, result) in try await QuickReactionSelfChecks.run(owner: first) { check(result, label) } }
         catch { check(false, "quick reaction checks: \(error.localizedDescription)") }
+        if let index = CommandLine.arguments.firstIndex(of: "--reminder-fixture-origin") {
+            do {
+                guard CommandLine.arguments.indices.contains(index + 1) else { throw AppError.message("Missing local reminder fixture origin.") }
+                for (label, result) in try await ReminderCompletionSelfChecks.run(app: app, origin: CommandLine.arguments[index + 1]) { check(result, label) }
+            } catch { check(false, "reminder fixture: \(error.localizedDescription)") }
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--reaction-fixture-origin") {
             do {
                 guard CommandLine.arguments.indices.contains(index + 1) else { throw AppError.message("Missing local reaction fixture origin.") }
                 for (label, result) in try await QuickReactionSelfChecks.runNetwork(app: app, origin: CommandLine.arguments[index + 1]) { check(result, label) }
             } catch { check(false, "reaction RPC fixture: \(error.localizedDescription)") }
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--schedule-fixture-origin") {
+            do {
+                guard CommandLine.arguments.indices.contains(index + 1) else { throw AppError.message("Missing local schedule fixture origin.") }
+                for (label, result) in try await ScheduleNetworkSelfChecks.run(app: app, origin: CommandLine.arguments[index + 1]) { check(result, label) }
+            } catch { check(false, "schedule RPC fixture: \(error.localizedDescription)") }
         }
         if let index = CommandLine.arguments.firstIndex(of: "--avatar-fixture-origin") {
             do {
@@ -286,10 +378,18 @@ import NevermoreCore
                 for (label, result) in try await AvatarSelfChecks.runNetwork(app: app, origin: CommandLine.arguments[index + 1]) { check(result, label) }
             } catch { check(false, "avatar fixture: \(error.localizedDescription)") }
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--gif-fixture-origin") {
+            do {
+                guard CommandLine.arguments.indices.contains(index + 1) else { throw AppError.message("Missing local GIF fixture origin.") }
+                for (label, result) in try await GIFRecoverySelfChecks.run(app: app, origin: CommandLine.arguments[index + 1]) { check(result, label) }
+            } catch { check(false, "GIF recovery fixture: \(error.localizedDescription)") }
+        }
         do { for (label, result) in try await BrowserAuthenticationSelfChecks.run() { check(result, label) } }
         catch { check(false, "browser authentication callback checks: \(error.localizedDescription)") }
         for (label, result) in OnboardingSelfChecks.run(app: app) { check(result, label) }
         for (label, result) in await ThemeSelfChecks.run(app: app, owner: first) { check(result, label) }
+        do { for (label, result) in try await MemberRosterSelfChecks.run(owner: first) { check(result, label) } }
+        catch { check(false, "member roster checks: \(error.localizedDescription)") }
         let collection = CollectionWindow(owner: first, title: "Privacy fixture", records: [.object(["channel_id": .string("revoked"), "content": .string("Private fixture")]), .object(["channel_id": .string(channel.id), "content": .string("Allowed fixture")])], kind: .messages)
         first.collectionWindows.append(collection)
         session.revokedChannels.insert("revoked"); collection.restrictRevoked()

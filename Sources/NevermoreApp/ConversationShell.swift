@@ -68,11 +68,13 @@ enum ConversationToolbar {
     private let title = NSTextField(labelWithString: "")
     private let count = NSTextField(labelWithString: "")
     private let presenceDot = NSView()
-    private let muted = NSImageView()
+    let muted = NSImageView()
     /// Where this row's raven stands, left of the count.
     let perch = RavenPerchView()
     private var perchWidth: NSLayoutConstraint!
     private var perchGap: NSLayoutConstraint!
+    /// Collapses the hidden muted bell so it reserves no title width.
+    private var mutedWidth: NSLayoutConstraint!
     private var bird: Bird?
     private static let perchSpacing: CGFloat = 3
 
@@ -91,10 +93,13 @@ enum ConversationToolbar {
         count.alignment = .right
         count.setContentHuggingPriority(.required, for: .horizontal)
         count.setContentCompressionResistancePriority(.required, for: .horizontal)
-        muted.image = NSImage(systemSymbolName: "bell.slash", accessibilityDescription: "Muted")
+        muted.image = Self.mutedImage
         muted.contentTintColor = .tertiaryLabelColor
         muted.symbolConfiguration = .init(pointSize: 10, weight: .regular)
-        muted.setContentHuggingPriority(.required, for: .horizontal)
+        // The required zero-width constraint decides when the bell is hidden;
+        // .defaultHigh still loses to it, and keeps the visible bell pinned to
+        // its intrinsic width instead of stretching into the title's slack.
+        muted.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         presenceDot.wantsLayer = true
         presenceDot.layer?.cornerRadius = 3.5
         presenceDot.layer?.borderWidth = 1
@@ -126,10 +131,15 @@ enum ConversationToolbar {
         ])
         perchWidth = perch.widthAnchor.constraint(equalToConstant: 0)
         perchGap = count.leadingAnchor.constraint(equalTo: perch.trailingAnchor)
-        NSLayoutConstraint.activate([perchWidth, perchGap])
+        mutedWidth = muted.widthAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([perchWidth, perchGap, mutedWidth])
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    private static let mutedImage = NSImage(systemSymbolName: "bell.slash", accessibilityDescription: "Muted")
+    private static let draftImage = NSImage(systemSymbolName: "pencil", accessibilityDescription: "Draft")
+    /// Whether the slot after the title shows the draft pencil. Self-checks read it.
+    var showsDraftMark: Bool { !muted.isHidden && muted.image === Self.draftImage }
     private var baseTitleColor: NSColor = .labelColor
     override var backgroundStyle: NSView.BackgroundStyle {
         didSet {
@@ -167,6 +177,8 @@ enum ConversationToolbar {
         var bird: Bird?
         var photo: NSImage? = nil
         var channelAccess: RavenPortrait.ChannelAccess? = nil
+        /// An unsent draft waits in this conversation.
+        var draft = false
     }
 
     func configure(_ model: Model, fontSize: CGFloat) {
@@ -180,7 +192,10 @@ enum ConversationToolbar {
         symbol.image = model.photo ?? NSImage(systemSymbolName: model.symbolName, accessibilityDescription: nil)
         symbol.symbolConfiguration = model.photo == nil ? .init(pointSize: fontSize, weight: .regular) : nil
         count.stringValue = model.unread > 0 ? (model.unread >= 9999 ? "9999+" : String(model.unread)) : ""
-        muted.isHidden = !model.muted
+        // One slot after the title: a waiting draft says more than muting.
+        muted.image = model.draft ? Self.draftImage : Self.mutedImage
+        muted.isHidden = !model.muted && !model.draft
+        mutedWidth.isActive = muted.isHidden
         bird = model.bird
         perch.isHidden = model.bird == nil
         perchWidth.constant = model.bird == nil ? 0 : RavenFigure.size.width
@@ -201,6 +216,7 @@ enum ConversationToolbar {
         if model.channelAccess == .privateChannel { label += ", private channel" }
         if let presence = model.presence { label += ", \(presence)" }
         if model.unread > 0 { label += ", \(model.unread) unread" }
+        if model.draft { label += ", draft" }
         if model.muted { label += ", muted" }
         if model.archived { label += ", archived" }
         setAccessibilityLabel(label)
@@ -228,10 +244,20 @@ enum ConversationToolbar {
 /// composer, the way Return enters a mailbox's message list in Mail.
 @MainActor final class SidebarTableView: NSTableView {
     var onActivate: (() -> Void)?
+    /// The arrow keys, Page Up/Down or type-select moved the selection.
+    var onKeyboardSelection: (() -> Void)?
+    var onMouseSelection: ((Int?) -> Void)?
+    override func mouseDown(with event: NSEvent) {
+        onMouseSelection?(row(at: convert(event.locationInWindow, from: nil)))
+        defer { onMouseSelection?(nil) }
+        super.mouseDown(with: event)
+    }
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         if [36, 76].contains(event.keyCode), modifiers.isEmpty, selectedRow >= 0 { onActivate?(); return }
+        let before = selectedRow
         super.keyDown(with: event)
+        if selectedRow != before, selectedRow >= 0 { onKeyboardSelection?() }
     }
 }
 
@@ -268,6 +294,17 @@ struct SidebarItem {
     var channel: RavenChannel? { if case .conversation(let channel) = kind { return channel }; return nil }
     var isHeader: Bool { if case .header = kind { return true }; return false }
     var isHome: Bool { if case .home = kind { return true }; return false }
+
+    /// What a selection on this row stands for, which survives a reload
+    /// that moves the row. Headers cannot be selected.
+    enum Target: Equatable { case home, conversation(String) }
+    var target: Target? {
+        switch kind {
+        case .home: return .home
+        case .conversation(let channel): return .conversation(channel.id)
+        case .header: return nil
+        }
+    }
 }
 
 extension SidebarConversationCell.Model {
@@ -305,9 +342,11 @@ extension SidebarConversationCell.Model {
             stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
+        // Expose the two meaningful children without the decorative icon.
+        remove.setAccessibilityLabel("Remove \(filename)")
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("Attachment \(filename)")
+        setAccessibilityChildren([name, remove])
     }
     required init?(coder: NSCoder) { fatalError() }
     override func viewDidChangeEffectiveAppearance() {
@@ -458,7 +497,14 @@ extension ConversationWindow {
         sidebar.addTableColumn(column); sidebar.headerView = nil; sidebar.style = .sourceList; sidebar.rowSizeStyle = .default
         sidebar.floatsGroupRows = false; sidebar.delegate = self; sidebar.dataSource = self; sidebar.target = self; sidebar.action = #selector(selectedSidebar)
         sidebar.doubleAction = #selector(openSidebarRowInNewWindow(_:))
-        sidebar.onActivate = { [weak self] in guard let self, self.composer.isEditable else { return }; self.window?.makeFirstResponder(self.composer) }
+        sidebar.onActivate = { [weak self] in
+            guard let self else { return }
+            self.openSidebarSelection()
+            guard self.composer.isEditable else { return }
+            self.window?.makeFirstResponder(self.composer)
+        }
+        sidebar.onKeyboardSelection = { [weak self] in self?.openSidebarSelectionSoon() }
+        sidebar.onMouseSelection = { [weak self] row in self?.trackSidebarClick(row: row) }
         sidebar.setAccessibilityLabel("Conversations")
         let menu = NSMenu(title: "Sidebar"); menu.delegate = self; sidebar.menu = menu
         sidebarScroll.documentView = sidebar; sidebarScroll.hasVerticalScroller = true; sidebarScroll.autohidesScrollers = true; sidebarScroll.drawsBackground = false
@@ -529,6 +575,7 @@ extension ConversationWindow {
             self.chooseReaction(for: message)
         }
         transcript.onUserSelection = { [weak self] in self?.updateMessageHighlight() }
+        transcript.onReplyQuotePress = { [weak self] id in self?.showQuotedMessage(id) }
         transcript.pressDidEnd = { [weak self] in self?.renderAfterPressIfNeeded() }
         transcript.onTypeToCompose = { [weak self] event in self?.typeToCompose(event) ?? false }
         transcriptScroll.documentView = transcript; transcriptScroll.hasVerticalScroller = true; transcriptScroll.autohidesScrollers = true
@@ -546,13 +593,19 @@ extension ConversationWindow {
         jumpLatestButton.setAccessibilityLabel("Jump to latest messages")
         jumpLatestButton.toolTip = "Show the latest loaded messages and refresh this conversation."
         jumpLatestButton.isHidden = true
+        threadInspectorHiddenButton.target = self; threadInspectorHiddenButton.action = #selector(openThreadInspectorInWindow(_:))
+        threadInspectorHiddenButton.bezelStyle = .glass
+        threadInspectorHiddenButton.image = NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: nil); threadInspectorHiddenButton.imagePosition = .imageLeading
+        threadInspectorHiddenButton.setAccessibilityLabel("Open the hidden thread inspector in its own window")
+        threadInspectorHiddenButton.toolTip = "The window is too narrow for the thread inspector. Open the thread in its own window (⌥⌘I)."
+        threadInspectorHiddenButton.isHidden = true
         earlierProgress.style = .spinning; earlierProgress.controlSize = .small; earlierProgress.isDisplayedWhenStopped = false
         earlierProgress.setAccessibilityLabel("Loading earlier messages")
         let emptyTitle = NSTextField(labelWithString: Self.noAccountTitle); emptyTitle.font = .preferredFont(forTextStyle: .title2); emptyTitle.textColor = .tertiaryLabelColor
         let emptyDetail = NSTextField(labelWithString: Self.noAccountDetail); emptyDetail.textColor = .tertiaryLabelColor
         emptyConversation.setViews([emptyTitle, emptyDetail], in: .center); emptyConversation.orientation = .vertical; emptyConversation.spacing = 6
         // The ink overlay is last: words in flight pass over the composer glass.
-        for view in [themeBackdrop, transcriptScroll, home, searchView, bar, jumpLatestButton, earlierProgress, emptyConversation, ink.overlay, stickers.overlay] { view.translatesAutoresizingMaskIntoConstraints = false; chat.addSubview(view) }
+        for view in [themeBackdrop, transcriptScroll, dayPill, home, searchView, bar, jumpLatestButton, threadInspectorHiddenButton, earlierProgress, emptyConversation, ink.overlay, stickers.overlay] { view.translatesAutoresizingMaskIntoConstraints = false; chat.addSubview(view) }
         NSLayoutConstraint.activate([
             searchView.topAnchor.constraint(equalTo: chat.topAnchor),
             searchView.leadingAnchor.constraint(equalTo: chat.leadingAnchor),
@@ -583,11 +636,18 @@ extension ConversationWindow {
             bar.bottomAnchor.constraint(equalTo: chat.bottomAnchor, constant: -14),
             jumpLatestButton.centerXAnchor.constraint(equalTo: chat.centerXAnchor),
             jumpLatestButton.bottomAnchor.constraint(equalTo: bar.topAnchor, constant: -10),
+            threadInspectorHiddenButton.topAnchor.constraint(equalTo: chat.safeAreaLayoutGuide.topAnchor, constant: 8),
+            threadInspectorHiddenButton.trailingAnchor.constraint(equalTo: chat.trailingAnchor, constant: -14),
             emptyConversation.centerXAnchor.constraint(equalTo: chat.centerXAnchor),
             emptyConversation.centerYAnchor.constraint(equalTo: chat.centerYAnchor),
+            dayPill.topAnchor.constraint(equalTo: chat.safeAreaLayoutGuide.topAnchor, constant: 8),
             earlierProgress.centerXAnchor.constraint(equalTo: chat.centerXAnchor),
             earlierProgress.topAnchor.constraint(equalTo: chat.safeAreaLayoutGuide.topAnchor, constant: 8)
         ])
+        // Follows the transcript's own day pills, which center on the text column.
+        let dayPillCenter = dayPill.centerXAnchor.constraint(equalTo: chat.leadingAnchor, constant: 0)
+        dayPillCenter.isActive = true
+        self.dayPillCenter = dayPillCenter
         return chat
     }
 
@@ -605,6 +665,13 @@ extension ConversationWindow {
         composer.onPasteError = { [weak self] message in self?.status.stringValue = message }
         mentionPopover.onChoose = { [weak self] candidate, query in self?.insertMention(candidate, query: query) }
         linkPreview.onChange = { [weak self] in self?.showLinkPreview() }
+        linkPreviewCard.onDismiss = { [weak self] in self?.linkPreview.dismiss() }
+        linkPreviewCard.onOpen = { url in
+            // The loader only ever returns policy-eligible addresses; check
+            // again at the moment of opening.
+            guard ["https", "http"].contains(url.scheme?.lowercased() ?? ""), url.user == nil else { return }
+            NSWorkspace.shared.open(url)
+        }
         composer.onImage = { [weak self] data, ext in
             guard let self, self.composer.isEditable, self.editing == nil, self.session != nil, self.channel != nil else { return }
             do {
@@ -861,7 +928,7 @@ extension ConversationWindow {
         let access: RavenPortrait.ChannelAccess? = channel.isDM || channel.raw["is_thread"].bool ? nil : (channel.raw["type"].string == "Private" ? .privateChannel : .standard)
         let tooltip = [access == .privateChannel ? "Private channel" : nil, presence, channel.workspace.isEmpty ? nil : channel.workspace, channel.raw["channel_description"].string].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         let portrait = sidebarAvatarUserID(for: channel).flatMap { session?.avatarImage(for: $0) } ?? session?.channelAvatarImage(for: channel)
-        return .init(title: channel.title, symbolName: symbol, unread: unread, muted: channel.raw["muted"].bool, archived: channel.raw["is_archived"].bool, presence: presence, tooltip: tooltip, bird: unkindness.bird(for: channel), photo: portrait, channelAccess: access)
+        return .init(title: channel.title, symbolName: symbol, unread: unread, muted: channel.raw["muted"].bool, archived: channel.raw["is_archived"].bool, presence: presence, tooltip: tooltip, bird: unkindness.bird(for: channel), photo: portrait, channelAccess: access, draft: channel.id != self.channel?.id && session?.draftChannelIDs.contains(channel.id) == true)
     }
 
     func unreadCount(_ channelID: String) -> Int {
@@ -886,9 +953,28 @@ extension ConversationWindow {
             return
         }
         guard menu === sidebar.menu else { return }
+        populateSidebarMenu(menu, row: sidebar.clickedRow)
+    }
+
+    /// The sidebar's context menu for a row (-1 for the space below the
+    /// rows). Home offers its customization; a heading or empty space
+    /// offers the commands that add to the sidebar, so no right-click
+    /// opens an empty menu.
+    func populateSidebarMenu(_ menu: NSMenu, row: Int) {
         menu.removeAllItems()
-        let row = sidebar.clickedRow
-        guard sidebarItems.indices.contains(row), let target = sidebarItems[row].channel else { return }
+        let item = sidebarItems.indices.contains(row) ? sidebarItems[row] : nil
+        guard let target = item?.channel else {
+            func addShell(_ title: String, _ action: Selector, target: AnyObject) { menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = target }
+            if item?.isHome == true {
+                addShell("Customize Home…", #selector(customizeHome(_:)), target: self)
+                return
+            }
+            addShell("New Message…", #selector(AppDelegate.newMessage(_:)), target: app)
+            addShell("New Channel…", #selector(createChannel(_:)), target: self)
+            menu.addItem(.separator())
+            addShell("Show Archived Conversations", #selector(toggleArchivedChannels(_:)), target: self)
+            return
+        }
         func add(_ title: String, _ action: Selector) {
             let item = menu.addItem(withTitle: title, action: action, keyEquivalent: ""); item.target = self; item.representedObject = target
         }
@@ -907,8 +993,8 @@ extension ConversationWindow {
         let row = sidebar.clickedRow >= 0 ? sidebar.clickedRow : sidebar.selectedRow
         return sidebarItems.indices.contains(row) ? sidebarItems[row].channel : nil
     }
-    @objc func openSidebarRowInNewWindow(_ sender: Any?) { guard let session, let target = sidebarTarget(sender) else { return }; app.open(session: session, channel: target) }
-    @objc func openSidebarRowInNewTab(_ sender: Any?) { guard let session, let target = sidebarTarget(sender) else { return }; app.openTab(beside: self, session: session, channel: target) }
+    @objc func openSidebarRowInNewWindow(_ sender: Any?) { guard let session, let target = sidebarTarget(sender) else { return }; cancelSidebarKeyboardOpen(); app.open(session: session, channel: target) }
+    @objc func openSidebarRowInNewTab(_ sender: Any?) { guard let session, let target = sidebarTarget(sender) else { return }; cancelSidebarKeyboardOpen(); app.openTab(beside: self, session: session, channel: target) }
     @objc func toggleSidebarRowFavorite(_ sender: Any?) { guard let target = sidebarTarget(sender) else { return }; toggleFavorite(for: target) }
     @objc func toggleSidebarRowMute(_ sender: Any?) { guard let target = sidebarTarget(sender) else { return }; toggleMute(for: target) }
     @objc func markSidebarRowUnread(_ sender: Any?) { guard let session, let target = sidebarTarget(sender) else { return }; action { try await session.markUnread(channelID: target.id) } }
@@ -922,7 +1008,9 @@ extension ConversationWindow {
     }
 
     /// Selects the next or previous conversation in sidebar order, optionally
-    /// skipping read ones (Go ▸ Next Unread Conversation).
+    /// skipping read ones (Go ▸ Next and Previous Unread Conversation). The
+    /// unread commands wrap around the sidebar, so either direction reaches
+    /// every unread conversation; the plain ones stop at the ends.
     func selectAdjacentConversation(forward: Bool, unreadOnly: Bool) {
         let candidates = sidebarItems.indices.filter { index in
             guard let channel = sidebarItems[index].channel else { return false }
@@ -931,7 +1019,7 @@ extension ConversationWindow {
         guard !candidates.isEmpty else { NSSound.beep(); return }
         let current = sidebarItems.firstIndex { $0.channel?.id == channel?.id }
         let next: Int?
-        if let current { next = forward ? candidates.first { $0 > current } ?? (unreadOnly ? candidates.first : nil) : candidates.last { $0 < current } }
+        if let current { next = forward ? candidates.first { $0 > current } ?? (unreadOnly ? candidates.first : nil) : candidates.last { $0 < current } ?? (unreadOnly ? candidates.last : nil) }
         else { next = forward ? candidates.first : candidates.last }
         guard let next, let destination = sidebarItems[next].channel else { NSSound.beep(); return }
         sidebar.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false); sidebar.scrollRowToVisible(next)
@@ -940,6 +1028,7 @@ extension ConversationWindow {
     @objc func nextConversation(_ sender: Any?) { selectAdjacentConversation(forward: true, unreadOnly: false) }
     @objc func previousConversation(_ sender: Any?) { selectAdjacentConversation(forward: false, unreadOnly: false) }
     @objc func nextUnreadConversation(_ sender: Any?) { selectAdjacentConversation(forward: true, unreadOnly: true) }
+    @objc func previousUnreadConversation(_ sender: Any?) { selectAdjacentConversation(forward: false, unreadOnly: true) }
 
     /// Space in the transcript. On a message with a file it opens Quick
     /// Look, as before. Otherwise it reads on, as Space does in Mail and
@@ -1082,10 +1171,11 @@ extension ConversationWindow {
         add("Open Thread in New Window", #selector(openThreadWindow(_:)))
         add("React…", #selector(react(_:)))
         menu.addItem(.separator())
-        add("Save for Later", #selector(saveForLater(_:)))
-        add("Pin / Unpin", #selector(pin(_:)))
+        add(Self.saveTitle(saved: MessageMarks.isSaved(message, by: session.account.user)), #selector(saveForLater(_:)))
+        add(Self.pinTitle(pinned: isPinned(message)), #selector(pin(_:)))
         add("Remind Me…", #selector(remind(_:)))
         add("Forward…", #selector(forward(_:)))
+        add("Copy Text", #selector(copyMessageText(_:)))
         add("Copy Link", #selector(copyMessageLink(_:)))
         if message.raw["file"].string?.isEmpty == false {
             menu.addItem(.separator())
@@ -1188,7 +1278,7 @@ extension ConversationWindow {
         case .nevermoreInbox: item.label = "Inbox"; item.image = symbol("tray", "Inbox"); item.action = #selector(inbox); item.toolTip = "Mentions and activity (⌘1)"
         case .nevermoreThreads: item.label = "Threads"; item.image = symbol("bubble.left.and.text.bubble.right", "Threads"); item.action = #selector(threads); item.toolTip = "Threads you follow (⌘2)"
         case .nevermoreAttach: item.label = "Attach Files"; item.image = symbol("paperclip", "Attach Files"); item.action = #selector(attachFiles(_:))
-        case .nevermoreThreadInspector: item.label = "Thread"; item.image = symbol("sidebar.right", "Thread Inspector"); item.action = #selector(toggleThreadInspector(_:)); item.toolTip = "Show or hide the thread inspector (⌥⌘I)"
+        case .nevermoreThreadInspector: item.label = "Thread"; item.image = symbol("sidebar.right", "Thread Inspector"); item.action = #selector(toggleThreadInspector(_:)); item.toolTip = inspectorCollapsedByWidth ? "Open the hidden thread in its own window (⌥⌘I)" : "Show or hide the thread inspector (⌥⌘I)"
         case .nevermoreOutbox: item.label = "Outbox"; item.image = symbol("tray.and.arrow.up", "Outbox"); item.action = #selector(outbox); item.toolTip = "Queued sends (⌘6)"
         default: return nil
         }
@@ -1224,7 +1314,7 @@ extension ConversationWindow {
         case #selector(goForward): return navigation.canGoForward
         case #selector(goHome(_:)), #selector(customizeHome(_:)), #selector(inbox), #selector(threads), #selector(showSavedMessages(_:)), #selector(showReminders(_:)), #selector(showScheduledMessages(_:)), #selector(outbox):
             return hasSession
-        case #selector(nextConversation(_:)), #selector(previousConversation(_:)), #selector(nextUnreadConversation(_:)):
+        case #selector(nextConversation(_:)), #selector(previousConversation(_:)), #selector(nextUnreadConversation(_:)), #selector(previousUnreadConversation(_:)):
             return sidebarItems.contains { $0.channel != nil }
         case #selector(toggleFavorite(_:)):
             item.title = channel.map { session?.favoriteIDs.contains($0.id) == true } == true ? "Remove from Favorites" : "Add to Favorites"
@@ -1233,6 +1323,8 @@ extension ConversationWindow {
         case #selector(newConversationTab(_:)): return hasSession
         case #selector(attachFiles(_:)): return composer.isEditable && editing == nil && channel != nil && !isArchivedConversation
         case #selector(saveForLater(_:)), #selector(pin(_:)), #selector(remind(_:)), #selector(react(_:)), #selector(openThread(_:)), #selector(openThreadWindow(_:)), #selector(forward(_:)):
+            if action == #selector(saveForLater(_:)) { item.title = Self.saveTitle(saved: selectedMessage.map { MessageMarks.isSaved($0, by: session?.account.user ?? "") } == true) }
+            if action == #selector(pin(_:)) { item.title = Self.pinTitle(pinned: selectedMessage.flatMap(isPinned)) }
             return writable && selectedMessage != nil && (action == #selector(saveForLater(_:)) || action == #selector(remind(_:)) || action == #selector(forward(_:)) || !isArchivedConversation)
         case #selector(deleteMessage(_:)), #selector(editMessage(_:)):
             return writable && composer.isEditable && selectedMessage != nil && selectedMessage?.owner == session?.account.user && !isArchivedConversation
@@ -1248,7 +1340,7 @@ extension ConversationWindow {
         case #selector(saveSearch(_:)): return hasSession && isSearching && SavedSearchStore.load(session?.account.id ?? UUID()).count < SavedSearchStore.limit
         case #selector(chooseConversation(_:)): return session.map { !$0.stopped } ?? true
         case #selector(toggleThreadInspector(_:)):
-            item.title = threadInspector == nil ? "Show Thread Inspector" : "Hide Thread Inspector"
+            item.title = inspectorCollapsedByWidth ? "Open Thread in Window" : (threadInspector == nil || fileInspector != nil ? "Show Thread Inspector" : "Hide Thread Inspector")
             return threadInspector != nil || selectedMessage != nil
         case #selector(toggleCompactMessages(_:)):
             item.state = UserDefaults.standard.bool(forKey: "compactMessages") ? .on : .off
@@ -1260,7 +1352,7 @@ extension ConversationWindow {
         case #selector(smallerText(_:)): let size = UserDefaults.standard.double(forKey: "fontSize"); return size == 0 || size > 11
         case #selector(loadEarlier): return hasSession && !messages.isEmpty
         case #selector(showInParentChannel(_:)): return channel?.raw["parent_channel_id"].string != nil
-        case #selector(copyTranscript(_:)): return hasSession && !messages.isEmpty
+        case #selector(copyTranscript(_:)): return canCopyDisplayedTranscript
         case #selector(clearAttachments): return composer.isEditable && (!attachments.isEmpty || !promisedReceives.isEmpty)
         case #selector(schedule(_:)): return writable && channel != nil && composer.isEditable && attachments.isEmpty && !activeComposer.string.isEmpty && !isArchivedConversation
         case #selector(createPoll(_:)): return writable && channel != nil && !isArchivedConversation && pollCreationTask == nil

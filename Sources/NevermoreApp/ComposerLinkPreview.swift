@@ -19,6 +19,9 @@ import NevermoreCore
 
     /// The address the card is for, loaded or still loading.
     private var target: URL?
+    /// The link whose card the reader dismissed. The card stays hidden while
+    /// the draft's first eligible link is this one; a different link clears it.
+    private var dismissedTarget: URL?
     private var task: Task<Void, Never>?
 
     /// A link whose text is being edited changes with every key; the page
@@ -29,9 +32,34 @@ import NevermoreCore
     private nonisolated static let maximumImageSide = 12_000
     private nonisolated static let maximumImagePixels = 40_000_000
 
+    /// Hide the card for the current link. It reappears when the draft's
+    /// first eligible link changes.
+    func dismiss() {
+        guard let target else { return }
+        dismissedTarget = target
+        task?.cancel()
+        task = nil
+        if content != nil {
+            content = nil
+            onChange?()
+        }
+    }
+
     /// Show the first eligible link in the current draft.
     func update(links: [URL], loader: (any LinkPreviewLoading)?, draft: String) {
         let wanted = ComposerPreferences.showsLinkPreviews && loader != nil ? links.first : nil
+        if wanted == dismissedTarget {
+            // Dismissed: keep the card hidden for this link.
+            target = wanted
+            task?.cancel()
+            task = nil
+            if content != nil {
+                content = nil
+                onChange?()
+            }
+            return
+        }
+        if wanted != target { dismissedTarget = nil }
         guard wanted != target else { return }
 
         target = wanted
@@ -97,12 +125,19 @@ struct DemoLinkPreviews: LinkPreviewLoading {
     func imageData(for url: URL) async -> Data? { nil }
 }
 
-/// The preview of one link, shown above the composer's text.
+/// The preview of one link, shown above the composer's text. Clicking the
+/// card opens the link in the browser; the small button dismisses the card
+/// until the draft's first eligible link changes.
 @MainActor final class LinkPreviewCard: NSView {
     private let picture = NSImageView()
     private let title = NSTextField(labelWithString: "")
     private let summary = NSTextField(wrappingLabelWithString: "")
     private let site = NSTextField(labelWithString: "")
+    private let dismissButton = NSButton(image: NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Dismiss link preview")!, target: nil, action: nil)
+    /// Opens the previewed link. Nil scheme-checked by the caller.
+    var onOpen: ((URL) -> Void)?
+    var onDismiss: (() -> Void)?
+    private var url: URL?
 
     /// How strongly the card wants its preferred width. The split view
     /// holds its panes at 250 and above, a divider drag has 490, and the
@@ -158,6 +193,14 @@ struct DemoLinkPreviews: LinkPreviewLoading {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
+        dismissButton.isBordered = false
+        dismissButton.controlSize = .small
+        dismissButton.bezelStyle = .circular
+        dismissButton.target = self
+        dismissButton.action = #selector(dismissPressed)
+        dismissButton.setAccessibilityLabel("Dismiss link preview")
+        dismissButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(dismissButton)
         // The card's size is pinned to its content with required
         // constraints. A stack view's edge insets are only preferences,
         // and the composer bar would squeeze them.
@@ -166,17 +209,26 @@ struct DemoLinkPreviews: LinkPreviewLoading {
             content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.padding + 1),
             content.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding),
             content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.padding),
-            content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padding),
+            content.trailingAnchor.constraint(equalTo: dismissButton.leadingAnchor, constant: -4),
+            dismissButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padding),
+            dismissButton.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding),
+            dismissButton.widthAnchor.constraint(equalToConstant: 18),
+            dismissButton.heightAnchor.constraint(equalToConstant: 18),
         ])
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    @objc private func dismissPressed() { onDismiss?() }
+    override func mouseDown(with event: NSEvent) { if let url { onOpen?(url) } }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+
     /// Everything shown is plain text taken from the page; none of it is
     /// interpreted as markup.
     func show(_ content: ComposerLinkPreview.Content) {
         let preview = content.preview
+        url = preview.url
         title.stringValue = preview.title
         summary.stringValue = preview.summary
         summary.isHidden = preview.summary.isEmpty
@@ -185,6 +237,7 @@ struct DemoLinkPreviews: LinkPreviewLoading {
         picture.isHidden = content.image == nil
         toolTip = preview.url.absoluteString
         setAccessibilityLabel("Link preview: \(preview.title), \(site.stringValue)")
+        setAccessibilityCustomActions([NSAccessibilityCustomAction(name: "Open link in browser", handler: { [weak self] in self?.onOpen?(preview.url); return true })])
     }
 
     /// The host of the address as written always shows, so a page cannot

@@ -26,6 +26,7 @@ public enum StatusLocalization {
         case outboxPermissionReview = "outbox.error.permission_review"
         case outboxOldReview = "outbox.error.old_review"
         case outboxAcknowledgementReview = "outbox.error.acknowledgement_review"
+        case outboxGifReview = "outbox.error.gif_review"
         case invalidSite = "error.protocol.invalid_site"
         case network = "error.protocol.transport"
         case oauth = "error.protocol.oauth"
@@ -93,7 +94,7 @@ public enum StatusLocalization {
         case .oauth(let code): return value(.oauth, code)
         case .unauthorized: return value(.unauthorized)
         case .invalidResponse: return value(.invalidResponse)
-        case .resourceLimit: return value(.resourceLimit)
+        case .resourceLimit(let bytes): return value(.resourceLimit, RavenError.formattedResourceLimit(bytes, locale: locale))
         case .crossOrigin: return value(.crossOrigin)
         case .keychain(let status): return value(.keychain, String(status))
         case .http(let status, let kind):

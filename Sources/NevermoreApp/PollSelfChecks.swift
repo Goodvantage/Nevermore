@@ -82,8 +82,14 @@ import RavenProtocol
         editor.question.stringValue = "Fixture"; editor.options.string = "One\nTwo\nThree"
         editor.multiple.state = .on; editor.limit.selectItem(at: 3); editor.accept()
         results.append(("poll editor rejects a finite limit equal to the option count", !editor.status.stringValue.isEmpty))
-        editor.multiple.state = .off; editor.timed.state = .on; editor.deadline.dateValue = .distantPast; editor.accept()
+        editor.multiple.state = .off
+        let minBeforeToggle = editor.deadline.minDate
+        editor.timed.performClick(nil)
+        editor.deadline.dateValue = .distantPast
+        let minRefreshed = editor.deadline.minDate.map { $0 > (minBeforeToggle ?? .distantPast) } ?? false
+        editor.accept()
         results.append(("poll editor rejects a closing time in the past", editor.status.stringValue.contains("future")))
+        results.append(("timed toggle refreshes the picker minimum", minRefreshed))
         editor.cancel()
         parent.makeKeyAndOrderFront(nil)
         let pending = Task { try await PollEditorSheet.create(on: parent, timeZone: .gmt) }

@@ -1,6 +1,7 @@
 import AppKit
 import NevermoreCore
 import RavenProtocol
+import SQLite3
 
 /// Hidden-window checks using disposable stores. No live account registration
 /// or text-input event is used; receipt transports are stopped or invalidated
@@ -158,6 +159,144 @@ import RavenProtocol
         }
         let invalidVisits = try await invalidReceipt.store.visits()
         check("malformed and response-sized read timestamps never enter memory or pending visits", invalidReceipt.lastSeen.isEmpty && invalidVisits.isEmpty)
+        // A local watermark write can fail. The observation must stay
+        // retryable: arm a trigger that aborts visits writes, then drop it, so
+        // the same disposable store is failed and restored without credentials.
+        let retryDirectory = directory.appendingPathComponent("VisitRetry")
+        let retryAccount = Account(origin: URL(string: "http://127.0.0.1:12345")!, user: "performance-fixture@example.invalid", siteName: "Receipt fixture", clientID: "performance-loopback")
+        let retryReceipt = try AccountSession(account: retryAccount, directory: retryDirectory, authentication: .loopbackFixture)
+        defer { retryReceipt.stop() }
+        func setVisitFailure(_ timestamp: String?) throws {
+            var db: OpaquePointer?
+            let path = retryDirectory.appendingPathComponent(AccountStore.databaseFileName).path
+            let opened = sqlite3_open(path, &db)
+            defer { sqlite3_close(db) }
+            guard opened == SQLITE_OK else { throw AppError.message("Could not open the visit fixture store.") }
+            let sql = timestamp.map { "CREATE TRIGGER fail_visits BEFORE INSERT ON visits WHEN NEW.timestamp = '\($0)' BEGIN SELECT RAISE(ABORT, 'simulated local write failure'); END" } ?? "DROP TRIGGER IF EXISTS fail_visits"
+            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw AppError.message("Could not change the visit fixture store.") }
+        }
+        let retryChannel = "visit-retry-fixture"
+        func queuedVisit() async throws -> String? { try await retryReceipt.store.visits()[retryChannel] }
+        try setVisitFailure(nil)
+        await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:00:00")
+        let durableVisit = try await queuedVisit()
+        check("a durable visit watermark queues before the store can fail", retryReceipt.lastSeen[retryChannel] == "2026-11-08 12:00:00" && durableVisit == "2026-11-08 12:00:00")
+        try setVisitFailure("2026-11-08 12:01:00")
+        await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:01:00")
+        let failedVisit = try await queuedVisit()
+        check("a failed local watermark write leaves the same message observable", retryReceipt.lastSeen[retryChannel] == "2026-11-08 12:00:00" && failedVisit == "2026-11-08 12:00:00")
+        try setVisitFailure(nil)
+        await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:01:00")
+        let retriedVisit = try await queuedVisit()
+        check("a restored store queues the retried watermark", retryReceipt.lastSeen[retryChannel] == "2026-11-08 12:01:00" && retriedVisit == "2026-11-08 12:01:00")
+        await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 11:59:00")
+        let olderVisit = try await queuedVisit()
+        check("an older observation never moves the queued watermark back", retryReceipt.lastSeen[retryChannel] == "2026-11-08 12:01:00" && olderVisit == "2026-11-08 12:01:00")
+        // A newer observation after the failure still advances, and an older
+        // one stays rejected.
+        try setVisitFailure("2026-11-08 12:02:00")
+        await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:02:00")
+        try setVisitFailure(nil)
+        await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:03:00")
+        await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:02:00")
+        let newerVisit = try await queuedVisit()
+        check("a failed older write does not block a newer observation", retryReceipt.lastSeen[retryChannel] == "2026-11-08 12:03:00" && newerVisit == "2026-11-08 12:03:00")
+        // Explicit Mark as Unread invalidates the queued watermark and the
+        // in-memory one, and is not undone by the earlier failed write.
+        try? await retryReceipt.markUnread(channelID: retryChannel)
+        let unreadVisit = try await queuedVisit()
+        check("explicit Mark as Unread invalidates the queued and remembered watermark", retryReceipt.intentionallyUnread.contains(retryChannel) && retryReceipt.lastSeen[retryChannel] == nil && unreadVisit == nil)
+        await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:03:00")
+        let rejectedVisit = try await queuedVisit()
+        check("an explicitly unread conversation rejects a late read receipt", retryReceipt.lastSeen[retryChannel] == nil && rejectedVisit == nil)
+        retryReceipt.intentionallyUnread.remove(retryChannel)
+        await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:03:00")
+        let settledVisit = try await queuedVisit()
+        check("reopening the conversation lets the watermark settle again", retryReceipt.lastSeen[retryChannel] == "2026-11-08 12:03:00" && settledVisit == "2026-11-08 12:03:00")
+        // Mark as Unread can land while a write is still failing. Its
+        // invalidation must survive the failure report.
+        try setVisitFailure("2026-11-08 12:04:00")
+        let failingWhileUnread = Task { await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:04:00") }
+        await Task.yield()
+        try? await retryReceipt.markUnread(channelID: retryChannel)
+        await failingWhileUnread.value
+        let unreadDuringFailure = try await queuedVisit()
+        check("an explicit Mark as Unread during a failed write is not undone", retryReceipt.intentionallyUnread.contains(retryChannel) && retryReceipt.lastSeen[retryChannel] == nil && unreadDuringFailure == nil)
+        // A newer observation that lands while an older write is failing must
+        // keep its own watermark.
+        try setVisitFailure(nil)
+        retryReceipt.intentionallyUnread.remove(retryChannel)
+        await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:04:00")
+        try setVisitFailure("2026-11-08 12:05:00")
+        let failingOlder = Task { await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:05:00") }
+        await Task.yield()
+        await retryReceipt.markSeen(channelID: retryChannel, timestamp: "2026-11-08 12:06:00")
+        await failingOlder.value
+        let newerDuringFailure = try await queuedVisit()
+        check("a newer observation during a failed write keeps its watermark", retryReceipt.lastSeen[retryChannel] == "2026-11-08 12:06:00" && newerDuringFailure == "2026-11-08 12:06:00")
+
+        // Hold the writer until two observations have entered markSeen. If
+        // both fail, neither provisional timestamp can become a watermark.
+        var locked: OpaquePointer?
+        let database = retryDirectory.appendingPathComponent(AccountStore.databaseFileName).path
+        let opened = sqlite3_open(database, &locked)
+        defer { sqlite3_close(locked) }
+        guard opened == SQLITE_OK else { throw AppError.message("Could not open the overlap fixture.") }
+        func waitForStart(_ started: () -> Bool) async throws {
+            let deadline = ContinuousClock.now + .seconds(5)
+            while !started() {
+                guard ContinuousClock.now < deadline else { throw AppError.message("The read receipt fixture did not start in time.") }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+
+        let rejectBoth = "CREATE TRIGGER fail_overlap BEFORE INSERT ON visits WHEN NEW.channelID = 'overlap' BEGIN SELECT RAISE(ABORT, 'unavailable'); END"
+        guard sqlite3_exec(locked, rejectBoth, nil, nil, nil) == SQLITE_OK,
+              sqlite3_exec(locked, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { throw AppError.message("Could not hold the overlap fixture.") }
+        var started = 0
+        let writes = ["2026-11-08 13:00:00", "2026-11-08 13:01:00"].map { timestamp in
+            Task { @MainActor in
+                started += 1
+                await retryReceipt.markSeen(channelID: "overlap", timestamp: timestamp)
+            }
+        }
+        try await waitForStart { started == writes.count }
+        // These transactions only hold a writer lock. Rollback releases it
+        // even when a competing receipt still holds a shared read lock.
+        guard sqlite3_exec(locked, "ROLLBACK", nil, nil, nil) == SQLITE_OK else { throw AppError.message("Could not release the overlap fixture.") }
+        for write in writes { await write.value }
+        let overlappingVisits = try await retryReceipt.store.visits()
+        check("two overlapping failed writes leave neither watermark in memory or on disk",
+              retryReceipt.lastSeen["overlap"] == nil && overlappingVisits["overlap"] == nil)
+        guard sqlite3_exec(locked, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { throw AppError.message("Could not hold the unread fixture.") }
+        var beganVisit = false
+        let beforeUnread = Task { @MainActor in
+            beganVisit = true
+            await retryReceipt.markSeen(channelID: "barrier", timestamp: "2026-11-08 14:00:00")
+        }
+        try await waitForStart { beganVisit }
+        let unread = Task { try? await retryReceipt.markUnread(channelID: "barrier") }
+        try await waitForStart { retryReceipt.intentionallyUnread.contains("barrier") }
+        guard sqlite3_exec(locked, "ROLLBACK", nil, nil, nil) == SQLITE_OK else { throw AppError.message("Could not release the unread fixture.") }
+        await beforeUnread.value
+        await unread.value
+        let afterUnread = try await retryReceipt.store.visits()
+        check("explicit Mark as Unread drains an earlier successful local watermark write",
+              afterUnread["barrier"] == nil && retryReceipt.lastSeen["barrier"] == nil)
+        retryReceipt.flushing = true
+        let stalled = Task {
+            do { try await retryReceipt.markUnread(channelID: "stalled"); return "" }
+            catch { return error.localizedDescription }
+        }
+        let watchdog = Task {
+            try await Task.sleep(for: .seconds(7))
+            stalled.cancel()
+        }
+        let explanation = await stalled.value
+        watchdog.cancel()
+        retryReceipt.flushing = false
+        check("Mark as Unread reports a stalled read receipt and permits retry",
+              explanation.contains("Try again") && !explanation.isEmpty)
         return checks
     }
 }

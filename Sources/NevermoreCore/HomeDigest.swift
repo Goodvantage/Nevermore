@@ -11,7 +11,7 @@ public enum HomeModule: String, CaseIterable, Codable, Sendable {
         case .favorites: "Favorites"
         case .unread: "Unread"
         case .later: "Later"
-        case .people: "You Talk with Most"
+        case .people: "People You Talk With Most"
         case .week: "Your Week"
         case .threads: "Threads You Follow"
         case .files: "Recent Files"
@@ -196,6 +196,16 @@ public struct HomeWeekSummary: Equatable, Sendable {
     public var busiestHourCount: Int
 
     public var thisWeek: Int { days.reduce(0, +) }
+
+    /// The line under the week's count. Neither more nor fewer is good or
+    /// bad, so both read the same way; a count up from nothing says so
+    /// rather than calling all of it "more".
+    public var comparison: String {
+        let difference = thisWeek - previousWeek
+        if difference == 0 { return "Same as the week before" }
+        if previousWeek == 0 { return "None the week before" }
+        return "\(abs(difference)) \(difference > 0 ? "more" : "fewer") than the week before"
+    }
 
     public static let dayCount = 7
 

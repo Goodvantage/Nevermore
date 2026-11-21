@@ -82,7 +82,7 @@ class NativeUserSessionTests(unittest.TestCase):
         return status, stdout.getvalue(), stderr.getvalue()
 
     def test_runs_in_own_gui_domain_without_forwarding_secrets(self):
-        status, output, errors = self.run_main(["--polls", "--reactions", "--avatars"])
+        status, output, errors = self.run_main(["--polls", "--reactions", "--avatars", "--search"])
         self.assertEqual(status, 0, errors + output)
         self.assertEqual(self.calls[0][2], f"gui/{os.getuid()}")
         self.assertEqual(self.plist["LimitLoadToSessionType"], "Aqua")
@@ -92,6 +92,14 @@ class NativeUserSessionTests(unittest.TestCase):
         self.assertIn("PASS native attachment fixture completed", output)
         self.assertEqual(self.calls[-1][1:], ["bootout", f"gui/{os.getuid()}/{PREFIX}test"])
         self.assertFalse(self.directory.exists())
+
+    def test_forwards_the_schedule_only_fixture_into_the_gui_session(self):
+        self.app.write_text("#!/usr/bin/env python3\nimport sys\n"
+                            "assert '--schedule-only' in sys.argv and '--schedule-fixture-origin' in sys.argv\n"
+                            "print('Native schedule self-check: PASS (0 failures)')\n")
+        status, output, errors = self.run_main(["--schedule-only"])
+        self.assertEqual(status, 0, errors + output)
+        self.assertIn("Native schedule self-check: PASS", output)
 
     def test_child_failure_is_not_success(self):
         self.app.write_text("#!/usr/bin/env python3\nraise SystemExit(7)\n")

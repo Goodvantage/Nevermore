@@ -40,21 +40,82 @@ public enum MentionCompletion {
         guard query.count <= 64, !query.contains("  "), !query.hasPrefix(" "), query.unicodeScalars.allSatisfy({ CharacterSet.letters.union(.decimalDigits).union(.nonBaseCharacters).union(CharacterSet(charactersIn: " ._-'’-")).contains($0) }) else { return nil }
         return MentionQuery(kind: kind, range: range, text: query)
     }
+    /// True when the UTF-16 `location` in Markdown source lies in a fenced
+    /// code block or after an unclosed backtick run on its line, where `@`
+    /// and `#` are literal code rather than mentions. A tilde fence opened on
+    /// the caret's own line (`~~~js @al`) suppresses the mention too.
+    public static func isInsideMarkdownCode(_ source: String, at location: Int) -> Bool {
+        guard location > 0, location <= source.utf16.count else { return false }
+        var lines = String(decoding: source.utf16.prefix(location), as: UTF16.self).split(separator: "\n", omittingEmptySubsequences: false)
+        let current = lines.removeLast()
+        var fence: (marker: Character, length: Int)?
+        for line in lines {
+            let content = line.drop { $0 == " " }
+            guard line.count - content.count <= 3, let marker = content.first, marker == "`" || marker == "~" else { continue }
+            let length = content.prefix { $0 == marker }.count
+            let rest = content.dropFirst(length)
+            guard length >= 3 else { continue }
+            if let open = fence {
+                if marker == open.marker, length >= open.length, rest.allSatisfy(\.isWhitespace) { fence = nil }
+            } else if marker == "~" || !rest.contains("`") {
+                fence = (marker, length)
+            }
+        }
+        if fence != nil { return true }
+        // A tilde fence opened on the caret's own line suppresses the mention;
+        // a backtick fence there is already caught by the unclosed-run scan.
+        let content = current.drop { $0 == " " }
+        if current.count - content.count <= 3, let marker = content.first, marker == "~", content.prefix { $0 == marker }.count >= 3 {
+            return true
+        }
+        var open: Int?
+        var index = current.startIndex
+        while index < current.endIndex {
+            let character = current[index]
+            if character == "\\", open == nil {
+                index = current.index(after: index)
+                if index < current.endIndex { index = current.index(after: index) }
+                continue
+            }
+            guard character == "`" else { index = current.index(after: index); continue }
+            let run = current[index...].prefix { $0 == "`" }.count
+            if let length = open { if length == run { open = nil } } else { open = run }
+            index = current.index(index, offsetBy: run)
+        }
+        return open != nil
+    }
     public static func matches(_ candidates: [MentionCandidate], query: MentionQuery, limit: Int = 50) -> [MentionCandidate] {
-        func fold(_ value: String) -> String { value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX")) }
-        let text = fold(query.text).trimmingCharacters(in: .whitespaces), words = text.split(separator: " ").map(String.init)
+        matches(candidates, text: query.text, kind: query.kind, limit: limit)
+    }
+
+    /// The conversation chooser searches both kinds unless the reader types
+    /// a prefix. Rank the whole directory before taking the displayed rows.
+    public static func matches(_ candidates: [MentionCandidate], text: String, kind: MentionCandidate.Kind?, limit: Int = 100) -> [MentionCandidate] {
+        let locale = Locale(identifier: "en_US_POSIX")
+        func fold(_ value: String) -> String {
+            value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: locale)
+        }
+        let needle = fold(text).trimmingCharacters(in: .whitespaces)
+        let words = needle.split(separator: " ")
         var seen = Set<String>()
-        return Array(candidates.filter { candidate in
-            guard candidate.kind == query.kind, seen.insert(candidate.id).inserted else { return false }
-            let haystack = fold(candidate.title + " " + candidate.serverID + " " + candidate.detail)
-            return words.allSatisfy(haystack.contains)
-        }.sorted { left, right in
-            func rank(_ candidate: MentionCandidate) -> Int { let title = fold(candidate.title); return title.hasPrefix(text) ? 0 : title.split(separator: " ").contains(where: { $0.hasPrefix(text) }) ? 1 : 2 }
-            let a = rank(left), b = rank(right)
-            if a != b { return a < b }
-            let titleA = fold(left.title), titleB = fold(right.title)
-            if titleA != titleB { return titleA < titleB }
-            return left.id < right.id
-        }.prefix(max(0, min(limit, 100))))
+        var ranked: [(candidate: MentionCandidate, rank: Int, title: String)] = []
+        for candidate in candidates {
+            guard kind == nil || candidate.kind == kind, seen.insert(candidate.id).inserted else { continue }
+            let title = fold(candidate.title)
+            let rank: Int
+            if needle.isEmpty {
+                // Preserve channel-first browsing for an empty chooser.
+                rank = candidate.kind == .channel ? 0 : 1
+            } else {
+                let haystack = title + " " + fold(candidate.serverID + " " + candidate.detail)
+                guard words.allSatisfy(haystack.contains) else { continue }
+                if title.hasPrefix(needle) { rank = 0 }
+                else if title.split(separator: " ").contains(where: { $0.hasPrefix(needle) }) { rank = 1 }
+                else { rank = 2 }
+            }
+            ranked.append((candidate, rank, title))
+        }
+        ranked.sort { ($0.rank, $0.title, $0.candidate.id) < ($1.rank, $1.title, $1.candidate.id) }
+        return ranked.prefix(max(0, min(limit, 100))).map(\.candidate)
     }
 }

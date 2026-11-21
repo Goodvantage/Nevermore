@@ -46,3 +46,15 @@ import Testing
     #expect(channel.id == "opaque-dm")
     #expect(channel.isDM)
 }
+
+@Test func countMetadataAcceptsRepresentableNonnegativeIntegers() {
+    #expect(JSONValue.number(0).nonnegativeCount == 0)
+    #expect(JSONValue.number(42).nonnegativeCount == 42)
+    #expect(JSONValue.string("1234").nonnegativeCount == 1234)
+    #expect(JSONValue.string("42.0").nonnegativeCount == 42)
+    #expect(JSONValue.string("1e3").nonnegativeCount == 1000)
+    #expect(JSONValue.string(String(Int64.max)).nonnegativeCount == Int64.max)
+    for invalid: JSONValue in [.null, .bool(true), .number(-1), .number(1.5), .number(Double(Int64.max)), .string("1.00000000000000001"), .string("1e-9999"), .string("NaN"), .string("unknown"), .string("1.5"), .string("9223372036854775808")] {
+        #expect(invalid.nonnegativeCount == nil)
+    }
+}

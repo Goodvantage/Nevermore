@@ -60,10 +60,10 @@ extension Notification.Name {
         var messages: Part<[SearchHit]> = .idle
         var files: Part<[SearchHit]> = .idle
         var links: Part<[JSONValue]> = .idle
-        /// The Messages and Files lists come from this Mac's cache: the
-        /// server has not answered yet, failed, or there is none (the demo).
-        var fromCache = false
-        var serverError: String?
+        /// Server requests for Messages and Files are independent of the
+        /// cached rows already displayed in each tab.
+        var pendingIndexTabs: Set<SearchTab> = []
+        var indexErrors: [SearchTab: String] = [:]
         /// Why thread replies may be missing, when they may be.
         var threadNote: String?
         /// Tabs listing cached matches the server's answer lacked.
@@ -184,9 +184,12 @@ extension Notification.Name {
         guard !wanted.isEmpty else { onChange?(); return }
         // A reloaded tab's footer notes come from its new answer, not the
         // old one.
-        for tab in wanted.intersection([.messages, .files]) {
+        let indexTabs = wanted.intersection([.messages, .files])
+        results.pendingIndexTabs = session.demo ? [] : indexTabs
+        for tab in indexTabs {
             results.cacheOnly.remove(tab)
             results.serverHits.removeValue(forKey: tab)
+            results.indexErrors.removeValue(forKey: tab)
         }
         loadedTabs.formUnion(wanted)
         unfinished = wanted
@@ -211,36 +214,46 @@ extension Notification.Name {
         calendar.timeZone = TimeZone(identifier: session.account.timezone) ?? .gmt
         let now = Date()
 
+        // Matches on this Mac show at once and stay, whatever the server
+        // answers: its index can lack them. Read the cache with the thread
+        // parents this Mac already knows before asking for the thread list,
+        // so a held or slow thread list cannot hold back matches the reader
+        // already has.
+        let indexTabs = wanted.intersection([.messages, .files])
+        let usesLocalIndex = !criteria.query.isEmpty && !indexTabs.isEmpty
+        let localRows = usesLocalIndex ? (try? await session.store.search(criteria.query)) ?? [] : []
+        guard current(attempt, session) else { return }
+        let knownParents = session.threadParents
+        var cached = Cached(messages: [], files: [])
+        let loadingTabs = indexTabs.filter { $0 == .messages ? results.messages.isLoading : results.files.isLoading }
+        if usesLocalIndex {
+            cached = cachedHits(localRows, criteria: criteria, parents: knownParents, now: now, calendar: calendar, session: session)
+            showCached(cached, tabs: loadingTabs)
+            onChange?()
+        }
+
         // Thread replies in a conversation or workspace need the threads'
         // IDs; the channel list has none.
         var threadRows: [JSONValue] = []
+        var parents = knownParents
         if criteria.scopeHasThreads, criteria.includeThreads, wanted.contains(.messages) || wanted.contains(.files), !session.demo {
             let (rows, note) = await threads(for: criteria.scope, session: session)
             guard current(attempt, session) else { return }
             threadRows = rows
             results.threadNote = note
+            parents = session.threadParents.merging(SearchThreads.parents(rows)) { _, fetched in fetched }
+            if usesLocalIndex, parents != knownParents {
+                cached = cachedHits(localRows, criteria: criteria, parents: parents, now: now, calendar: calendar, session: session)
+                showCached(cached, tabs: loadingTabs)
+                if !loadingTabs.isEmpty { onChange?() }
+            }
         }
-        let parents = session.threadParents.merging(SearchThreads.parents(threadRows)) { _, fetched in fetched }
         let threadIDs = SearchThreads.ids(threadRows, parents: Self.parents(of: criteria.scope, session: session))
-
-        // Matches on this Mac show at once and stay, whatever the server
-        // answers: its index can lack them.
-        let indexTabs = wanted.intersection([.messages, .files])
-        var cached = Cached(messages: [], files: [])
-        if !criteria.query.isEmpty, !indexTabs.isEmpty {
-            cached = await cachedHits(criteria, parents: parents, now: now, calendar: calendar, session: session)
-            guard current(attempt, session) else { return }
-            if indexTabs.contains(.messages), results.messages.isLoading { results.messages = .loaded(cached.messages) }
-            if indexTabs.contains(.files), results.files.isLoading { results.files = .loaded(cached.files) }
-            results.fromCache = true
-            onChange?()
-        }
 
         if session.demo {
             if results.messages.isLoading { results.messages = .loaded([]) }
             if results.files.isLoading { results.files = .loaded([]) }
             if wanted.contains(.links) { results.links = .failed("The local demo has no server to search links on.") }
-            results.fromCache = true
             onChange?()
             return
         }
@@ -248,7 +261,6 @@ extension Notification.Name {
         let client = session.client
         let user = session.account.user
         async let links: Part<[JSONValue]> = wanted.contains(.links) ? Self.links(criteria.on(.links), client: client) : .idle
-        var messageError: String?
         var filesDerived = false
         if wanted.contains(.messages) {
             let messageCriteria = criteria.on(.messages)
@@ -267,9 +279,12 @@ extension Notification.Name {
                 }
             } catch {
                 guard current(attempt, session) else { return }
-                messageError = StatusLocalization.errorDescription(error)
-                if results.messages.isLoading { results.messages = .failed(messageError ?? "") }
+                let message = StatusLocalization.errorDescription(error)
+                results.indexErrors[.messages] = message
+                if results.messages.value?.isEmpty != false { results.messages = .failed(message) }
             }
+            results.pendingIndexTabs.remove(.messages)
+            if filesDerived { results.pendingIndexTabs.remove(.files) }
             onChange?()
         }
         if wanted.contains(.files), !filesDerived {
@@ -282,12 +297,12 @@ extension Notification.Name {
                 results.files = .loaded(merged(hits, cached.files, tab: .files))
             } catch {
                 guard current(attempt, session) else { return }
-                messageError = messageError ?? StatusLocalization.errorDescription(error)
-                if results.files.isLoading { results.files = .failed(messageError ?? "") }
+                let message = StatusLocalization.errorDescription(error)
+                results.indexErrors[.files] = message
+                if results.files.value?.isEmpty != false { results.files = .failed(message) }
             }
+            results.pendingIndexTabs.remove(.files)
         }
-        results.serverError = messageError
-        results.fromCache = messageError != nil && !criteria.query.isEmpty
         // Files and the footer are ready; links can take longer.
         if wanted.contains(.links) { onChange?() }
         let linkResult = await links
@@ -298,6 +313,16 @@ extension Notification.Name {
             } else { results.links = linkResult }
         }
         onChange?()
+    }
+
+    /// Shows `cached` while the server search is still in flight. A tab that
+    /// already has an answer keeps it; the server's answer merges the cache.
+    /// An empty cache is not an answer: publishing `.loaded([])` would show
+    /// "No messages match" while the server is still searching, so only a tab
+    /// with hits is published and the wait continues.
+    private func showCached(_ cached: Cached, tabs: Set<SearchTab>) {
+        if tabs.contains(.messages) { results.messages = cached.messages.isEmpty ? .loading : .loaded(cached.messages) }
+        if tabs.contains(.files) { results.files = cached.files.isEmpty ? .loading : .loaded(cached.files) }
     }
 
     private struct Cached { var messages: [SearchHit]; var files: [SearchHit] }
@@ -314,8 +339,7 @@ extension Notification.Name {
     /// The cache's matches, narrowed by the same filters the server
     /// applies. Saved and mention filters need metadata the cache may lack,
     /// so cached results can be incomplete; the footer says so.
-    private func cachedHits(_ criteria: SearchCriteria, parents: [String: String], now: Date, calendar: Calendar, session: AccountSession) async -> Cached {
-        guard let cached = try? await session.store.search(criteria.query) else { return Cached(messages: [], files: []) }
+    private func cachedHits(_ cached: [RavenMessage], criteria: SearchCriteria, parents: [String: String], now: Date, calendar: Calendar, session: AccountSession) -> Cached {
         let user = session.account.user
         let known = Set(session.channels.map(\.id))
         func hits(_ criteria: SearchCriteria) -> [SearchHit] {

@@ -42,7 +42,10 @@ extension RavenClient {
             guard root["name"].string == rootID, let parent = root["channel_id"].string, !parent.isEmpty else { throw RavenError.invalidResponse }
             parents.append(parent); id = parent
         }
-        throw RavenError.resourceLimit
+        // A cycle is refused above; reaching this point means the ancestry is
+        // deeper than the contract can validate, which is a malformed
+        // response rather than a size budget.
+        throw RavenError.invalidResponse
     }
 
     private static func channelFlag(_ value: JSONValue) throws -> Bool {

@@ -25,6 +25,9 @@ import Foundation
     private let sleep: @Sendable (Duration) async throws -> Void
     private var schedule: Task<Void, Never>?
     private var request: Task<Void, Never>?
+    /// Identifies the request a finishing task belongs to. A stopped and
+    /// restarted monitor must not let a cancelled task clear a newer request.
+    private var requestToken: NSObject?
     private var manuallyRequested = false
     private var stopped = false
 
@@ -65,8 +68,19 @@ import Foundation
     public func stop() {
         stopped = true
         request?.cancel()
+        // Drop the cancelled request at once. Otherwise a check that starts
+        // after start() can join the cancelled task and return without
+        // fetching, because the task clears `request` only when it finishes.
+        request = nil
+        requestToken = nil
+        // The cancelled task bails at its token guard, so stop() must clear
+        // the observable checking state itself; otherwise a restart shows a
+        // check that is not running and keeps a stale manual request alive.
+        manuallyRequested = false
+        isChecking = false
         schedule?.cancel()
         schedule = nil
+        onChange?()
     }
 
     public func setChecksAutomatically(_ enabled: Bool) {
@@ -89,6 +103,8 @@ import Foundation
         if let request { await request.value; return }
         isChecking = true
         let fetch = self.fetch, version = runningVersion
+        let token = NSObject()
+        requestToken = token
         // The bounded request is independent of the timer: turning automatic
         // checks off must not cancel an explicit check joining the same fetch.
         // Without a manual request, opting out discards the in-flight result.
@@ -108,7 +124,11 @@ import Foundation
                 }
             }
             guard let self else { return }
+            // Only the current request tears down the shared checking state;
+            // a cancelled predecessor must leave a newer request alone.
+            guard self.requestToken === token else { return }
             request = nil
+            requestToken = nil
             manuallyRequested = false
             isChecking = false
             onChange?()

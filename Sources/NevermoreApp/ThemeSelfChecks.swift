@@ -9,6 +9,12 @@ import NevermoreCore
     static func run(app: AppDelegate, owner: ConversationWindow) async -> [(String, Bool)] {
         var checks: [(String, Bool)] = []
         func check(_ label: String, _ value: Bool) { checks.append((label, value)) }
+        func badgeIsLegible() -> Bool {
+            let fill = NSColor.themeAccent
+            guard let background = ThemeColor(nsColor: fill),
+                  let foreground = ThemeColor(nsColor: HomeAvatar.badgeTextColor(on: fill)) else { return false }
+            return foreground.contrast(with: background) >= 4.5
+        }
         let keys = ThemeManager.DefaultsKey.all
         let saved = keys.map { UserDefaults.standard.object(forKey: $0) }
         let originalTheme = ThemeManager.shared.current.id
@@ -40,6 +46,11 @@ import NevermoreCore
         if let header = firstHeader(owner) {
             check("Classic sender names keep the label color", resolved(header.nameColor, in: owner) == resolved(.labelColor, in: owner))
         } else { check("transcript has a sender header to inspect", false) }
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            NSAppearance(named: name)?.performAsCurrentDrawingAppearance {
+                check("Classic Home unread badges meet text contrast in " + name.rawValue, badgeIsLegible())
+            }
+        }
         let classicChips = chipColors(in: owner)
         check("Classic reaction chips keep the system colors",
               classicChips.mine == resolved(.controlAccentColor, in: owner) && classicChips.theirs == resolved(.secondaryLabelColor, in: owner))
@@ -50,6 +61,7 @@ import NevermoreCore
             owner.window?.contentView?.layoutSubtreeIfNeeded()
             guard let palette = theme.palette else { continue }
             let tag = theme.name
+            check(tag + " Home unread badges meet text contrast", badgeIsLegible())
             let dark = theme.tone == .dark
             check("\(tag) forces the \(dark ? "dark" : "light") appearance", NSApp.appearance?.name == (dark ? .darkAqua : .aqua))
             check("\(tag) is stored as the chosen theme", UserDefaults.standard.string(forKey: ThemeManager.DefaultsKey.theme) == theme.id.rawValue)
@@ -136,6 +148,12 @@ import NevermoreCore
 
         // Celebrations add a temporary overlay and leave nothing behind.
         if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let host = owner.contentController?.view {
+            ThemeCelebrationPlayer.play(ThemeCatalog.memphis, over: host)
+            ThemeCelebrationPlayer.play(ThemeCatalog.halloween, over: host)
+            let overlays = host.subviews.filter { $0.layer?.sublayers?.contains { $0 is CAEmitterLayer } == true }
+            check("a second celebration replaces the first instead of stacking", overlays.count == 1)
+            ThemeCelebrationPlayer.play(ThemeCatalog.classic, over: host)
+            check("a theme without a celebration retires a lingering overlay", host.subviews.filter { $0.layer?.sublayers?.contains { $0 is CAEmitterLayer } == true }.count == 0)
             ThemeCelebrationPlayer.play(ThemeCatalog.memphis, over: host)
             check("a celebration plays above the conversation", host.subviews.last?.layer?.sublayers?.contains { $0 is CAEmitterLayer } == true)
             check("a celebration takes no clicks", host.subviews.last?.hitTest(NSPoint(x: 10, y: 10)) == nil)

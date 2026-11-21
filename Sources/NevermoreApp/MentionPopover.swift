@@ -14,7 +14,9 @@ import NevermoreCore
         super.init()
         let controller = NSViewController(); let root = NSView()
         controller.view = root; popover.contentViewController = controller; popover.behavior = .semitransient; popover.animates = false
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("candidate")); table.addTableColumn(column); table.headerView = nil; table.rowHeight = 38; table.dataSource = self; table.delegate = self; table.target = self; table.action = #selector(chooseSelected)
+        // The editor drives the list by its keys. A list that accepted focus
+        // took it from the Markdown editor when the popover appeared.
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("candidate")); table.addTableColumn(column); table.headerView = nil; table.refusesFirstResponder = true; table.rowHeight = 38; table.dataSource = self; table.delegate = self; table.target = self; table.action = #selector(chooseSelected)
         table.setAccessibilityLabel("Mention suggestions"); table.allowsEmptySelection = false
         scroll.documentView = table; scroll.hasVerticalScroller = true
         heading.font = .systemFont(ofSize: 11, weight: .medium); heading.textColor = .secondaryLabelColor
@@ -24,8 +26,14 @@ import NevermoreCore
     func update(textView: NSTextView, pool: [MentionCandidate]) {
         guard textView.window?.isKeyWindow == true, textView.window?.firstResponder === textView,
               let query = MentionCompletion.query(in: textView.string, selection: textView.selectedRange(), hasMarkedText: textView.hasMarkedText()) else { close(); return }
-        if textView.selectedRange().location > 0, let font = textView.attributedString().attribute(.font, at: textView.selectedRange().location - 1, effectiveRange: nil) as? NSFont,
-           NSFontManager.shared.traits(of: font).contains(.fixedPitchFontMask) { close(); return }
+        // Code is literal: the visual composer marks it with a fixed-pitch
+        // font, while Markdown source is all fixed pitch and marks it with
+        // backticks and fences.
+        let location = textView.selectedRange().location
+        if textView.isRichText {
+            if location > 0, let font = textView.attributedString().attribute(.font, at: location - 1, effectiveRange: nil) as? NSFont,
+               NSFontManager.shared.traits(of: font).contains(.fixedPitchFontMask) { close(); return }
+        } else if MentionCompletion.isInsideMarkdownCode(textView.string, at: location) { close(); return }
         var hasSemantic = false
         textView.attributedString().enumerateAttribute(NSAttributedString.Key("Nevermore.SemanticNode"), in: query.range) { marker, _, stop in if marker != nil { hasSemantic = true; stop.pointee = true } }
         guard !hasSemantic, query != dismissed else { close(); return }

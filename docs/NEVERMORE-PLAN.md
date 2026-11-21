@@ -194,7 +194,7 @@ Use Cmd-Shift-F for search across the current account. `Open Conversation…` is
 ### 4.7 Files and system integration
 
 - `NSOpenPanel`/`NSSavePanel`, Finder drag/drop, pasteboard images, and file promises for dragging downloaded attachments back to Finder.
-- Space invokes Quick Look for a selected attachment; images can have a native preview window. PDFs and media use system frameworks where practical.
+- A click on an attachment opens the File panel beside the conversation: a live preview of passive formats, the file's details and its actions. Space invokes Quick Look for a selected attachment. A window too narrow for the panel previews in Quick Look directly. PDFs and media use system frameworks where practical.
 - Private media needs a controlled authenticated downloader/resource loader. Do not assume an arbitrary `AVPlayer` URL request inherits API authorization headers. Prove Range requests, refresh, seek, and cancellation in the integration spike.
 - Downloads are streamed to temporary files, atomically finalized, and exposed only when complete. Honor MIME/type and size limits; quarantine untrusted downloads appropriately. Never execute downloaded content or auto-open executables.
 - Reveal in Finder, Open With, Save As, Copy Link, and the system sharing menu where appropriate.

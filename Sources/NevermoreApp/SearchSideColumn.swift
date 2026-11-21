@@ -49,7 +49,7 @@ import RavenProtocol
         markThemeSubtreeNeedsDisplay()
     }
 
-    private func heading(_ title: String) -> NSView {
+    static func heading(_ title: String) -> NSView {
         let label = NSTextField(labelWithAttributedString: NSAttributedString(string: title.uppercased(), attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .bold), .foregroundColor: NSColor.themeSecondaryText, .kern: 0.6]))
         let stack = NSStackView(views: [label])
         stack.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 2, right: 0)
@@ -67,7 +67,7 @@ import RavenProtocol
         let channels = SearchView.conversations(query, session: session, limit: 4)
         let people = SearchTopHits.people(query, names: session.userNames, limit: 4)
         if !channels.isEmpty || !people.isEmpty {
-            views.append(heading("Top Hits"))
+            views.append(Self.heading("Top Hits"))
             for channel in channels {
                 let row = pressable(cells.channel(channel)) { [weak owner] in owner?.openSearchResult(channelID: channel.id, messageID: nil, parentID: nil) }
                 views.append(row)
@@ -76,7 +76,7 @@ import RavenProtocol
                 views.append(pressable(cells.person(user)) { [weak owner] in owner?.openDirectMessage(with: user) })
             }
         }
-        views.append(heading("Saved Searches"))
+        views.append(Self.heading("Saved Searches"))
         if saved.isEmpty { views.append(HomeText.note("Searches you save appear here, for this account only.")) }
         for item in saved {
             let row = HomeRow(icon: HomeSymbol("magnifyingglass"), title: HomeText.title(item.title), detail: HomeText.detail(summary(item.criteria, session: session)), trailing: nil)
@@ -132,10 +132,25 @@ import RavenProtocol
         showsPreviewOf = hit.id
         setAccessibilityLabel("Preview")
         guard let owner, let session = owner.session else { return }
+        set(SearchPreviewContent.views(hit: hit, context: context, loading: loading, owner: owner, session: session,
+                                       open: { [weak self] in self?.openSelected() },
+                                       quickLook: hit.isFile ? { [weak self] in self?.quickLookResult() } : nil,
+                                       copyLink: { [weak owner] in owner?.copySearchResultLink(messageID: hit.id) }))
+    }
+
+    @objc private func openSelected() { view?.openSelected() }
+    @objc private func quickLookResult() { view?.quickLookSelected() }
+}
+
+/// Builds the selected-result preview shared by the wide side column and
+/// the compact popover, so both show the same messages and actions.
+@MainActor enum SearchPreviewContent {
+    static func views(hit: SearchHit, context: [RavenMessage], loading: Bool, owner: ConversationWindow, session: AccountSession,
+                      open: @escaping () -> Void, quickLook: (() -> Void)?, copyLink: @escaping () -> Void) -> [NSView] {
         let cells = SearchCells(owner: owner, session: session, flat: false)
         var views: [NSView] = []
         let place = cells.conversationTitle(hit.conversationID)
-        views.append(heading(hit.isThreadReply ? (place.isEmpty ? "Thread" : "\(place) · Thread") : (place.isEmpty ? "Conversation" : place)))
+        views.append(SearchSideColumn.heading(hit.isThreadReply ? (place.isEmpty ? "Thread" : "\(place) · Thread") : (place.isEmpty ? "Conversation" : place)))
         if context.isEmpty {
             views.append(previewMessage(author: cells.name(hit.authorID), time: cells.when(hit.creation), text: hit.snippet.text.isEmpty ? (hit.fileName?.text ?? "") : hit.snippet.text, isHit: true, user: hit.authorID, session: session))
             if loading { views.append(HomeText.note("Loading the messages around it…")) }
@@ -147,29 +162,20 @@ import RavenProtocol
                 views.append(previewMessage(author: cells.name(message.authorID), time: cells.when(message.creation), text: text.isEmpty ? "Message" : text, isHit: message.id == hit.id, user: message.authorID, session: session))
             }
         }
-        let open = NSButton(title: "Open in Conversation", target: self, action: #selector(openSelected))
-        open.bezelStyle = .glass
-        open.keyEquivalent = ""
-        var buttons: [NSView] = [open]
+        var buttons: [NSView] = [SearchFooterButton("Open in Conversation", help: "Open this result in its conversation", handler: open)]
         if hit.isFile {
-            let look = NSButton(title: "Quick Look", target: self, action: #selector(quickLookResult))
-            look.bezelStyle = .glass
-            buttons.append(look)
+            buttons.append(SearchFooterButton("Quick Look", help: "Preview the file", handler: quickLook ?? {}))
         }
-        let copy = HomeLinkButton("Copy Link") { [weak owner] in owner?.copySearchResultLink(messageID: hit.id) }
-        buttons.append(copy)
+        buttons.append(HomeLinkButton("Copy Link", action: copyLink))
         let row = NSStackView(views: buttons)
         row.spacing = 8
         row.edgeInsets = NSEdgeInsets(top: 10, left: 0, bottom: 0, right: 0)
         views.append(row)
         views.append(HomeText.quietLine(symbol: "eye.slash", "Previewing does not mark anything read."))
-        set(views)
+        return views
     }
 
-    @objc private func openSelected() { view?.openSelected() }
-    @objc private func quickLookResult() { view?.quickLookSelected() }
-
-    private func previewMessage(author: String, time: String, text: String, isHit: Bool, user: String, session: AccountSession) -> NSView {
+    private static func previewMessage(author: String, time: String, text: String, isHit: Bool, user: String, session: AccountSession) -> NSView {
         let avatar = HomeAvatar(size: 24, shape: .circle)
         avatar.image = user.isEmpty ? nil : session.avatarImage(for: user)
         avatar.symbol = "person.crop.circle"
@@ -207,6 +213,81 @@ import RavenProtocol
     }
 }
 
+/// The compact window's preview surface. It hosts the same views as the
+/// wide side column, scrolled within a popover sized to the pane.
+@MainActor final class SearchCompactPreviewView: NSView {
+    private let scroll = NSScrollView()
+    private let document = HomeDocumentView()
+    private let stack = NSStackView()
+    private(set) var showsPreviewOf: String?
+    var onOpen: (() -> Void)?
+    var onQuickLook: (() -> Void)?
+    var onCopyLink: (() -> Void)?
+    var onClose: (() -> Void)?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.documentView = document
+        document.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(stack)
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: topAnchor), scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor), scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor), document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            stack.topAnchor.constraint(equalTo: document.topAnchor), stack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor), stack.trailingAnchor.constraint(equalTo: document.trailingAnchor)
+        ])
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Preview")
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show(_ hit: SearchHit, context: [RavenMessage], loading: Bool, owner: ConversationWindow, session: AccountSession, size: NSSize) {
+        showsPreviewOf = hit.id
+        let views = SearchPreviewContent.views(hit: hit, context: context, loading: loading, owner: owner, session: session,
+                                               open: { [weak self] in self?.onOpen?() },
+                                               quickLook: hit.isFile ? { [weak self] in self?.onQuickLook?() } : nil,
+                                               copyLink: { [weak self] in self?.onCopyLink?() })
+        stack.setViews(views, in: .top)
+        for view in views { view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28).isActive = true }
+        // A scroll view's fitting size is ambiguous, and a popover shrinks
+        // to it; pin the surface so the content keeps the pane's size.
+        scroll.widthAnchor.constraint(equalToConstant: size.width).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: size.height).isActive = true
+        stack.layoutSubtreeIfNeeded()
+        scroll.contentView.layoutSubtreeIfNeeded()
+        document.layoutSubtreeIfNeeded()
+        scroll.contentView.scroll(to: .zero)
+        markThemeSubtreeNeedsDisplay()
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "l" { onClose?(); return true }
+        return super.performKeyEquivalent(with: event)
+    }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { onClose?(); return }
+        if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "l" { onClose?(); return }
+        // Space keeps the results list's meaning: Quick Look for a file.
+        if event.keyCode == 49, let onQuickLook { onQuickLook(); return }
+        super.keyDown(with: event)
+    }
+    override func cancelOperation(_ sender: Any?) { onClose?() }
+}
+
 /// One message in the preview; the result itself sits on a soft panel.
 @MainActor final class SearchPreviewMessage: NSView {
     private let highlighted: Bool
@@ -225,12 +306,16 @@ import RavenProtocol
 
 /// Quick Look and Save As for file results. Search rows only locate a
 /// file: the permission-checked message supplies its URL right before the
-/// download, and the window closes when the selection moves on.
+/// download, and Quick Look or the save sheet closes when the selection
+/// moves on.
 @MainActor final class SearchAttachmentReader {
     /// Self-checks replace the server with a fixture.
     var transport: CollectionAttachmentActions.Transport?
+    /// Self-checks replace the save panel to see how it is presented.
+    var makeSavePanel: @MainActor () -> NSSavePanel = { NSSavePanel() }
     var onStatus: ((String) -> Void)?
     private var task: Task<Void, Never>?
+    private var savePanel: NSSavePanel?
     private var revision = UUID()
     private(set) var windows: [AttachmentWindow] = []
     private(set) var status = "" { didSet { onStatus?(status) } }
@@ -239,6 +324,7 @@ import RavenProtocol
 
     func cancel() {
         revision = UUID(); task?.cancel(); task = nil
+        let panel = savePanel; savePanel = nil; panel?.cancel(nil)
         if status == Self.downloading { status = "" }
         let open = windows; windows.removeAll()
         for window in open { window.close() }
@@ -277,18 +363,34 @@ import RavenProtocol
                 guard live(), let self else { return }
                 var allowed = CharacterSet.urlPathAllowed; allowed.remove(charactersIn: "/?#%")
                 let link = identity.messageID.addingPercentEncoding(withAllowedCharacters: allowed).flatMap { URL(string: "/raven/message/" + $0, relativeTo: session.account.origin)?.absoluteURL }
-                let presentation: AttachmentPresentation = save ? .window : owner.window.map { .quickLook(over: $0) } ?? .window
-                let controller = AttachmentWindow(attachment: attachment, messageLink: link, presentation: presentation, active: { live() }, reportError: { error in
+                self.deliver(attachment, link: link, save: save, over: owner.window, live: live) { error in
                     guard live() else { return }; owner.app.showError(error)
-                })
-                controller.didClose = { [weak self, weak controller] in self?.windows.removeAll { $0 === controller } }
-                self.windows.append(controller)
-                self.status = ""
-                controller.present(save: save)
+                }
             } catch {
                 guard live(), !(error is CancellationError) else { return }
                 self?.status = "File unavailable: \(StatusLocalization.errorDescription(error))"
             }
         }
+    }
+
+    /// Shows a downloaded file: Quick Look over `window`, or for Save As
+    /// the save sheet alone, as in a conversation. The file actions window
+    /// remains only for a search with no window to hold the sheet.
+    func deliver(_ attachment: DownloadedAttachment, link: URL?, save: Bool, over window: NSWindow?, live: @escaping () -> Bool, reportError: @escaping (Error) -> Void) {
+        status = ""
+        if save, let window {
+            let panel = makeSavePanel(); savePanel = panel
+            Task { [weak self] in
+                defer { if self?.savePanel === panel { self?.savePanel = nil } }
+                do { _ = try await AttachmentExport.saveCopy(of: attachment, using: panel, over: window, isCurrent: live) }
+                catch { reportError(error) }
+            }
+            return
+        }
+        let presentation: AttachmentPresentation = save ? .window : window.map { .quickLook(over: $0) } ?? .window
+        let controller = AttachmentWindow(attachment: attachment, messageLink: link, presentation: presentation, active: live, reportError: reportError)
+        controller.didClose = { [weak self, weak controller] in self?.windows.removeAll { $0 === controller } }
+        windows.append(controller)
+        controller.present(save: save)
     }
 }

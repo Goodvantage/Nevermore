@@ -20,6 +20,9 @@ extension NSAttributedString.Key {
     /// A reply quote; the value is the color of the bar drawn beside it.
     static let nevermoreQuoteBar = NSAttributedString.Key("Nevermore.QuoteBar")
     static let nevermoreBodyQuote = NSAttributedString.Key("Nevermore.BodyQuote")
+    /// On a reply quote: the ID of the message it answers. A click on the
+    /// quote goes there.
+    static let nevermoreReplyTarget = NSAttributedString.Key("Nevermore.ReplyTarget")
 }
 
 /// Who sent a group of messages, drawn in the column left of the text.
@@ -81,8 +84,9 @@ struct TranscriptMetrics: Equatable {
         return style
     }
     /// The message a reply answers, as a quote with a bar in its author's
-    /// color. Copies as "↪ Name: text", as earlier builds showed it.
-    static func replyQuote(author: (name: String, id: String)?, preview: String, metrics: TranscriptMetrics) -> NSAttributedString {
+    /// color. Copies as "↪ Name: text", as earlier builds showed it. With a
+    /// target, a click on the quote shows the answered message.
+    static func replyQuote(author: (name: String, id: String)?, preview: String, target: String? = nil, metrics: TranscriptMetrics) -> NSAttributedString {
         let style = NSMutableParagraphStyle()
         style.firstLineHeadIndent = 11; style.headIndent = 11; style.paragraphSpacing = 3; style.paragraphSpacingBefore = 2
         let font = NSFont.systemFont(ofSize: max(11, metrics.size - 1))
@@ -96,7 +100,17 @@ struct TranscriptMetrics: Equatable {
         }
         output.append(NSAttributedString(string: "\n", attributes: [.font: font]))
         output.addAttributes([.paragraphStyle: style, .nevermoreQuoteBar: bar], range: NSRange(location: 0, length: output.length))
+        if let target, !target.isEmpty { output.addAttribute(.nevermoreReplyTarget, value: target, range: NSRange(location: 0, length: max(0, output.length - 1))) }
         return output
+    }
+
+    /// Who wrote the message a reply answers, from the copy Raven keeps on
+    /// the reply (`replied_message_details`, JSON in a string field), for
+    /// when that message is not loaded. Its `content` is the plain text of
+    /// the original including any spoiler, so only the author is used.
+    static func repliedAuthorID(_ details: JSONValue) -> String? {
+        guard let owner = details.nested["owner"].string?.trimmingCharacters(in: .whitespacesAndNewlines), !owner.isEmpty else { return nil }
+        return owner
     }
 
     static func header(name: String, authorID: String, time: String, fullTime: String, avatar: TranscriptAvatar?, metrics: TranscriptMetrics) -> NSAttributedString {
@@ -114,11 +128,62 @@ struct TranscriptMetrics: Equatable {
     /// "Today", centered on a hairline. A reading control: headers copy
     /// with full timestamps instead.
     static func dayDivider(_ label: String, metrics: TranscriptMetrics) -> NSAttributedString {
-        NSAttributedString(string: label + "\n", attributes: [.font: NSFont.systemFont(ofSize: max(11, metrics.size - 2), weight: .semibold), .foregroundColor: NSColor.themeSecondaryText, .nevermoreReadingControl: true, .nevermoreDayDivider: true, .paragraphStyle: centered(metrics, before: metrics.compact ? 8 : 12, after: metrics.compact ? 4 : 8)])
+        NSAttributedString(string: label + "\n", attributes: [.font: secondaryFont(metrics, weight: .semibold), .foregroundColor: NSColor.themeSecondaryText, .nevermoreReadingControl: true, .nevermoreDayDivider: true, .paragraphStyle: centered(metrics, before: metrics.compact ? 8 : 12, after: metrics.compact ? 4 : 8)])
+    }
+
+    /// The small "(edited)" after an edited message's text, as Raven's web
+    /// client shows it. After a block such as code it takes its own line.
+    static func editedMark(afterLineBreak: Bool, metrics: TranscriptMetrics) -> NSAttributedString {
+        NSAttributedString(string: afterLineBreak ? "(edited)" : " (edited)", attributes: [.font: NSFont.systemFont(ofSize: max(10, metrics.size - 3)), .foregroundColor: NSColor.themeSecondaryText])
+    }
+
+    /// Pinned and saved messages say so after their text, the way "(edited)"
+    /// does: a small symbol and a word. A reading control, so copies and
+    /// printouts carry only the message.
+    static func stateMarks(pinned: Bool, saved: Bool, afterLineBreak: Bool, metrics: TranscriptMetrics) -> NSAttributedString? {
+        let marks = [pinned ? ("pin.fill", "Pinned") : nil, saved ? ("bookmark.fill", "Saved") : nil].compactMap { $0 }
+        guard !marks.isEmpty else { return nil }
+        let font = NSFont.systemFont(ofSize: metrics.detailSize)
+        let output = NSMutableAttributedString()
+        for (index, (symbol, label)) in marks.enumerated() {
+            if index > 0 || !afterLineBreak { output.append(NSAttributedString(string: "  ", attributes: [.font: font])) }
+            if let image = tintedSymbol(symbol, label: label, pointSize: metrics.detailSize) {
+                let attachment = NSTextAttachment(); attachment.image = image
+                attachment.bounds = NSRect(x: 0, y: (font.capHeight - image.size.height) / 2, width: image.size.width, height: image.size.height)
+                output.append(NSAttributedString(attachment: attachment))
+                output.append(NSAttributedString(string: " ", attributes: [.font: font]))
+            }
+            output.append(NSAttributedString(string: label, attributes: [.font: font]))
+        }
+        let all = NSRange(location: 0, length: output.length)
+        output.addAttributes([.foregroundColor: NSColor.themeSecondaryText, .nevermoreReadingControl: true], range: all)
+        return output
+    }
+
+    /// Text attachments draw symbol images untinted, so the image paints
+    /// itself in the secondary text color when drawn, which resolves the
+    /// theme's dynamic color for the current appearance.
+    private static func tintedSymbol(_ name: String, label: String, pointSize: CGFloat) -> NSImage? {
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: label)?.withSymbolConfiguration(.init(pointSize: pointSize - 1, weight: .medium)) else { return nil }
+        let image = NSImage(size: symbol.size, flipped: false) { rect in
+            symbol.draw(in: rect)
+            NSColor.themeSecondaryText.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        image.accessibilityDescription = label
+        return image
+    }
+
+    /// Lines that annotate a message (linked document, formatting fallback,
+    /// unparsed reactions) and the dividers: two points under the reading
+    /// size, never below 11, so they follow Make Text Bigger with the text.
+    static func secondaryFont(_ metrics: TranscriptMetrics, weight: NSFont.Weight = .regular) -> NSFont {
+        NSFont.systemFont(ofSize: max(11, metrics.size - 2), weight: weight)
     }
 
     static func unreadDivider(metrics: TranscriptMetrics) -> NSAttributedString {
-        NSAttributedString(string: "Unread messages\n", attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.themeAlert, .nevermoreReadingControl: true, .nevermoreUnreadDivider: true, .paragraphStyle: centered(metrics, before: 4, after: 6)])
+        NSAttributedString(string: "Unread messages\n", attributes: [.font: secondaryFont(metrics, weight: .semibold), .foregroundColor: NSColor.themeAlert, .nevermoreReadingControl: true, .nevermoreUnreadDivider: true, .paragraphStyle: centered(metrics, before: 4, after: 6)])
     }
 
     /// "Benedikt added Lukas.  12:23", small and centered, without a sender
@@ -185,7 +250,7 @@ struct TranscriptMetrics: Equatable {
         return URL(string: "nevermore-attachment://message/\(id)")
     }
 
-    /// "[icon] report.pdf  Click or Space to Quick Look". The icon is a
+    /// "[icon] report.pdf  Click for details, Space for Quick Look". The icon is a
     /// reading control, so copying the transcript yields only the file name.
     static func attachmentLine(filename: String, size: CGFloat, link: URL?) -> NSAttributedString {
         let output = NSMutableAttributedString(string: "\n")
@@ -201,7 +266,7 @@ struct TranscriptMetrics: Equatable {
         output.append(NSAttributedString(string: filename, attributes: nameAttributes))
         var hintAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: max(10, size - 3)), .foregroundColor: NSColor.themeTertiaryText, .nevermoreReadingControl: true]
         if let link { hintAttributes[.link] = link }
-        output.append(NSAttributedString(string: "  Click or Space to Quick Look", attributes: hintAttributes))
+        output.append(NSAttributedString(string: "  Click for details, Space for Quick Look", attributes: hintAttributes))
         return output
     }
 

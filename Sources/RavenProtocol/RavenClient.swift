@@ -10,23 +10,53 @@ public actor RavenClient {
     public let accountID: UUID
     private(set) var tokens: OAuthTokens?
     private let session: URLSession
+    /// False for a session injected by a contract test, which owns its own
+    /// teardown. A client that built its own session must invalidate it:
+    /// otherwise every re-login and account removal leaks a delegate, a
+    /// thread and a configuration until the process ends.
+    private let ownsSession: Bool
     /// The one outstanding refresh grant. Callers past the first await the
     /// shared task rather than posting a second refresh.
     private var pendingTokenPersistence = false
     private var invalidated = false
     private var inFlightRefresh: Task<OAuthTokens, Error>?
+    /// Test seam: true once this client has torn down a session it owns.
+    /// Observing ownership is the point; the tear-down itself is one call.
+    private(set) var didInvalidateSession = false
 
     public init(origin: URL, tokens: OAuthTokens?, clientID: String, accountID: UUID) {
-        self.init(origin: origin, tokens: tokens, clientID: clientID, accountID: accountID, session: nil)
+        self.init(origin: origin, tokens: tokens, clientID: clientID, accountID: accountID, session: nil, ownsSession: true)
     }
 
-    /// Internal seam for contract tests with a stubbed URLProtocol.
+    /// Internal seam for contract tests with a stubbed URLProtocol. The test
+    /// keeps the session and may share it between clients.
     init(origin: URL, tokens: OAuthTokens?, clientID: String, accountID: UUID, session: URLSession?) {
+        self.init(origin: origin, tokens: tokens, clientID: clientID, accountID: accountID, session: session, ownsSession: false)
+    }
+
+    /// Internal seam for tests that observe session teardown.
+    init(origin: URL, tokens: OAuthTokens?, clientID: String, accountID: UUID, session: URLSession?, ownsSession: Bool) {
         self.origin = origin
         self.tokens = tokens
         self.clientID = clientID
         self.accountID = accountID
         self.session = session ?? Self.makeSession()
+        // Derive ownership from what happened, not only what the caller
+        // declared: a nil session means the client created one and must
+        // release it.
+        self.ownsSession = ownsSession || session == nil
+    }
+
+    isolated deinit {
+        if ownsSession { invalidateOwnedSession() }
+    }
+
+    private func invalidateOwnedSession() {
+        // invalidate(), revoke() and deinit can all reach this; tearing down
+        // once is enough.
+        guard !didInvalidateSession else { return }
+        session.invalidateAndCancel()
+        didInvalidateSession = true
     }
 
     static func makeSession() -> URLSession {
@@ -109,7 +139,10 @@ public actor RavenClient {
     /// `file_url`/`file_size` keys are what the send endpoint expects.
     public func upload(file: URL, filename suppliedName: String? = nil) async throws -> JSONValue {
         let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
-        guard let size = attributes[.size] as? NSNumber, size.int64Value <= 64 * 1024 * 1024 else { throw RavenError.resourceLimit }
+        // A missing or unreadable size is not a budget refusal; it is still
+        // reported as one until the protocol has a distinct local-file case.
+        guard let size = (attributes[.size] as? NSNumber)?.int64Value else { throw RavenError.resourceLimit(RavenError.maximumAttachmentBytes) }
+        guard size <= RavenError.maximumAttachmentBytes else { throw RavenError.resourceLimit(RavenError.maximumAttachmentBytes) }
         let content = try Data(contentsOf: file)
         let name = suppliedName ?? file.lastPathComponent
         let filename = name.isEmpty ? "attachment" : name.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) || $0 == "\"" || $0 == "\\" ? "_" : String($0) }.joined()
@@ -137,10 +170,12 @@ public actor RavenClient {
 
     /// Authenticated binary fetch (private files). The target must be on this
     /// account's origin; other hosts are refused before any credential moves.
-    public func download(_ url: URL, maximumBytes: Int = 64 * 1024 * 1024) async throws -> Data {
+    public func download(_ url: URL, maximumBytes: Int = RavenError.maximumAttachmentBytes) async throws -> Data {
         guard SiteOrigin.sameOrigin(url, origin) else { throw RavenError.crossOrigin }
         _ = try RavenAttachmentURL.resolve(url.absoluteString, origin: origin)
-        guard (1...(64 * 1024 * 1024)).contains(maximumBytes) else { throw RavenError.resourceLimit }
+        // Budgets outside 1...maximumAttachmentBytes are rejected as a limit
+        // violation; a budget <= 0 lands here too, though nothing exceeded it.
+        guard (1...RavenError.maximumAttachmentBytes).contains(maximumBytes) else { throw RavenError.resourceLimit(RavenError.maximumAttachmentBytes) }
         let (data, response) = try await perform(maximumBytes: maximumBytes) { token in
             var request = URLRequest(url: url)
             request.timeoutInterval = 300
@@ -153,10 +188,10 @@ public actor RavenClient {
     /// Stream a full attachment into a private file, retaining at most one
     /// 32 KiB chunk in memory. Partial/error/oversized downloads are removed;
     /// only a fully written and quarantined file can leave this method.
-    public func download(_ url: URL, to directory: URL, maximumBytes: Int = 64 * 1024 * 1024) async throws -> DownloadedAttachment {
+    public func download(_ url: URL, to directory: URL, maximumBytes: Int = RavenError.maximumAttachmentBytes) async throws -> DownloadedAttachment {
         guard SiteOrigin.sameOrigin(url, origin) else { throw RavenError.crossOrigin }
         _ = try RavenAttachmentURL.resolve(url.absoluteString, origin: origin)
-        guard directory.isFileURL, (1...(64 * 1024 * 1024)).contains(maximumBytes) else { throw RavenError.resourceLimit }
+        guard directory.isFileURL, (1...RavenError.maximumAttachmentBytes).contains(maximumBytes) else { throw RavenError.resourceLimit(RavenError.maximumAttachmentBytes) }
         let lease = try AttachmentDownloadLease(maximumBytes: maximumBytes)
         let fm = FileManager.default
         let accountDirectory = DownloadedAttachment.cacheDirectory(accountID: accountID, in: directory)
@@ -197,7 +232,7 @@ public actor RavenClient {
                 // A partial/range response is not a complete file download.
                 throw RavenError.invalidResponse
             }
-            guard response.expectedContentLength <= Int64(maximumBytes) else { throw RavenError.resourceLimit }
+            guard response.expectedContentLength <= Int64(maximumBytes) else { throw RavenError.resourceLimit(maximumBytes) }
             let partial = privateDirectory.appendingPathComponent(".payload.part")
             let descriptor = open(partial.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
             guard descriptor >= 0 else { throw AttachmentDownloadError.storage }
@@ -207,7 +242,7 @@ public actor RavenClient {
             var count = 0
             do {
                 for try await byte in bytes {
-                    guard count < maximumBytes else { throw RavenError.resourceLimit }
+                    guard count < maximumBytes else { throw RavenError.resourceLimit(maximumBytes) }
                     chunk.append(byte); count += 1
                     if chunk.count == 32 * 1024 {
                         try Task.checkCancellation(); guard !invalidated else { throw RavenError.unauthorized }
@@ -259,6 +294,7 @@ public actor RavenClient {
     public func invalidate() {
         invalidated = true; inFlightRefresh?.cancel(); inFlightRefresh = nil
         pendingTokenPersistence = false; tokens = nil
+        if ownsSession { invalidateOwnedSession() }
     }
 
     /// Best-effort refresh-token revocation on sign-out. Never throws; the
@@ -267,12 +303,14 @@ public actor RavenClient {
         let refreshToken = tokens?.refreshToken
         invalidated = true; inFlightRefresh?.cancel(); inFlightRefresh = nil; pendingTokenPersistence = false
         tokens = nil
-        guard let refreshToken, !refreshToken.isEmpty else { return }
-        var request = URLRequest(url: (try? endpoint(RavenEndpoints.revokePath)) ?? origin)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data(Self.formBody([("token", refreshToken), ("token_type_hint", "refresh_token")]).utf8)
-        _ = try? await session.data(for: request)
+        if let refreshToken, !refreshToken.isEmpty {
+            var request = URLRequest(url: (try? endpoint(RavenEndpoints.revokePath)) ?? origin)
+            request.httpMethod = "POST"
+            request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            request.httpBody = Data(Self.formBody([("token", refreshToken), ("token_type_hint", "refresh_token")]).utf8)
+            _ = try? await session.data(for: request)
+        }
+        if ownsSession { invalidateOwnedSession() }
     }
 
     // MARK: - Internals
@@ -303,10 +341,10 @@ public actor RavenClient {
         do {
             let (bytes, response) = try await session.bytes(for: request)
             defer { bytes.task.cancel() }
-            if response.expectedContentLength > Int64(maximumBytes) { throw RavenError.resourceLimit }
+            if response.expectedContentLength > Int64(maximumBytes) { throw RavenError.resourceLimit(maximumBytes) }
             var data = Data()
             for try await byte in bytes {
-                guard data.count < maximumBytes else { throw RavenError.resourceLimit }
+                guard data.count < maximumBytes else { throw RavenError.resourceLimit(maximumBytes) }
                 data.append(byte)
             }
             result = (data, response)

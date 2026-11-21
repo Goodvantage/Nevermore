@@ -5,7 +5,12 @@ public struct RichCodeBlock: Sendable, Equatable, Identifiable {
     public let index: Int
     public let text: String
     public let language: String?
-    public var lineCount: Int { text.components(separatedBy: "\n").count }
+    /// Visual lines of the block. A trailing newline terminates the last
+    /// line rather than starting an empty one, so it is not counted.
+    public var lineCount: Int {
+        guard text.hasSuffix("\n") else { return text.components(separatedBy: "\n").count }
+        return max(1, text.dropLast().components(separatedBy: "\n").count)
+    }
     public var isLong: Bool { lineCount > 12 || text.utf16.count > 4000 }
     /// Bound to content and position. Edits cannot reuse a stale reader/link.
     public var id: String {

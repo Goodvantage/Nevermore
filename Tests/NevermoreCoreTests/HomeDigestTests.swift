@@ -297,6 +297,15 @@ import RavenProtocol
         #expect(summary.busiestHourCount == 0)
     }
 
+    @Test func weekComparisonReadsTheDifference() {
+        func summary(days: [Int], previous: Int) -> HomeWeekSummary { HomeWeekSummary(days: days, previousWeek: previous, busiestHour: nil, busiestHourCount: 0) }
+        #expect(summary(days: [1, 0, 0, 0, 0, 0, 2], previous: 2).comparison == "1 more than the week before")
+        #expect(summary(days: [1, 0, 0, 0, 0, 0, 0], previous: 4).comparison == "3 fewer than the week before")
+        #expect(summary(days: [0, 0, 0, 0, 0, 0, 2], previous: 2).comparison == "Same as the week before")
+        #expect(summary(days: Array(repeating: 0, count: 7), previous: 0).comparison == "Same as the week before")
+        #expect(summary(days: [5, 0, 0, 0, 0, 0, 6], previous: 0).comparison == "None the week before")
+    }
+
     // MARK: - HomePeople
 
     @Test func peopleRankCountsRecentDirectMessagesAndFillsFromRecentChannels() {

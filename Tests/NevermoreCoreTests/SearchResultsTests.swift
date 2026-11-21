@@ -224,6 +224,18 @@ private func resultsHit(id: String, channel: String, creation: String = "2026-11
 
 // MARK: - SearchSnippet.marked
 
+/// Decoding shrinks the string, so a highlight after an escape must shift
+/// with it; a malformed escape keeps the text and its ranges untouched.
+@Test func removingPercentEncodingRemapsLaterHighlights() {
+    let decoded = SearchSnippet(text: "Never%20Core.pdf", highlights: [8..<12]).removingPercentEncoding()
+    #expect(decoded.text == "Never Core.pdf")
+    #expect(decoded.highlights == [6..<10])
+
+    let literal = SearchSnippet(text: "50%.pdf", highlights: [0..<2]).removingPercentEncoding()
+    #expect(literal.text == "50%.pdf")
+    #expect(literal.highlights == [0..<2])
+}
+
 @Test func markedSnippetReadsServerMarkup() {
     let first = SearchSnippet.marked("a <mark>b</mark> c")
     #expect(first.text == "a b c")
@@ -351,6 +363,10 @@ private func resultsHit(id: String, channel: String, creation: String = "2026-11
     #expect(file.fileName?.highlights == [0..<6])
     #expect(file.fileSize == 2048)
     #expect(file.isFile)
+    // The caption is the percent-encoded file name, so it must not repeat
+    // the decoded title as a second line, and no stale highlight may remain.
+    #expect(file.snippet.text.isEmpty)
+    #expect(file.snippet.highlights.isEmpty)
 
     let saved = try #require(SearchHit(row: .object([
         "id": .string("Raven Message:m5"),
@@ -442,6 +458,19 @@ private func resultsHit(id: String, channel: String, creation: String = "2026-11
     #expect(SearchThreads.parents(rows)["t3"] == "random")
 }
 
+@Test func threadsIdsBreakEqualTimestampsByName() {
+    let rows: [JSONValue] = [
+        .object(["name": .string("t3"), "channel_id": .string("general"), "last_message_timestamp": .string("2026-11-05 10:00:00")]),
+        .object(["name": .string(""), "channel_id": .string("general"), "last_message_timestamp": .string("2026-11-08 10:00:00")]),
+        .object(["name": .string("t1"), "channel_id": .string("general"), "last_message_timestamp": .string("2026-11-05 10:00:00")]),
+        .object(["name": .string("t2"), "channel_id": .string("general"), "last_message_timestamp": .string("2026-11-05 10:00:00")]),
+        .object(["name": .string("t2"), "channel_id": .string("general"), "last_message_timestamp": .string("2026-11-05 10:00:00")]),
+        .object(["name": .string("t0"), "channel_id": .string("general"), "last_message_timestamp": .string("2026-11-06 10:00:00")]),
+        .object(["name": .string("t9"), "channel_id": .string("elsewhere"), "last_message_timestamp": .string("2026-11-07 10:00:00")]),
+    ]
+    #expect(SearchThreads.ids(rows, parents: ["general"]) == ["t0", "t1", "t2", "t3"])
+}
+
 // MARK: - SearchTopHits
 
 @Test func topHitsConversationsRankArchivedLast() {
@@ -529,6 +558,33 @@ private func indexHit(_ id: String) -> SearchHit? {
 
     #expect(cached.id == indexed.id)
     #expect(SearchHit.merging(server: [indexed], cached: [cached]).count == 1)
+}
+
+/// A caption with a stray `%` is free text, not a broken escape. Decoding it
+/// fails and the snippet must survive untouched rather than be dropped or
+/// mis-compared against the file name.
+@Test func malformedPercentCaptionSurvivesFileDeduplication() throws {
+    let hit = try #require(SearchHit(row: .object([
+        "id": .string("Raven Message:m8"),
+        "channel_id": .string("c1"),
+        "author": .string("u1"),
+        "creation": .string("2026-11-15 09:00:00"),
+        "message_type": .string("File"),
+        "title": .string("other.pdf"),
+        "content": .string("50%.pdf"),
+    ]), currentUser: resultsMe))
+    #expect(hit.fileName?.text == "other.pdf")
+    #expect(hit.snippet.text == "50%.pdf")
+}
+
+@Test func decodedFilenameWithLiteralPercentEscapeDoesNotRepeat() throws {
+    let hit = try #require(SearchHit(row: .object([
+        "id": .string("Raven Message:m8"), "channel_id": .string("c1"),
+        "message_type": .string("File"), "title": .string("Budget%2520Q4.pdf"),
+        "content": .string("Budget%20Q4.pdf"),
+    ]), currentUser: resultsMe))
+    #expect(hit.fileName?.text == "Budget%20Q4.pdf")
+    #expect(hit.snippet.text.isEmpty)
 }
 
 /// A cached list that repeats an id must not repeat the row.

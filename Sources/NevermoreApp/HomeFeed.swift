@@ -21,6 +21,7 @@ extension Notification.Name {
         case loaded(Value)
         case failed(String)
 
+        var isLoading: Bool { if case .loading = self { return true }; return false }
         var value: Value? { if case .loaded(let value) = self { return value }; return nil }
     }
 
@@ -36,8 +37,10 @@ extension Notification.Name {
         /// True when the server returned the whole page, so older days may
         /// be missing from the counts.
         var sentTruncated = false
-        var drafts: [Draft] = []
-        var unsent: [SendOperation] = []
+        var draftRead: Part<[Draft]> = .loading
+        var outboxRead: Part<[SendOperation]> = .loading
+        var drafts: [Draft] { draftRead.value ?? [] }
+        var unsent: [SendOperation] { outboxRead.value ?? [] }
         /// The newest cached message of unread conversations the channel
         /// list sent without `last_message_details`, keyed by channel.
         var cachedLatest: [String: HomeLatestMessage] = [:]
@@ -47,7 +50,17 @@ extension Notification.Name {
     private(set) var loadedAt: Date?
     private weak var session: AccountSession?
     private var task: Task<Void, Never>?
+    /// Identifies the refresh that owns `task`. A refresh that is cancelled or
+    /// superseded bumps this, so a late-finishing task cannot clear the slot
+    /// of a newer one.
+    private var refreshGeneration = 0
+    /// When the last refresh produced no module at all. A total failure keeps
+    /// the feed stale so the next display retries, but without a short backoff
+    /// every display would refire all six requests.
+    private var lastEmptyRefreshAt: Date?
+    private static let emptyRefreshBackoff: TimeInterval = 15
     private var localTask: Task<Void, Never>?
+    private var localRefreshPending = false
 
     /// Home reloads server modules at most this often while it is shown.
     static let freshness: TimeInterval = 120
@@ -64,12 +77,23 @@ extension Notification.Name {
     /// now when `force` is set. Local drafts and the outbox always reload.
     func refresh(force: Bool = false) {
         refreshLocal()
-        guard let session, !session.stopped, force || isStale, task == nil else { return }
-        loadedAt = Date()
+        let inFailureBackoff = lastEmptyRefreshAt.map { Date().timeIntervalSince($0) < Self.emptyRefreshBackoff } ?? false
+        guard let session, !session.stopped, force || (isStale && !inFailureBackoff), task == nil else { return }
+        // Stamp only when the refresh finishes. Stamping here would make a
+        // cancelled or superseded task look fresh for the whole window and
+        // suppress the retry the reader expects.
+        refreshGeneration += 1
+        let generation = refreshGeneration
         session.quickReactionUsage.prefetch(for: session)
         if session.demo {
             snapshot.reminders = .loaded([]); snapshot.saved = .loaded([]); snapshot.threads = .loaded([]); snapshot.files = .loaded([])
-            task = Task { [weak self] in await self?.loadDemoSent(); self?.task = nil }
+            task = Task { [weak self] in
+                await self?.loadDemoSent()
+                guard let self, generation == self.refreshGeneration else { return }
+                self.task = nil
+                guard !Task.isCancelled else { return }
+                self.loadedAt = Date(); self.lastEmptyRefreshAt = nil
+            }
             return
         }
         let client = session.client
@@ -82,8 +106,9 @@ extension Notification.Name {
             async let files = Self.part { try await Self.recentFiles(client) }
             async let sent = Self.part { try await Self.sentMessages(client, since: since) }
             let results = await (reminders, saved, threads, unreadThreads, files, sent)
-            guard let self, !Task.isCancelled, let session = self.session, !session.stopped else { return }
+            guard let self, generation == self.refreshGeneration else { return }
             self.task = nil
+            guard !Task.isCancelled, let session = self.session, !session.stopped else { return }
             self.snapshot.reminders = results.0
             self.snapshot.saved = results.1.map { $0.array.isEmpty ? $0["messages"].array : $0.array }
             self.snapshot.threads = results.2
@@ -102,29 +127,61 @@ extension Notification.Name {
             case .failed(let error): self.snapshot.sent = .failed(error)
             case .loading: break
             }
+            // A refresh that produced nothing did not make the feed fresh;
+            // leaving it stale lets the next display retry instead of waiting
+            // out the window with every module showing a failure.
+            let anyModuleLoaded = results.0.value != nil || results.1.value != nil || results.2.value != nil
+                || results.3.value != nil || results.4.value != nil || results.5.value != nil
+            if anyModuleLoaded { self.loadedAt = Date(); self.lastEmptyRefreshAt = nil }
+            else { self.lastEmptyRefreshAt = Date() }
             self.changed()
         }
+    }
+
+    /// Waits for an in-flight refresh, then starts a canonical one and
+    /// returns its task. A mutation uses this so Home never reports state
+    /// from before the change.
+    @discardableResult func refreshAfterInflight(force: Bool = true) async -> Task<Void, Never>? {
+        if let task { await task.value }
+        refresh(force: force)
+        return task
     }
 
     /// Drafts and unsent messages live in the local store.
     func refreshLocal() {
-        guard let session, localTask == nil else { return }
+        guard let session else { return }
+        // A write can finish after an active read took its snapshot. Honor
+        // requests received during that read with one subsequent refresh.
+        if localTask != nil {
+            localRefreshPending = true
+            return
+        }
+        localRefreshPending = false
         localTask = Task { [weak self] in
-            let drafts = (try? await session.store.drafts()) ?? []
-            let unsent = (try? await session.store.operations()) ?? []
-            guard let self else { return }
+            let drafts = await Self.part { try await session.store.drafts() }
+            let unsent = await Self.part { try await session.store.operations() }
+            guard let self, !Task.isCancelled, !session.stopped else { return }
             self.localTask = nil
             // A draft holds text only once someone typed; an empty row is
             // what a conversation leaves behind after a send.
-            self.snapshot.drafts = drafts.filter { draft in
-                !draft.attachments.isEmpty || !((try? RichTextCodec.parse(draft.html)).map { RichTextCodec.plainText($0) } ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            self.snapshot.draftRead = drafts.map { rows in
+                rows.filter { draft in
+                    !draft.attachments.isEmpty || !((try? RichTextCodec.parse(draft.html)).map { RichTextCodec.plainText($0) } ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }
             }
-            self.snapshot.unsent = unsent.filter { [.retryable, .needsReview, .rejected].contains($0.state) }
+            self.snapshot.outboxRead = unsent.map { rows in
+                rows.filter { [.retryable, .needsReview, .rejected].contains($0.state) }
+            }
             self.changed()
+            if self.localRefreshPending { self.refreshLocal() }
         }
     }
 
-    func cancel() { task?.cancel(); task = nil; localTask?.cancel(); localTask = nil; latestTask?.cancel(); latestTask = nil }
+    func cancel() {
+        refreshGeneration += 1
+        lastEmptyRefreshAt = nil
+        task?.cancel(); task = nil; localTask?.cancel(); localTask = nil; latestTask?.cancel(); latestTask = nil
+    }
 
     private var latestTask: Task<Void, Never>?
     private var latestKeys: [String: String] = [:]

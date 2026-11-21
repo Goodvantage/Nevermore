@@ -244,6 +244,20 @@ import NevermoreCore
         composer.unmarkText()
         results.append(("the structure rules wait while an input method is composing", heldBack))
 
+        // Escape belongs to an input method while it composes: it cancels the
+        // conversion there, not the reply or edit the composer holds.
+        try load("")
+        var escapes = 0
+        composer.onEscape = { escapes += 1 }
+        let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)
+        composer.setMarkedText("に", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        if let escape { composer.keyDown(with: escape) }
+        let whileComposing = escapes
+        composer.unmarkText()
+        if let escape { composer.keyDown(with: escape) }
+        composer.onEscape = nil
+        results.append(("Escape while an input method composes reaches the input method, not the composer's context", escape != nil && whileComposing == 0 && escapes == 1))
+
         try load("")
         defaults.set(false, forKey: ComposerPreferences.markdownShortcutsKey)
         type("> **plain**")
@@ -580,6 +594,17 @@ import NevermoreCore
         try await Task.sleep(for: .milliseconds(700))
         results.append(("the card stays with the first link when another is added", shownTitle == "Fixture first"))
 
+        // The card can be dismissed for the current link and comes back
+        // when the draft's first eligible link changes.
+        controller.linkPreview.dismiss()
+        results.append(("dismissing the card hides it for the current link", shownTitle == nil))
+        type("more text ")
+        try await Task.sleep(for: .milliseconds(700))
+        results.append(("the dismissed card stays hidden while the first link is unchanged", shownTitle == nil))
+        clear()
+        type("https://fixture.example/other ")
+        results.append(("the card returns for a different link", try await until { shownTitle == "Fixture other" }))
+
         clear()
         type("https://fixture.example/pictured ")
         let pictured = try await until { controller.linkPreview.content?.image != nil }
@@ -627,8 +652,9 @@ import NevermoreCore
                 window.contentView?.layoutSubtreeIfNeeded()
                 let description = InteractionSelfChecks.descendants(controller.linkPreviewCard, of: NSTextField.self).first { $0.stringValue == shortTitle.summary }
                 let descriptionEdge = description.map { $0.convert($0.bounds, to: controller.linkPreviewCard).maxX } ?? 0
-                let closeEdge = controller.linkPreviewCard.bounds.maxX
-                let gap = closeEdge - descriptionEdge
+                // The text column ends where the dismiss button begins.
+                let buttonEdge = InteractionSelfChecks.descendants(controller.linkPreviewCard, of: NSButton.self).first.map { $0.convert($0.bounds, to: controller.linkPreviewCard).minX } ?? controller.linkPreviewCard.bounds.maxX
+                let gap = buttonEdge - descriptionEdge
                 let fillsColumn = description != nil && gap >= 0 && gap <= 12 && (description?.frame.width ?? 0) > 200
                 if !fillsColumn { print("DIAGNOSTIC preview column: picture=\(pictured) card=\(controller.linkPreviewCard.frame) description=\(String(describing: description?.frame)) gap=\(gap)") }
                 results.append(("a short preview title leaves the description a full column \(pictured ? "with" : "without") a picture", fillsColumn))
@@ -725,6 +751,13 @@ import NevermoreCore
         let sharedStorage = composer.textStorage!
         sharedStorage.setAttributedString(NSAttributedString())
         composer.setSelectedRange(NSRange(location: 0, length: 0))
+        let emptyDraft = try controller.currentDraft()
+        // A direct storage mutation does not publish a draft revision. Let
+        // every window observe the cleared draft before exchanging storages.
+        controller.persistActiveDraft()
+        await controller.saveTask?.value
+        let storedDraft = try await controller.session?.store.draft(channelID: emptyDraft.channelID)
+        let sharedDraftIsEmpty = storedDraft?.html == emptyDraft.html
         composer.useTextStorage(NSTextStorage(string: "edited message"))
         composer.setSelectedRange(NSRange(location: 14, length: 0))
         window.makeFirstResponder(composer)
@@ -737,12 +770,43 @@ import NevermoreCore
         try await post("x", code: 7)
         let resumesTyping = composer.string == "x"
         if !resumesTyping { print("DIAGNOSTIC after edit: editable=\(composer.isEditable) focused=\(window.firstResponder === composer) responder=\(String(describing: window.firstResponder?.className)) selection=\(composer.selectedRange()) shows=\(composer.string.debugDescription)") }
+
+        // The mention pool covers every user and channel, so it must be
+        // built only when a trigger sits at the caret — not per keystroke
+        // or caret move.
+        composer.textStorage?.setAttributedString(NSAttributedString())
+        composer.typingAttributes = NativeRichText.plainTypingAttributes
+        composer.setSelectedRange(NSRange(location: 0, length: 0))
+        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: composer))
+        // Start from a cold cache: an earlier step may legitimately have built
+        // the pool while a trigger sat at the caret.
+        controller.resetMentionPoolCache()
+        let buildsBefore = controller.mentionPoolBuilds
+        try await post("h", code: 4)
+        try await post("i", code: 34)
+        let typedWithoutTrigger = controller.mentionPoolBuilds == buildsBefore
+        composer.setSelectedRange(NSRange(location: 0, length: 0))
+        controller.textViewDidChangeSelection(Notification(name: NSTextView.didChangeSelectionNotification, object: composer))
+        let caretMoveWithoutTrigger = controller.mentionPoolBuilds == buildsBefore
+        composer.textStorage?.setAttributedString(NSAttributedString())
+        composer.setSelectedRange(NSRange(location: 0, length: 0))
+        try await post("@", code: 19, modifiers: .shift)
+        let triggerBuilds = controller.mentionPoolBuilds == buildsBefore + 1
+        try await post("a", code: 0)
+        let queryGrowthCached = controller.mentionPoolBuilds == buildsBefore + 1
+        controller.resetMentionPoolCache()
+        if !(typedWithoutTrigger && caretMoveWithoutTrigger && triggerBuilds && queryGrowthCached) {
+            print("DIAGNOSTIC mention pool: builds=\(controller.mentionPoolBuilds) before=\(buildsBefore) typed=\(typedWithoutTrigger) caret=\(caretMoveWithoutTrigger) trigger=\(triggerBuilds) cached=\(queryGrowthCached) shows=\(composer.string.debugDescription)")
+        }
         return [
             ("a shortcut typed on the keyboard formats the line", typed),
             ("sending right after a shortcut key sends what the composer then shows", flushed),
             ("Undo steps back through the text, then the formatting, then the typed marker", undone),
             ("a quote or list with no text is not sent as a message", refused),
+            ("the edit fixture starts with the same empty draft on disk and in the composer", sharedDraftIsEmpty),
             ("typing resumes after saving an edit restores the shared draft", resumesTyping),
+            ("typing without a mention trigger builds no candidate pool", typedWithoutTrigger && caretMoveWithoutTrigger),
+            ("a mention trigger builds the pool once and reuses it while the query grows", triggerBuilds && queryGrowthCached),
         ]
     }
 }

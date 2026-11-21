@@ -20,8 +20,11 @@ import UserNotifications
     private static let clientIDRowFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
 
     unowned let app: AppDelegate
+    let siteLabel = NSTextField(labelWithString: "Raven Site URL")
     let site = NSTextField(string: "https://")
+    let clientIDLabel = NSTextField(labelWithString: "OAuth Client ID")
     let clientID = NSTextField(string: LoginController.presetClientID)
+    let clientIDNote = NSTextField(wrappingLabelWithString: "The prefilled client ID belongs to one site. A different site needs its own client ID.")
     let clientIDHint = NSTextField(labelWithString: LoginController.clientIDHintWithoutSite)
     let clientIDLink: NSButton = LinkButton(title: "", target: nil, action: nil)
     /// The page `clientIDLink` opens: the OAuth Client list of the site in
@@ -38,20 +41,33 @@ import UserNotifications
     let redirect = URL(string: "ch.goodvantage.Nevermore://oauth")!
     init(app: AppDelegate, account: Account? = nil) {
         self.app = app; expectedAccount = account
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 388), styleMask: [.titled,.closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 450), styleMask: [.titled,.closable], backing: .buffered, defer: false)
         super.init(window: window); window.title = "Add Raven Account"; window.center(); window.delegate = self
         let title = NSTextField(labelWithString: "Welcome to Nevermore"); title.font = .systemFont(ofSize: 23, weight: .semibold)
+        siteLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        clientIDLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        // The fields already carry these names for VoiceOver; the visible
+        // labels are for sighted readers, so they add no second AX element.
+        siteLabel.setAccessibilityElement(false)
+        clientIDLabel.setAccessibilityElement(false)
         site.placeholderString = "https://chat.example.com"; site.setAccessibilityLabel("Raven site URL")
         clientID.placeholderString = "Dedicated OAuth Client ID"; clientID.setAccessibilityLabel("OAuth Client ID")
+        clientIDNote.font = Self.clientIDRowFont; clientIDNote.textColor = .secondaryLabelColor
+        clientIDNote.maximumNumberOfLines = 0
         let note = NSTextField(wrappingLabelWithString: "Register this exact redirect URI for a public client, with authorization-code flow and S256 PKCE:\nch.goodvantage.Nevermore://oauth\nConsent requests the server’s all openid scopes."); note.textColor = .secondaryLabelColor; note.isSelectable = true
         clientIDHint.font = Self.clientIDRowFont; clientIDHint.textColor = .secondaryLabelColor
         clientIDHint.setContentCompressionResistancePriority(.required, for: .horizontal)
         clientIDLink.isBordered = false; clientIDLink.isHidden = true; clientIDLink.setAccessibilityRole(.link)
         clientIDLink.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let clientIDRow = NSStackView(views: [clientIDHint, clientIDLink]); clientIDRow.orientation = .horizontal; clientIDRow.spacing = 4
-        let stack = NSStackView(views: [title, site, clientID, clientIDRow, note, status, button]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 14; stack.translatesAutoresizingMaskIntoConstraints = false
+        let stack = NSStackView(views: [title, siteLabel, site, clientIDLabel, clientID, clientIDNote, clientIDRow, note, status, button]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 14; stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.setCustomSpacing(6, after: siteLabel)
+        stack.setCustomSpacing(16, after: site)
+        stack.setCustomSpacing(6, after: clientIDLabel)
+        stack.setCustomSpacing(4, after: clientID)
+        stack.setCustomSpacing(12, after: clientIDNote)
         window.contentView?.addSubview(stack)
-        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -24), stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24), site.widthAnchor.constraint(equalTo: stack.widthAnchor), clientID.widthAnchor.constraint(equalTo: stack.widthAnchor), clientIDRow.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor), status.widthAnchor.constraint(equalTo: stack.widthAnchor), note.widthAnchor.constraint(equalTo: stack.widthAnchor)])
+        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -24), stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24), site.widthAnchor.constraint(equalTo: stack.widthAnchor), clientID.widthAnchor.constraint(equalTo: stack.widthAnchor), clientIDNote.widthAnchor.constraint(equalTo: stack.widthAnchor), clientIDRow.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor), status.widthAnchor.constraint(equalTo: stack.widthAnchor), note.widthAnchor.constraint(equalTo: stack.widthAnchor)])
         if let account { site.stringValue = account.origin.absoluteString; clientID.stringValue = account.clientID; window.title = "Sign In Again · \(account.user)" }
         button.target = self; button.action = #selector(begin)
         site.delegate = self
@@ -153,6 +169,7 @@ import UserNotifications
     unowned let app: AppDelegate
     let notifications = NSButton(checkboxWithTitle: "Show notifications while Nevermore is running", target: nil, action: nil)
     let sendKey = NSPopUpButton()
+    let notificationPreview = NSPopUpButton()
     let markdownShortcuts = NSButton(checkboxWithTitle: "Format Markdown shortcuts as you type", target: nil, action: nil)
     let linkPreviews = NSButton(checkboxWithTitle: "Preview links while you write", target: nil, action: nil)
     let inkSounds = NSButton(checkboxWithTitle: "Play sounds for sending, delivery and reactions", target: nil, action: nil)
@@ -211,6 +228,9 @@ import UserNotifications
             menuBarIcon.lastItem?.image = MenuBarIconArt.image(for: icon, size: MenuBarIconArt.menuItemSize)
         }
         menuBarIcon.setAccessibilityLabel("Menu bar icon")
+        notificationPreview.addItems(withTitles: NotificationPreview.allCases.map(\.title))
+        notificationPreview.selectItem(at: NotificationPreview.allCases.firstIndex(of: .current()) ?? 0)
+        notificationPreview.setAccessibilityLabel("What notifications show")
         sendKey.addItems(withTitles: ComposerSendKey.allCases.map(Self.title(for:)))
         sendKey.setAccessibilityLabel("Key that sends a message")
         retention.state = UserDefaults.standard.object(forKey: "retainHistory") as? Bool == false ? .off : .on
@@ -254,7 +274,8 @@ import UserNotifications
         ]))
         let notificationsPane = SettingsPaneController(title: "Notifications", symbol: "bell.badge", grid: Self.makeGrid([
             [Self.label("Notifications:"), notifications],
-            [Self.label(""), Self.note("Notifications use private previews and arrive only while Nevermore is open. Sleep and Quit pause them.")],
+            [Self.label("Show:"), notificationPreview],
+            [Self.label(""), Self.note("Notification Center keeps what a notification shows until you clear it, and anyone who can see your screen can read it. Spoilers stay hidden. Notifications arrive only while Nevermore is open; Sleep and Quit pause them.")],
         ]))
         let reading = SettingsPaneController(title: "Reading", symbol: "textformat.size", grid: Self.makeGrid([
             [Self.label("Message text:"), Self.makeSizeStack(slider: fontSize)],
@@ -304,6 +325,8 @@ import UserNotifications
         menuBarIcon.action = #selector(changeMenuBarIcon)
         sendKey.target = self
         sendKey.action = #selector(changeSendKey)
+        notificationPreview.target = self
+        notificationPreview.action = #selector(changeNotificationPreview)
         interfaceSounds.target = self; interfaceSounds.action = #selector(changeInterfaceSounds)
         interfaceSoundVolume.target = self; interfaceSoundVolume.action = #selector(changeInterfaceSounds)
         interfaceSoundPreview.target = self; interfaceSoundPreview.action = #selector(previewInterfaceSound)
@@ -406,6 +429,11 @@ import UserNotifications
         case .returnKey: "Return sends, Shift-Return inserts a new line"
         case .commandReturn: "Command-Return sends, Return inserts a new line"
         }
+    }
+
+    @objc func changeNotificationPreview() {
+        guard NotificationPreview.allCases.indices.contains(notificationPreview.indexOfSelectedItem) else { return }
+        UserDefaults.standard.set(NotificationPreview.allCases[notificationPreview.indexOfSelectedItem].rawValue, forKey: NotificationPreview.defaultsKey)
     }
 
     @objc func changeBadge() {

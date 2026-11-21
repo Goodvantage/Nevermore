@@ -126,7 +126,7 @@ extension TransportSuite {
         let session = StubURLProtocol.install { request in
             (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/2", headerFields: [:])!, Data(repeating: 1, count: 4096))
         }
-        await #expect(throws: RavenError.resourceLimit) { try await client(session).download(URL(string: "https://site.test/private/files/large")!, to: root, maximumBytes: 512) }
+        await #expect(throws: RavenError.resourceLimit(512)) { try await client(session).download(URL(string: "https://site.test/private/files/large")!, to: root, maximumBytes: 512) }
         try expectNoPrivateFiles(in: root)
     }
 
@@ -135,7 +135,7 @@ extension TransportSuite {
         let oversized = StubURLProtocol.install { request in
             (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/2", headerFields: ["Content-Length": "1000000"])!, Data())
         }
-        await #expect(throws: RavenError.resourceLimit) { try await client(oversized).download(URL(string: "https://site.test/file")!, to: root, maximumBytes: 512) }
+        await #expect(throws: RavenError.resourceLimit(512)) { try await client(oversized).download(URL(string: "https://site.test/file")!, to: root, maximumBytes: 512) }
         try expectNoPrivateFiles(in: root)
         let partial = StubURLProtocol.install { request in
             (HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: "HTTP/2", headerFields: ["Content-Range": "bytes 0-2/10"])!, Data("abc".utf8))

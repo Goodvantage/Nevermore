@@ -68,6 +68,21 @@ struct StatusLocalizationTests {
         #expect(!budget.contains("%lld"))
         #expect(StatusLocalization.errorDescription(RavenError.transport, locale: german).hasPrefix("Die Website"))
     }
+
+    @Test func resourceLimitReportsTheLimitThatApplied() {
+        let small = StatusLocalization.errorDescription(RavenError.resourceLimit(512), locale: english)
+        #expect(small.contains(RavenError.formattedResourceLimit(512, locale: english)))
+        #expect(!small.contains("64"))
+        let large = StatusLocalization.errorDescription(RavenError.resourceLimit(RavenError.maximumAttachmentBytes), locale: english)
+        #expect(large.contains(RavenError.formattedResourceLimit(RavenError.maximumAttachmentBytes, locale: english)))
+        #expect(!large.contains("%@"))
+        #expect(RavenError.resourceLimit(512).errorDescription?.contains(RavenError.formattedResourceLimit(512)) == true)
+        // The German table has no resource_limit key, so the English fallback
+        // supplies the sentence and the number stays in the requested locale.
+        let germanText = StatusLocalization.errorDescription(RavenError.resourceLimit(512), locale: german)
+        #expect(germanText.contains(RavenError.formattedResourceLimit(512, locale: german)))
+        #expect(!germanText.contains("%@"))
+    }
     @Test func stateLabelsNeverChangePersistedValues() throws {
         #expect(SendState.needsReview.localizedLabel(locale: english) == "Review required")
         #expect(SendState.needsReview.localizedLabel(locale: german) == "Überprüfung erforderlich")

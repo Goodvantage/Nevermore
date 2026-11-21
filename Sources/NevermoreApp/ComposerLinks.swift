@@ -117,7 +117,9 @@ extension NSAttributedString.Key {
             guard link != nil else { return }
             var whole = NSRange()
             let address = linkAddress(value.attribute(.link, at: part.location, longestEffectiveRange: &whole, in: NSRange(location: 0, length: value.length)))
-            guard let address, text.substring(with: whole) == address, !found.contains(whole) else { return }
+            let shown = text.substring(with: whole)
+            // A "www." address is shown without the "https://" it opens.
+            guard let address, shown == address || (shown.lowercased().hasPrefix("www.") && "https://" + shown == address), !found.contains(whole) else { return }
             var flagged = NSRange()
             let flag = value.attribute(.autoLink, at: whole.location, longestEffectiveRange: &flagged, in: whole)
             if flag == nil || flagged != whole { found.append(whole) }

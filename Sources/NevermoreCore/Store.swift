@@ -248,6 +248,21 @@ public actor AccountStore {
             try db.create(index: "messages_channel_creation", on: "messages", columns: ["channelID", "creation", "id"])
             try db.create(index: "operations_state", on: "operations", columns: ["state"])
         }
+        migrator.registerMigration("v3_review_legacy_gif_retries") { db in
+            // A lost acknowledgement could leave a legacy GIF retryable, or
+            // queued again after Retry. Either state can represent a delivered POST.
+            let affected = try Data.fetchCursor(db, sql: "SELECT payload FROM operations WHERE state IN ('queued', 'retryable') AND attempts > 0")
+            var uncertain: [SendOperation] = []
+            while let payload = try affected.next() {
+                var operation = try Self.decode(SendOperation.self, from: payload)
+                if operation.isGIF {
+                    operation.state = .needsReview
+                    operation.error = StatusLocalization.text(.outboxGifReview)
+                    uncertain.append(operation)
+                }
+            }
+            for operation in uncertain { try Self.replaceOperation(db, operation) }
+        }
     }
 
     // MARK: Drafts and the send outbox
@@ -511,12 +526,20 @@ public actor AccountStore {
     /// `uploading`/`sending` are returned to `retryable` with their original
     /// immutable payload, id, attempts and completed upload metadata intact,
     /// so the serialized retry path resumes them without re-uploading.
+    /// A plain GIF has no idempotency key: once it reached `sending`, its
+    /// POST may have been delivered, so it waits for review instead. An
+    /// interrupted `uploading` GIF never reached its POST and stays retryable.
     public func recoverInterruptedOperations() async throws {
         try await queue.write { db in
             let rows = try Data.fetchAll(db, sql: "SELECT payload FROM operations WHERE state IN ('uploading', 'sending')")
             for data in rows {
                 var operation = try Self.decode(SendOperation.self, from: data)
-                operation.state = .retryable
+                if operation.state == .sending && operation.isGIF {
+                    operation.state = .needsReview
+                    operation.error = StatusLocalization.text(.outboxGifReview)
+                } else {
+                    operation.state = .retryable
+                }
                 try Self.replaceOperation(db, operation)
             }
         }
@@ -541,6 +564,15 @@ public actor AccountStore {
                 sql: "SELECT raw FROM messages WHERE channelID = ? ORDER BY creation DESC, id DESC LIMIT ?",
                 arguments: [channelID, bounded])
             return try rows.reversed().map { try Self.decode(RavenMessage.self, from: $0) }
+        }
+    }
+
+    /// Looks up one cached message within its conversation.
+    public func message(id: String, channelID: String) async throws -> RavenMessage? {
+        try await queue.read { db in
+            let raw = try Data.fetchOne(db, sql: "SELECT raw FROM messages WHERE id = ? AND channelID = ?",
+                                        arguments: [id, channelID])
+            return try raw.map { try Self.decode(RavenMessage.self, from: $0) }
         }
     }
 
@@ -609,18 +641,36 @@ public actor AccountStore {
     /// Removes cached channels no longer allowed (revoked access) together with
     /// their cached messages and index rows. Drafts and queued sends for those
     /// channels are durable unsent work and are deliberately retained.
-    public func removeRevokedChannels(allowed: Set<String>) async throws {
+    public func removeRevokedChannels(allowed: Set<String>, withdrawnHistory: Set<String> = []) async throws {
         try await queue.write { db in
             let revoked = try String.fetchAll(db, sql: "SELECT id FROM channels").filter { !allowed.contains($0) }
-            if !revoked.isEmpty { try db.execute(sql: "DELETE FROM projections") }
+            let withdrawn = withdrawnHistory.union(revoked)
+            guard !withdrawn.isEmpty else { return }
+            try db.execute(sql: "DELETE FROM projections")
             for chunk in revoked.chunked(into: 500) {
                 let marks = chunk.map { _ in "?" }.joined(separator: ",")
                 try db.execute(sql: "DELETE FROM channels WHERE id IN (\(marks))", arguments: StatementArguments(chunk))
-                try db.execute(
-                    sql: "DELETE FROM messages_fts WHERE id IN (SELECT id FROM messages WHERE channelID IN (\(marks)))",
-                    arguments: StatementArguments(chunk))
-                try db.execute(sql: "DELETE FROM messages WHERE channelID IN (\(marks))", arguments: StatementArguments(chunk))
             }
+            try Self.deleteHistory(db, channels: withdrawn)
+        }
+    }
+
+    /// A thread may have cached messages without an entry in the channel list.
+    public func withdrawHistory(channelIDs: Set<String>) async throws {
+        guard !channelIDs.isEmpty else { return }
+        try await queue.write { db in
+            try db.execute(sql: "DELETE FROM projections")
+            try Self.deleteHistory(db, channels: channelIDs)
+        }
+    }
+
+    private static func deleteHistory(_ db: Database, channels: Set<String>) throws {
+        for chunk in Array(channels).chunked(into: 500) {
+            let marks = chunk.map { _ in "?" }.joined(separator: ",")
+            try db.execute(
+                sql: "DELETE FROM messages_fts WHERE id IN (SELECT id FROM messages WHERE channelID IN (\(marks)))",
+                arguments: StatementArguments(chunk))
+            try db.execute(sql: "DELETE FROM messages WHERE channelID IN (\(marks))", arguments: StatementArguments(chunk))
         }
     }
 

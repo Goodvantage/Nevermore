@@ -87,9 +87,13 @@ enum AttachmentPresentation {
         panel.makeKeyAndOrderFront(nil); panel.updateController()
         guard (panel.currentController as AnyObject?) === self else {
             if host != nil {
-                // Quick Look did not take the file, so show the file actions.
+                // Another responder in the clicked window took Quick Look.
+                // Show the file actions and preview from there at once,
+                // rather than asking for a second click.
                 leaveHost(); joinOwnWindow()
                 showWindow(nil)
+                previewDownloadedFile()
+                return
             }
             detail.stringValue = "The file is ready. Select this window to preview it."
             return
@@ -126,24 +130,13 @@ enum AttachmentPresentation {
         defer { savePanel = nil; exporting = false; save.isEnabled = true; share.isEnabled = true }
         dismissOwnedPreview()
         parent.makeKeyAndOrderFront(nil)
-        let panel = makeSavePanel(); panel.nameFieldStringValue = attachment.filename
+        let panel = makeSavePanel()
         savePanel = panel
-        let response = await withCheckedContinuation { continuation in
-            panel.beginSheetModal(for: parent) { continuation.resume(returning: $0) }
-        }
-        guard response == .OK, let target = panel.url, !closed, active() else { return nil }
         do {
-            let source = attachment
-            try await Task.detached(priority: .userInitiated) { try source.export(to: target, replacing: true) }.value
-            guard !closed, active() else { return nil }
+            guard let target = try await AttachmentExport.saveCopy(of: attachment, using: panel, over: parent, isCurrent: { [weak self] in self.map { !$0.closed && $0.active() } ?? false }) else { return nil }
             savedURL = target; reveal.isEnabled = true
             openWith.removeAllItems(); openWith.addItem(withTitle: "Open Saved File With…")
-            if previewKind != .unsupported {
-                for app in NSWorkspace.shared.urlsForApplications(toOpen: target) {
-                    let item = NSMenuItem(title: FileManager.default.displayName(atPath: app.path), action: nil, keyEquivalent: "")
-                    item.representedObject = app; openWith.menu?.addItem(item)
-                }
-            }
+            if previewKind != .unsupported { for item in AttachmentExport.openWithItems(for: target) { openWith.menu?.addItem(item) } }
             openWith.isEnabled = openWith.numberOfItems > 1
             detail.stringValue = "Saved as \(target.lastPathComponent). You can reveal, share or drag a copy."
             return target

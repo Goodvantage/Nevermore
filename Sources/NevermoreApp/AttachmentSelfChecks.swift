@@ -4,7 +4,7 @@ import RavenProtocol
 import Synchronization
 
 @MainActor enum AttachmentSelfChecks {
-    static func run(origin input: String) async throws -> [(String, Bool)] {
+    static func run(app: AppDelegate, origin input: String) async throws -> [(String, Bool)] {
         let origin = try SiteOrigin.normalize(input, allowLocalHTTP: true)
         guard origin.scheme == "http", origin.host == "127.0.0.1", origin.port != nil else { throw AppError.message("Attachment self-checks require the local fixture runner.") }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("NevermoreAttachmentCheck-\(UUID())")
@@ -95,6 +95,24 @@ import Synchronization
         for _ in 0..<200 { if previewEnded { break }; try await Task.sleep(for: .milliseconds(10)) }
         results.append(("closing Quick Look ends a preview over a window and restores its responder chain", previewEnded && host.nextResponder === hostNext && QLPreviewPanel.shared()?.dataSource == nil))
         overHost = nil; host.close()
+        // A click in the transcript leaves a text view first responder, and
+        // NSTextView takes Quick Look ahead of the rest of the chain: every
+        // image click opened the file actions window instead of a preview.
+        for textView in [LiveResizeTextView(), ComposerView()] as [NSTextView] {
+            let focused = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+            focused.isReleasedWhenClosed = false
+            textView.frame = focused.contentLayoutRect; focused.contentView?.addSubview(textView)
+            focused.makeKeyAndOrderFront(nil); focused.makeFirstResponder(textView)
+            for _ in 0..<100 { if focused.isKeyWindow { break }; try await Task.sleep(for: .milliseconds(10)) }
+            var ended = false
+            let fromText = AttachmentWindow(attachment: try await client.download(origin.appendingPathComponent("fixture.txt"), to: root), messageLink: nil, presentation: .quickLook(over: focused), active: { true }, reportError: { failures.append($0); print("Attachment fixture error: \($0.localizedDescription)"); fflush(nil) })
+            fromText.didClose = { ended = true }
+            fromText.present(save: false)
+            results.append(("a preview from a focused \(type(of: textView)) opens Quick Look without a second window", focused.firstResponder === textView && QLPreviewPanel.shared()?.isVisible == true && (QLPreviewPanel.shared()?.dataSource as AnyObject?) === fromText && !fromText.showsOwnWindow))
+            QLPreviewPanel.shared()?.close()
+            for _ in 0..<200 { if ended { break }; try await Task.sleep(for: .milliseconds(10)) }
+            fromText.close(); focused.close()
+        }
         // When Quick Look declines the file, the file actions window opens
         // instead. Its responder chain once looped, and the next key press
         // there walked the loop until the app ran out of memory.
@@ -107,8 +125,15 @@ import Synchronization
         let declined = AttachmentWindow(attachment: try await client.download(origin.appendingPathComponent("fixture.txt"), to: root), messageLink: nil, presentation: .quickLook(over: claimed), active: { true }, reportError: { failures.append($0); print("Attachment fixture error: \($0.localizedDescription)"); fflush(nil) })
         declined.present(save: false)
         results.append(("a preview Quick Look declines opens the file actions with a finite responder chain", declined.showsOwnWindow && declined.window?.isVisible == true && chainEnds(from: declined.window) && claimed.nextResponder === claimedNext))
-        QLPreviewPanel.shared()?.close(); declined.close(); claimed.close()
+        results.append(("a preview Quick Look declines still previews from the file actions window", QLPreviewPanel.shared()?.isVisible == true && (QLPreviewPanel.shared()?.dataSource as AnyObject?) === declined))
+        // Let Quick Look finish closing first: closing the windows under a
+        // closing panel left it open for the checks after this one.
+        QLPreviewPanel.shared()?.close()
         for _ in 0..<100 { if QLPreviewPanel.shared()?.isVisible != true { break }; try await Task.sleep(for: .milliseconds(10)) }
+        declined.close(); claimed.close()
+        results += try await fileInspectorChecks(client: client, origin: origin, root: root)
+        results += try await fileDownloadRetryChecks(app: app, client: client, origin: origin, root: root)
+        results += try await fileRetryChecks(app: app, origin: origin, root: root)
         let destination = root.appendingPathComponent("exported.txt")
         let completion = Mutex((count: 0, failed: false))
         provider.delegate?.filePromiseProvider(provider, writePromiseTo: destination, completionHandler: { error in completion.withLock { $0.count += 1; $0.failed = error != nil } })
@@ -135,6 +160,160 @@ import Synchronization
         return results
     }
 
+    /// The File panel a click opens: a live preview of passive files, the
+    /// file's details, and actions that reach the window that hosts it.
+    private static func fileInspectorChecks(client: RavenClient, origin: URL, root: URL) async throws -> [(String, Bool)] {
+        var results: [(String, Bool)] = []
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 640), styleMask: [.titled], backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        defer { host.close() }
+        func panel(_ filename: String, active: @escaping () -> Bool = { true }, savePanel: @escaping @MainActor () -> NSSavePanel = { NSSavePanel() }) -> FileInspector {
+            let source = FileInspectorSource(messageID: "file-message", channelID: "file-channel", filename: filename, sender: "Fixture Sender", sent: "09:42", conversation: "#fixtures", messageLink: URL(string: "https://example.invalid/raven/message/file-message"))
+            let inspector = FileInspector(source: source, active: active, reportError: { print("File panel fixture error: \($0.localizedDescription)"); fflush(nil) }, makeSavePanel: savePanel)
+            inspector.view.frame = host.contentLayoutRect; host.contentView = inspector.view
+            inspector.start(); host.layoutIfNeeded()
+            return inspector
+        }
+        func texts(_ inspector: FileInspector) -> [String] { InteractionSelfChecks.descendants(inspector.view, of: NSTextField.self).filter { !$0.isHidden }.map(\.stringValue) }
+        func button(_ inspector: FileInspector, _ title: String) -> NSButton? { InteractionSelfChecks.descendants(inspector.view, of: NSButton.self).first { $0.title == title } }
+
+        let image = panel("fixture.png")
+        results.append(("the File panel shows the message's details and waits for its file", texts(image).contains("Downloading…") && texts(image).contains("Fixture Sender") && texts(image).contains("#fixtures") && button(image, "Quick Look")?.isEnabled == false))
+        let png = try await client.download(origin.appendingPathComponent("fixture.png"), to: root)
+        image.show(png)
+        results.append(("the File panel previews a downloaded image inline", ((image.previewView?.previewItem as? NSURL) as URL?) == png.url && image.previewView?.superview != nil))
+        results.append(("the File panel lists an image's size and dimensions", texts(image).contains("30 × 20 pixels") && texts(image).contains(ByteCountFormatter.string(fromByteCount: Int64(png.byteCount), countStyle: .file))))
+        var quickLooked: DownloadedAttachment?
+        image.onQuickLook = { quickLooked = $0 }
+        button(image, "Quick Look")?.performClick(nil)
+        results.append(("Quick Look in the File panel shows the panel's own download", quickLooked === png))
+        var shown: String?
+        image.onShowMessage = { shown = $0 }
+        button(image, "Show Message")?.performClick(nil)
+        results.append(("Show Message in the File panel finds the file's message", shown == "file-message"))
+        let preview = image.previewView
+        image.detach()
+        results.append(("closing the File panel ends its preview and releases the file", image.attachment == nil && image.previewView == nil && preview?.superview == nil && button(image, "Save As…")?.isEnabled == false))
+        quickLooked = nil
+
+        let svg = try await client.download(origin.appendingPathComponent("fixture.svg"), to: root)
+        var savePanels: [RecordingSavePanel] = []
+        let active = panel("fixture.svg", savePanel: { let panel = RecordingSavePanel(); savePanels.append(panel); return panel })
+        active.show(svg)
+        active.onQuickLook = { quickLooked = $0 }
+        active.showQuickLook()
+        results.append(("the File panel never renders an active format, but offers to save it", active.previewView == nil && button(active, "Quick Look")?.isEnabled == false && button(active, "Save As…")?.isEnabled == true && quickLooked == nil))
+        _ = await active.saveCopy()
+        let blocker = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+        blocker.isReleasedWhenClosed = false
+        host.beginSheet(blocker) { _ in }
+        let blocked = host.attachedSheet === blocker
+        _ = await active.saveCopy()
+        host.endSheet(blocker); blocker.close()
+        results.append(("Save As asks on a sheet, or in its own window while another sheet is open", blocked && savePanels.map(\.presentedAsSheet) == [true, false]))
+        active.detach()
+
+        // Save As for a search result goes straight to the save sheet.
+        let reader = SearchAttachmentReader()
+        var searchPanels: [RecordingSavePanel] = []
+        reader.makeSavePanel = { let panel = RecordingSavePanel(); searchPanels.append(panel); return panel }
+        reader.deliver(svg, link: nil, save: true, over: host, live: { true }, reportError: { print("Search save fixture error: \($0.localizedDescription)"); fflush(nil) })
+        for _ in 0..<100 where searchPanels.first?.presentedAsSheet == nil { await Task.yield() }
+        results.append(("Save As for a search result asks on a sheet, with no file actions window", searchPanels.map(\.presentedAsSheet) == [true] && reader.windows.isEmpty))
+        reader.cancel()
+
+        var allowed = true
+        let revoked = panel("fixture.txt", active: { allowed })
+        var closedByAccess = false
+        revoked.onClose = { closedByAccess = true }
+        revoked.show(try await client.download(origin.appendingPathComponent("fixture.txt"), to: root))
+        allowed = false
+        NotificationCenter.default.post(name: .sessionChanged, object: nil)
+        for _ in 0..<100 { if closedByAccess { break }; try await Task.sleep(for: .milliseconds(10)) }
+        results.append(("the File panel closes when its conversation is no longer accessible", closedByAccess))
+        revoked.detach()
+        return results
+    }
+
+    /// Each file fails on its first GET. Exercise all three retry entry
+    /// points and inspect the request counts after the downloads settle.
+    private static func fileDownloadRetryChecks(app: AppDelegate, client: RavenClient, origin: URL, root: URL) async throws -> [(String, Bool)] {
+        let account = Account(origin: origin, user: "file-fixture", siteName: "Local fixture", clientID: "local-fixture")
+        let session = try AccountSession(account: account, directory: root)
+        let channel = RavenChannel(raw: .object(["name": .string("file-retry"), "channel_name": .string("Files")]))
+        session.channels = [channel]
+        let owner = ConversationWindow(app: app, session: session)
+        owner.channel = channel
+        owner.window?.setFrame(NSRect(x: 0, y: 0, width: 1200, height: 760), display: false)
+        defer { owner.close(); session.stop() }
+
+        var saves: [RecordingSavePanel] = []
+        owner.makeFileInspectorSavePanel = { let panel = RecordingSavePanel(); saves.append(panel); return panel }
+        var checks: [(String, Bool)] = []
+        for id in ["retry-button", "retry-click", "retry-save"] {
+            let message = RavenMessage(raw: .object(["name": .string(id), "channel_id": .string(channel.id), "message_type": .string("File"), "file": .string("/" + id + ".txt")]))
+            owner.showFileInspector(for: message)
+            await owner.fileDownload?.value
+            guard let inspector = owner.fileInspector,
+                  let button = InteractionSelfChecks.descendants(inspector.view, of: NSButton.self).first(where: { $0.title == "Try Again" }),
+                  !button.isHiddenOrHasHiddenAncestor else {
+                checks.append(("a failed download exposes Try Again for " + id, false))
+                continue
+            }
+            switch id {
+            case "retry-button":
+                session.revokedChannels.insert(channel.id)
+                button.performClick(nil)
+                checks.append(("a retry refuses a revoked conversation", owner.fileDownload == nil))
+                session.revokedChannels.remove(channel.id)
+                button.performClick(nil)
+            case "retry-save": owner.fetchAttachment(save: true, message: message)
+            default: owner.previewAttachment(for: message)
+            }
+            // A second click while the retry is in flight joins it.
+            owner.showFileInspector(for: message)
+            await owner.fileDownload?.value
+            if id == "retry-save" {
+                for _ in 0..<100 where saves.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+            }
+            checks.append((id + " restores the same File panel", owner.fileInspector === inspector && inspector.attachment != nil))
+            checks.append((id + " preserves the explicit save choice", saves.count == (id == "retry-save" ? 1 : 0)))
+        }
+        let counts = try await client.rpc("nevermore_fixture.retry_counts")
+        checks.append(("each failed file downloads exactly once more",
+                       ["/retry-button.txt", "/retry-click.txt", "/retry-save.txt"].allSatisfy { counts[$0] == .number(2) }))
+        return checks
+    }
+
+    /// A failed download offers one retry; activating the same message again
+    /// while it runs joins that single attempt and keeps the same panel.
+    private static func fileRetryChecks(app: AppDelegate, origin: URL, root: URL) async throws -> [(String, Bool)] {
+        let account = Account(origin: origin, user: "retry-fixture", siteName: "Fixture", clientID: "local-fixture")
+        let session = try AccountSession(account: account, directory: root.appendingPathComponent("retry-account"), demo: true)
+        let channel = RavenChannel(raw: .object(["name": .string("retry-channel")]))
+        let message = RavenMessage(raw: .object(["name": .string("retry-message"), "channel_id": .string(channel.id),
+                                                  "file": .string("/retry-attachment.txt"), "message_type": .string("File")]))
+        let owner = ConversationWindow(app: app, session: session)
+        defer { owner.close(); session.stop() }
+        session.channels = [channel]
+        owner.select(channel)
+        owner.showFileInspector(for: message)
+        await owner.fileDownload?.value
+        guard let panel = owner.fileInspector else { return [("failed File panel remains open", false)] }
+        let retry = InteractionSelfChecks.descendants(panel.view, of: NSButton.self).first { $0.title == "Try Again" }
+        let offered = retry?.isHidden == false && retry?.isEnabled == true && panel.attachment == nil
+        retry?.performClick(nil)
+        let attempt = owner.fileDownload
+        owner.showFileInspector(for: message)
+        let singleAttempt = attempt != nil && owner.fileDownload == attempt
+        await attempt?.value
+        return [
+            ("a failed File panel offers Retry without replacing its details", offered),
+            ("Retry and a repeated click share one download and recover in the same File panel",
+             singleAttempt && owner.fileInspector === panel && panel.attachment?.filename == "retry-attachment.txt"),
+        ]
+    }
+
     /// Whether a responder chain reaches its end instead of looping.
     private static func chainEnds(from start: NSResponder?) -> Bool {
         var seen = Set<ObjectIdentifier>(), responder = start
@@ -144,6 +323,14 @@ import Synchronization
         }
         return true
     }
+}
+
+/// Records how the File panel presents Save As and cancels at once, so the
+/// check never shows a real save panel.
+private final class RecordingSavePanel: NSSavePanel {
+    private(set) var presentedAsSheet: Bool?
+    override func beginSheetModal(for window: NSWindow, completionHandler handler: @escaping (NSApplication.ModalResponse) -> Void) { presentedAsSheet = true; handler(.cancel) }
+    override func begin(completionHandler handler: @escaping (NSApplication.ModalResponse) -> Void) { presentedAsSheet = false; handler(.cancel) }
 }
 
 /// Takes Quick Look before any responder after it in its window, so a

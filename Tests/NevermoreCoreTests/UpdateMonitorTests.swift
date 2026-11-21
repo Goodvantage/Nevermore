@@ -111,6 +111,29 @@ import Testing
         monitor.stop()
     }
 
+    @Test func manualCheckRunsAfterStopAndStartInsteadOfJoiningTheCancelledRequest() async throws {
+        let gate = ReleaseMultiGate(), offer = try offer()
+        let monitor = UpdateMonitor(runningVersion: running, defaults: defaults(), fetch: { _ in await gate.fetch() })
+        let first = Task { await monitor.check(.manual) }
+        for _ in 0..<200 { if await gate.started { break }; try await Task.sleep(for: .milliseconds(10)) }
+        #expect(await gate.started)
+        monitor.stop()
+        // stop() drops the cancelled request, so the checking state must not
+        // leak into the next session.
+        #expect(!monitor.isChecking)
+        monitor.start()
+        // The second check must start a new fetch while the cancelled request
+        // is still in flight, not join it and return without fetching.
+        let second = Task { await monitor.check(.manual) }
+        for _ in 0..<200 { if await gate.count == 2 { break }; try await Task.sleep(for: .milliseconds(10)) }
+        #expect(await gate.count == 2)
+        await gate.resolve(offer)
+        await first.value; await second.value
+        #expect(monitor.result == .checked && monitor.offer == offer)
+        #expect(await gate.count == 2)
+        monitor.stop()
+    }
+
     @Test func stoppedMonitorRejectsLateResults() async throws {
         let gate = ReleaseGate(), offer = try offer()
         let monitor = UpdateMonitor(runningVersion: running, defaults: defaults(), fetch: { _ in await gate.fetch() })
@@ -171,6 +194,24 @@ private actor ReleaseGate {
         continuation?.resume(returning: offer); continuation = nil
     }
 }
+private actor ReleaseMultiGate {
+    private var continuations: [CheckedContinuation<ReleaseOffer?, Never>] = []
+    private var resolved = false
+    private var resolution: ReleaseOffer?
+    private(set) var count = 0
+    var started: Bool { !continuations.isEmpty }
+    func fetch() async -> ReleaseOffer? {
+        count += 1
+        if resolved { return resolution }
+        return await withCheckedContinuation { continuations.append($0) }
+    }
+    func resolve(_ offer: ReleaseOffer?) {
+        resolved = true; resolution = offer
+        let pending = continuations; continuations.removeAll()
+        for continuation in pending { continuation.resume(returning: offer) }
+    }
+}
+
 private actor ReleaseClock {
     private(set) var durations: [Duration] = []
     func sleep(_ duration: Duration) async throws {

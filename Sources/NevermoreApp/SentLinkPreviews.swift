@@ -35,13 +35,14 @@ import RavenProtocol
 
     private func store(_ preview: LinkPreview, for raw: String) {
         if previews[raw] != preview { images.removeValue(forKey: raw) }
-        if previews[raw] == nil {
-            if previews.count >= 500, let oldest = insertionOrder.first {
-                previews.removeValue(forKey: oldest); images.removeValue(forKey: oldest)
-                insertionOrder.removeFirst()
-            }
-            insertionOrder.append(raw)
+        if let index = insertionOrder.firstIndex(of: raw) {
+            // Seen again (history refresh or updated preview): keep it from being evicted first.
+            insertionOrder.remove(at: index)
+        } else if previews.count >= 500, let oldest = insertionOrder.first {
+            previews.removeValue(forKey: oldest); images.removeValue(forKey: oldest)
+            insertionOrder.removeFirst()
         }
+        insertionOrder.append(raw)
         previews[raw] = preview
     }
 

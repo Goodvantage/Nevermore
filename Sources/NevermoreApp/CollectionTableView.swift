@@ -8,6 +8,8 @@ import AppKit
 /// the current text input has marked (composing) text.
 @MainActor final class CollectionTableView: NSTableView {
     var onOpen: (() -> Void)?
+    /// Fired for the plain-Escape cancel route; hosts decide whether that
+    /// closes or first clears a filter.
     var onClose: (() -> Void)?
     var onRefresh: (() -> Void)?
     /// Mirrors whether the collection has a source; Command-R is inert without one.

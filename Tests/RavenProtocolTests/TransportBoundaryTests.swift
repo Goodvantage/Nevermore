@@ -19,7 +19,7 @@ extension TransportSuite {
         let session = StubURLProtocol.install { request in
             (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/2", headerFields: ["Content-Length":"1000000000"])!, Data("{}".utf8))
         }
-        await #expect(throws: RavenError.resourceLimit) { try await client(session).rpc("raven.api.native.boot") }
+        await #expect(throws: RavenError.resourceLimit(8 * 1024 * 1024)) { try await client(session).rpc("raven.api.native.boot") }
     }
     @Test(.enabled(if: TestKeychain.isWritable, TestKeychain.unavailableReason)) func refreshCompletionAfterLogoutCannotRestoreKeychainCredentials() async throws {
         let id = UUID()

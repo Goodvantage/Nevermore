@@ -31,8 +31,46 @@ extension AppDelegate {
     @objc func showScheduledMessages(_ sender: Any?) { forward { $0.showScheduledMessages(sender) } }
     @objc func chooseConversation(_ sender: Any?) { forward { $0.window?.makeKeyAndOrderFront(nil); $0.chooseConversation(sender) } }
     @objc func newConversationTab(_ sender: Any?) { forward { $0.window?.makeKeyAndOrderFront(nil); $0.newConversationTab(sender) } }
+    /// Marks every notification of one account read from any window. The
+    /// mutation is account-wide and needs no collection window, so the
+    /// Message menu item resolves through the app delegate in every window
+    /// type; the Inbox window's own toolbar keeps its richer feedback.
+    @objc func markAllNotificationsRead(_ sender: Any?) {
+        let controller = NSApp.keyWindow?.windowController
+        guard let session = notificationReadSession else { NSSound.beep(); return }
+        let conversation = (controller as? ConversationWindow) ?? activeConversationWindow
+        Task { @MainActor in
+            let transport = CollectionBatchActions.transport(session: session)
+            // Attempted once: an uncertain outcome is never replayed, the
+            // canonical read below reports what the server applied.
+            var acknowledged = false
+            do { try await transport.markAllRead(); acknowledged = true } catch { }
+            var reconciled = false
+            do { session.unreadNotificationIDs = try await transport.unreadIDs(); reconciled = true } catch { }
+            session.notify()
+            for window in windows where window.session === session {
+                for collection in window.collectionWindows where collection.kind == .inbox && collection.session === session { collection.refresh() }
+            }
+            if let conversation, conversation.session === session {
+                conversation.status.stringValue = acknowledged
+                    ? (reconciled ? "All notifications marked read." : "Notifications were marked read, but unread status could not be refreshed. Refresh this account to check.")
+                    : "Could not confirm that all notifications were marked read. Refresh before trying again."
+            }
+        }
+    }
+    private var notificationReadSession: AccountSession? {
+        let controller = NSApp.keyWindow?.windowController
+        let focused = (controller as? CollectionWindow)?.session ?? (controller as? ConversationWindow)?.session ?? activeConversationWindow?.session
+        func eligible(_ session: AccountSession) -> Bool { !session.stopped && !session.readOnly && !session.demo }
+        if let focused { return eligible(focused) ? focused : nil }
+        return sessions.first(where: { eligible($0) })
+    }
+
     @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
         let forwarded: [Selector] = [#selector(goHome(_:)), #selector(inbox), #selector(threads), #selector(outbox), #selector(showSavedMessages(_:)), #selector(showReminders(_:)), #selector(showScheduledMessages(_:)), #selector(chooseConversation(_:)), #selector(newConversationTab(_:))]
+        if item.action == #selector(markAllNotificationsRead(_:)) {
+            return notificationReadSession != nil
+        }
         if let action = item.action, forwarded.contains(action) { return activeConversationWindow != nil }
         if item.action == #selector(showThemeEditor(_:)) { return !ThemeManager.shared.current.isClassic }
         return true
@@ -66,7 +104,7 @@ extension AppDelegate {
             window.title = "Keyboard Shortcuts"; window.isReleasedWhenClosed = false; window.center(); window.setFrameAutosaveName("NevermoreKeyboardShortcuts")
             let text = NSTextView(); text.isEditable = false; text.isSelectable = true; text.font = .systemFont(ofSize: 14); text.textContainerInset = NSSize(width: 20, height: 20)
             let sections: [(String, [(String, String)])] = [
-                ("Windows and conversations", [("New message", "⌘N"), ("New window", "⇧⌘N"), ("New tab", "⌘T"), ("Open conversation", "⌘O"), ("Back / forward", "⌘[ / ⌘]"), ("Next / previous conversation", "⌥⌘↓ / ⌥⌘↑"), ("Next unread conversation", "⇧⌥⌘↓"), ("Inbox … Outbox (Go menu)", "⌘1 – ⌘6"), ("Show or hide the sidebar", "⌃⌘S"), ("Show or hide the thread inspector", "⌥⌘I"), ("Settings", "⌘,")]),
+                ("Windows and conversations", [("New message", "⌘N"), ("New window", "⇧⌘N"), ("New tab", "⌘T"), ("Open conversation", "⌘O"), ("Back / forward", "⌘[ / ⌘]"), ("Next / previous conversation", "⌥⌘↓ / ⌥⌘↑"), ("Next / previous unread conversation", "⇧⌥⌘↓ / ⇧⌥⌘↑"), ("Inbox … Outbox (Go menu)", "⌘1 – ⌘6"), ("Show or hide the sidebar", "⌃⌘S"), ("Show or hide the thread inspector", "⌥⌘I"), ("Settings", "⌘,")]),
                 ("Reading", [("Find in the transcript", "⌘F"), ("Next / previous match", "⌘G / ⇧⌘G"), ("Search messages", "⌥⌘F"), ("Search this account", "⇧⌘F"), ("Next / previous message", "⌃⌘] / ⌃⌘["), ("Quick Look attachment", "Space or ⌘Y"), ("Read on: page down, then the next unread conversation", "Space"), ("Start typing a message", "Type while reading"), ("Make text bigger / smaller / normal", "⌘+ / ⌘- / ⌘0"), ("Print the conversation", "⌘P")]),
                 ("Messages", [("Reply", "⌘R"), ("Reply in thread", "⇧⌘T"), ("Edit your last message", "↑ in an empty composer"), ("Mark conversation as unread", "⇧⌘U"), ("Attach files", "⇧⌘A")]),
                 ("Writing", [("Send", "Return, or ⌘Return by preference"), ("Insert a line break", "⇧Return or ⌥Return"), ("Move focus out of the composer", "Tab / ⇧Tab"), ("Bold / italic / underline", "⌘B / ⌘I / ⌘U"), ("Strikethrough", "⇧⌘X"), ("Code", "⇧⌘K"), ("Insert link", "⌘K"), ("Bulleted / numbered list", "⇧⌘7 / ⇧⌘9"), ("Block quote", "⌘'"), ("Mention a person", "⇧⌘2 or @"), ("Mention a channel", "#"), ("Emoji & Symbols", "⌃⌘Space"), ("Cancel a reply or edit", "Escape")])

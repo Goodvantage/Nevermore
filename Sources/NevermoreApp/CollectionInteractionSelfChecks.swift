@@ -58,10 +58,99 @@ import NevermoreCore
         if let event = key(15, window: staticCollection.window, modifiers: .command, characters: "r") { staticCollection.table.keyDown(with: event) }
         check("Command-R without a source performs no refresh") { staticCollection.status.stringValue == beforeNoSource && !staticCollection.isLoading }
 
+        // A filter that holds text clears on the first Escape; only an
+        // empty field dismisses the window.
+        let filterCollection = CollectionWindow(owner: owner, title: "Filter escape self-check", records: rows, kind: .messages, source: nil)
+        filterCollection.search.stringValue = "Second"
+        filterCollection.applySearch()
+        check("a collection filter narrows its rows") { filterCollection.records.count == 1 }
+        // Seed the editor's buffer too: ending editing commits it back into
+        // the field, so both must be cleared for the result to survive.
+        let fieldEditor = NSTextView()
+        fieldEditor.string = "Second"
+        let cleared = filterCollection.control(filterCollection.search, textView: fieldEditor, doCommandBy: NSSelectorFromString("cancelOperation:"))
+        check("Escape clears a collection filter instead of closing the window") {
+            cleared && filterCollection.search.stringValue.isEmpty && fieldEditor.string.isEmpty && filterCollection.records.count == rows.count && !filterCollection.isClosed
+        }
+        // Focus moved to the results, so the real second Escape reaches the
+        // table rather than the search field again.
+        var closedAgain = false
+        if let event = key(53, window: filterCollection.window, characters: "\u{1b}") {
+            filterCollection.table.keyDown(with: event)
+            closedAgain = filterCollection.isClosed
+        }
+        check("a second Escape through the results closes an empty-filter collection") { closedAgain }
+
+        // Text held only in the field editor still counts as populated.
+        let editorOnly = CollectionWindow(owner: owner, title: "Editor-only escape self-check", records: rows, kind: .messages, source: nil)
+        let uncommitted = NSTextView()
+        uncommitted.string = "Second"
+        let clearedByEditor = editorOnly.control(editorOnly.search, textView: uncommitted, doCommandBy: NSSelectorFromString("cancelOperation:"))
+        check("Escape clears from the field editor's buffer alone") {
+            clearedByEditor && editorOnly.search.stringValue.isEmpty && uncommitted.string.isEmpty && !editorOnly.isClosed
+        }
+
+        // With the results focused and a populated filter, the first Escape
+        // clears instead of closing; only an empty filter dismisses.
+        let tableFocused = CollectionWindow(owner: owner, title: "Results-focused escape self-check", records: rows, kind: .messages, source: nil)
+        tableFocused.search.stringValue = "Second"
+        tableFocused.applySearch()
+        check("a populated filter narrows the results") { tableFocused.records.count == 1 }
+        if let event = key(53, window: tableFocused.window, characters: "\u{1b}") { tableFocused.table.keyDown(with: event) }
+        check("Escape with results focus clears a populated filter instead of closing") {
+            !tableFocused.isClosed && tableFocused.search.stringValue.isEmpty && tableFocused.records.count == rows.count
+        }
+        if let event = key(53, window: tableFocused.window, characters: "\u{1b}") { tableFocused.table.keyDown(with: event) }
+        check("a second Escape with results focus closes an empty-filter collection") { tableFocused.isClosed }
+
         // A real close must clear private rows and reject delayed results.
         let escapeCollection = CollectionWindow(owner: owner, title: "Escape self-check", records: rows, kind: .messages, source: nil)
         if let event = key(53, window: escapeCollection.window, characters: "\u{1b}") { escapeCollection.table.keyDown(with: event) }
         check("Escape closes the collection window and clears its rows") { escapeCollection.isClosed && escapeCollection.records.isEmpty && escapeCollection.selected == nil }
+
+        // Escape backs out of a filter before it closes anything.
+        let named: [JSONValue] = [
+            .object(["name": .string("row-alpha"), "channel_id": .string("collection-alpha"), "content": .string("First static result")]),
+            .object(["name": .string("row-beta"), "channel_id": .string("collection-beta"), "content": .string("Second static result")]),
+        ]
+        let filtered = CollectionWindow(owner: owner, title: "Filter Escape self-check", records: named, kind: .messages, source: nil)
+        filtered.search.stringValue = "second"; filtered.applySearch()
+        filtered.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        let fieldHandled = filtered.control(filtered.search, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+        check("Escape in a collection's filter field clears the filter instead of closing") { fieldHandled && !filtered.isClosed && filtered.search.stringValue.isEmpty && filtered.records.count == named.count }
+        check("clearing the filter keeps the selected item selected") { filtered.selected?["name"].string == "row-beta" }
+        filtered.search.stringValue = "first"; filtered.applySearch()
+        if let event = key(53, window: filtered.window, characters: "\u{1b}") { filtered.table.keyDown(with: event) }
+        check("Escape in a filtered collection's table clears the filter first") { !filtered.isClosed && filtered.search.stringValue.isEmpty && filtered.records.count == named.count }
+        _ = filtered.control(filtered.search, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+        check("Escape with an empty filter closes the collection") { filtered.isClosed }
+
+        // An Inbox permits several rows at once. Clearing a filter must
+        // reselect every chosen row by its ID rather than by the index it
+        // held while filtered, so the selection survives rows reordering.
+        let multi: [JSONValue] = [
+            .object(["name": .string("inbox-alpha"), "channel_id": .string("collection-alpha"), "content": .string("First static result")]),
+            .object(["name": .string("inbox-beta"), "channel_id": .string("collection-beta"), "content": .string("Second dynamic result")]),
+            .object(["name": .string("inbox-gamma"), "channel_id": .string("collection-alpha"), "content": .string("Third static result")]),
+        ]
+        let inbox = CollectionWindow(owner: owner, title: "Multiple selection escape self-check", records: multi, kind: .inbox, source: nil)
+        inbox.search.stringValue = "static"; inbox.applySearch()
+        check("the Inbox filter hides a non-matching row") { inbox.records.count == 2 }
+        // The remaining rows sit at 0 and 1 while filtered, but gamma moves
+        // back to 2 once the filter clears.
+        inbox.table.selectRowIndexes(IndexSet(integersIn: 0...1), byExtendingSelection: false)
+        if let event = key(53, window: inbox.window, characters: "\u{1b}") { inbox.table.keyDown(with: event) }
+        check("clearing an Inbox filter restores every selected row by ID") {
+            !inbox.isClosed && inbox.search.stringValue.isEmpty && inbox.records.count == multi.count
+                && Array(inbox.table.selectedRowIndexes) == [0, 2]
+        }
+        check("the restored Inbox selection keeps every chosen row selected") {
+            inbox.selectedBatchRows.compactMap { $0["name"].string } == ["inbox-alpha", "inbox-gamma"]
+        }
+        // The window-level Escape route shares the same policy: with the
+        // filter already empty it closes.
+        if let event = key(53, window: inbox.window, characters: "\u{1b}") { inbox.keyDown(with: event) }
+        check("a second Escape through the window route closes the empty-filter Inbox") { inbox.isClosed }
 
         // MARK: Selection-aware and source-aware control states
         staticCollection.table.deselectAll(nil)
@@ -152,16 +241,75 @@ import NevermoreCore
         if let parent = owner.channel {
             let threadCollection = CollectionWindow(owner: owner, title: "Thread route check", records: [.object(["name": .string("collection-thread-fixture"), "channel_id": .string(parent.id)])], kind: .threads)
             threadCollection.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            let windowsBeforeThread = owner.app.windows.count
             threadCollection.open()
-            if let threadWindow = owner.app.windows.last, threadWindow !== owner {
-                await threadWindow.loadTask?.value
-                check("thread collections retain the server-provided parent route") { threadWindow.channel?.raw["is_thread"].bool == true && threadWindow.channel?.raw["parent_channel_id"].string == parent.id }
-                threadWindow.close()
-            } else { results.append(("thread collections retain the server-provided parent route", false)) }
+            await owner.loadTask?.value
+            await owner.renderTask?.value
+            check("collection items open in their own conversation window, not a new one") { owner.app.windows.count == windowsBeforeThread && owner.channel?.id == "collection-thread-fixture" }
+            check("thread collections retain the server-provided parent route") { owner.channel?.raw["is_thread"].bool == true && owner.channel?.raw["parent_channel_id"].string == parent.id }
+            owner.select(parent)
+            await owner.loadTask?.value
+            await owner.renderTask?.value
             let beforeRevokedParent = owner.app.windows.count
             session.revokedChannels.insert(parent.id); threadCollection.open(); session.revokedChannels.remove(parent.id)
-            check("thread collections cannot reopen a revoked parent channel") { owner.app.windows.count == beforeRevokedParent }
+            check("thread collections cannot reopen a revoked parent channel") { owner.app.windows.count == beforeRevokedParent && owner.channel?.id == parent.id }
             threadCollection.close()
+
+            // Notifications route through the same reuse: the conversation a
+            // window shows comes forward, another one is shown in place.
+            let windowsBeforeReveal = owner.app.windows.count
+            owner.app.reveal(session: session, channel: parent, preferring: owner)
+            check("revealing the conversation a window shows opens no new window") { owner.app.windows.count == windowsBeforeReveal && owner.channel?.id == parent.id }
+            // The self-check account lists one channel; any other route will do.
+            let other = RavenChannel(raw: .object(["name": .string("collection-reveal-fixture"), "channel_name": .string("Reveal fixture")]))
+            session.revokedChannels.insert(other.id)
+            owner.app.reveal(session: session, channel: other, anchor: "stale-notification", preferring: owner)
+            check("a stale notification cannot navigate to a revoked conversation") {
+                owner.app.windows.count == windowsBeforeReveal && owner.channel?.id == parent.id
+            }
+            session.revokedChannels.remove(other.id)
+            owner.app.reveal(session: session, channel: other, preferring: owner)
+            await owner.loadTask?.value
+            await owner.renderTask?.value
+            check("revealing another conversation shows it in place") { owner.app.windows.count == windowsBeforeReveal && owner.channel?.id == other.id }
+            // A window busy with an edit is passed over for another window
+            // of the account before a new one opens. Every window but a
+            // spare is made busy, so the spare is the one that can take it.
+            let spare = ConversationWindow(app: owner.app, session: session)
+            owner.app.windows.append(spare)
+            let windowsWithSpare = owner.app.windows.count
+            let busy = owner.app.windows.filter { $0 !== spare && $0.session === session }
+            let edits = busy.map(\.editing)
+            for window in busy { window.editing = RavenMessage(raw: .object(["name": .string("reveal-edit-fixture"), "channel_id": .string(other.id)])) }
+            let unseen = RavenChannel(raw: .object(["name": .string("collection-reveal-busy-fixture"), "channel_name": .string("Busy reveal fixture")]))
+            owner.app.reveal(session: session, channel: unseen, preferring: owner)
+            await spare.loadTask?.value
+            await spare.renderTask?.value
+            check("revealing passes over a window busy with an edit") { owner.app.windows.count == windowsWithSpare && spare.channel?.id == unseen.id && owner.channel?.id == other.id }
+            // The busy owner already shows the destination. An anchored
+            // request must route the message to the available spare.
+            let anchor = "anchored-collection-message"
+            owner.app.reveal(session: session, channel: other, anchor: anchor, preferring: owner)
+            check("an anchored reveal preserves the edit and reaches the message in a free window") {
+                owner.editing != nil && spare.channel?.id == other.id && spare.requestedAnchor == anchor
+                    && owner.app.windows.count == windowsWithSpare
+            }
+            for (window, edit) in zip(busy, edits) { window.editing = edit }
+            if let host = owner.window {
+                let sheet = NSWindow()
+                host.beginSheet(sheet, completionHandler: nil)
+                owner.app.reveal(session: session, channel: other, anchor: "sheet-anchor", preferring: owner)
+                check("a matching window with a sheet keeps the sheet and another match takes the anchor") {
+                    host.attachedSheet === sheet && spare.requestedAnchor == "sheet-anchor"
+                }
+                host.endSheet(sheet)
+                sheet.orderOut(nil)
+            }
+            spare.close()
+            owner.app.windows.removeAll { $0 === spare }
+            owner.select(parent)
+            await owner.loadTask?.value
+            await owner.renderTask?.value
         }
 
         results.append(contentsOf: try await CollectionBatchSelfChecks.run(owner: owner))

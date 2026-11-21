@@ -256,6 +256,33 @@ import NevermoreCore
         let window = ConversationWindow(app: self, session: session)
         windows.append(window); window.showWindow(nil); window.select(channel, anchor: anchor)
     }
+    /// Shows a conversation asked for from outside a conversation window (a
+    /// notification, an Inbox or Saved item) without piling up windows, as
+    /// Mail and Messages do: a window already showing it comes forward,
+    /// otherwise the preferred or frontmost window of the account goes there
+    /// (Go ▸ Back returns), and a new window opens only when none can. A
+    /// window with an edit in progress or a sheet open keeps what it shows.
+    func reveal(session: AccountSession, channel: RavenChannel, anchor: String? = nil, preferring preferred: ConversationWindow? = nil) {
+        guard !session.stopped, !session.channelIsRevoked(channel.id),
+              channel.raw["parent_channel_id"].string.map(session.channelIsRevoked) != true else { return }
+        let candidates = windows.filter { !$0.isClosed && $0.session === session }
+        func available(_ controller: ConversationWindow) -> Bool { controller.editing == nil && controller.window?.attachedSheet == nil }
+        if let showing = candidates.first(where: { $0.channel?.id == channel.id && (anchor == nil || available($0)) }) {
+            // The window's own copy of the channel is the loaded one.
+            if anchor != nil, let current = showing.channel { showing.select(current, anchor: anchor) }
+            showing.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+        let frontmost = activeConversationWindow.flatMap { active in candidates.contains { $0 === active } ? active : nil }
+        let preferredCandidate = preferred.flatMap { preferred in candidates.contains { $0 === preferred } ? preferred : nil }
+        // A window busy with an edit or a sheet is passed over for the next.
+        if let target = ([preferredCandidate, frontmost].compactMap { $0 } + candidates.reversed()).first(where: available) {
+            target.select(channel, anchor: anchor)
+            target.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+        open(session: session, channel: channel, anchor: anchor)
+    }
     /// Opens a conversation as a tab of an existing window (File ▸ New Tab,
     /// the tab bar's + button, and "Open in New Tab").
     @discardableResult func openTab(beside host: ConversationWindow, session: AccountSession?, channel: RavenChannel?) -> ConversationWindow? {
@@ -286,10 +313,19 @@ import NevermoreCore
         } else { alert.messageText = text.isEmpty ? "The action could not be completed." : text }
         alert.runModal()
     }
+    /// What removing an account deletes. The outbox count covers every
+    /// message not yet delivered, queued or waiting for review alike.
+    static func removalContents(unsentMessages count: Int) -> String {
+        switch count {
+        case 0: "this account’s credentials, cached history and drafts"
+        case 1: "this account’s credentials, cached history, drafts and 1 unsent message"
+        default: "this account’s credentials, cached history, drafts and \(count) unsent messages"
+        }
+    }
     func remove(_ session: AccountSession) async {
         let ops = (try? await session.store.operations()) ?? []
         let alert = NSAlert(); alert.messageText = "Remove \(session.account.user)?"
-        alert.informativeText = "This removes this account’s credentials, cached history, drafts and \(ops.count) queued sends from this Mac. Export needed text or files first. Backups and exported files are outside this removal."
+        alert.informativeText = "This removes \(Self.removalContents(unsentMessages: ops.count)) from this Mac. Export needed text or files first. Backups and exported files are outside this removal."
         alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Remove Account")
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         session.stop(); purgeRestoration(accountID: session.account.id)
@@ -360,7 +396,7 @@ import NevermoreCore
         let accountID = info["account"] as? String, channelID = info["channel"] as? String, anchor = info["message"] as? String
         await MainActor.run {
             guard let session = sessions.first(where: { $0.account.id.uuidString == accountID }), let channel = session.channels.first(where: { $0.id == channelID }) else { return }
-            open(session: session, channel: channel, anchor: anchor)
+            reveal(session: session, channel: channel, anchor: anchor)
         }
     }
     func configureUpdater() {

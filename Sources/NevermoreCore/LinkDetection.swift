@@ -4,11 +4,12 @@ import Foundation
 ///
 /// All ranges are UTF-16 offsets into the inspected text.
 public enum LinkDetection {
-    /// One detected address: its exact range and the address as typed,
-    /// trimmed of surrounding punctuation.
+    /// One detected address: its exact range and the address it opens.
     public struct Match: Sendable, Equatable {
         public var range: NSRange
-        /// The address as typed, trimmed of surrounding punctuation.
+        /// The address as typed, trimmed of surrounding punctuation; an
+        /// address typed as "www." gains "https://", the way Messages and
+        /// Mail link it.
         public var url: String
     }
 
@@ -77,7 +78,9 @@ public enum LinkDetection {
     /// Extracts the address from one token, or nil when the token holds none.
     private static func match(in text: NSString, tokenRange: NSRange) -> Match? {
         let token = text.substring(with: tokenRange) as NSString
-        guard let schemeOffset = addressSchemeStart(in: token) else { return nil }
+        // The earlier start wins, so a scheme later in a "www." address (a
+        // redirect's target, say) does not hide the address itself.
+        guard let schemeOffset = [addressSchemeStart(in: token), wwwStart(in: token)].compactMap({ $0 }).min() else { return nil }
         for offset in 0..<schemeOffset {
             guard let scalar = UnicodeScalar(UInt32(token.character(at: offset))), leadingWrapperCharacters.contains(scalar) else { return nil }
         }
@@ -95,9 +98,29 @@ public enum LinkDetection {
             end -= 1
         }
         let range = NSRange(location: addressStart, length: end - addressStart)
-        let address = text.substring(with: range) as String
-        guard isSupportedAddress(address) else { return nil }
+        let typed = text.substring(with: range) as String
+        let address = addressSchemeStart(in: typed as NSString) == 0 ? typed : "https://" + typed
+        guard isSupportedAddress(address), address == typed || isWWWHost(address) else { return nil }
         return Match(range: range, url: address)
+    }
+
+    /// The offset of a "www." that starts the address part of a token, for
+    /// addresses typed without a scheme. Only leading wrappers may precede it,
+    /// so "awww.example" or "x/www.a.example" are not addresses.
+    private static func wwwStart(in token: NSString) -> Int? {
+        let found = token.range(of: "www.", options: .caseInsensitive)
+        guard found.location != NSNotFound else { return nil }
+        return found.location
+    }
+
+    /// A scheme-less address needs a host of "www." and at least two more
+    /// labels, the last one letters only ("www.example.com", not "www.x" or
+    /// "www.example.c0m"), so a stray "www." in prose stays text.
+    private static func isWWWHost(_ address: String) -> Bool {
+        guard let host = URL(string: address)?.host?.lowercased(), host.hasPrefix("www.") else { return false }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 3, !labels.contains(where: \.isEmpty), let top = labels.last else { return false }
+        return top.count >= 2 && top.allSatisfy { $0.isLetter }
     }
 
     /// The offset of the first case-insensitive "https://" or "http://".

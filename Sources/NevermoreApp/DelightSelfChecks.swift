@@ -17,7 +17,8 @@ import RavenProtocol
         }
         let reading = channel("a-reading"), unread = channel("b-unread"), muted = channel("c-muted", ["muted": .bool(true)])
         let direct = channel("d-direct", ["is_direct_message": .bool(true), "peer_user_id": .string("other-fixture@example.invalid")])
-        session.channels = [reading, unread, muted, direct]
+        let long = channel("e-long", ["channel_name": .string("A very long conversation title that the sidebar must truncate")])
+        session.channels = [reading, unread, muted, direct, long]
         func message(_ id: String, in channelID: String, reactions: String? = nil) -> RavenMessage {
             var fields: [String: JSONValue] = ["name": .string(id), "channel_id": .string(channelID), "owner": .string("other-fixture@example.invalid"), "creation": .string("2026-11-08 12:00:00.000000"), "text": .string("<p>Fixture \(id)</p>"), "message_type": .string("Text")]
             if let reactions { fields["message_reactions"] = .string(reactions) }
@@ -59,6 +60,38 @@ import RavenProtocol
             guard let cell = cell(unread) else { return false }
             let perch = cell.perch.frame
             return perch.width == RavenFigure.size.width && perch.maxX <= cell.bounds.maxX && perch.minX > cell.bounds.midX
+        }())
+        // A hidden muted bell must collapse like the raven does. Otherwise it
+        // still consumes its intrinsic width and truncates every title early.
+        check("a hidden muted bell reserves no title width", { () -> Bool in
+            guard let cell = cell(long) else { return false }
+            let model = controller.sidebarModel(for: long, unread: 0)
+            @MainActor func titleWidth(muted: Bool, draft: Bool = false) -> CGFloat {
+                var configured = model
+                configured.muted = muted
+                configured.draft = draft
+                cell.configure(configured, fontSize: 13)
+                cell.frame = NSRect(x: 0, y: 0, width: 220, height: 24)
+                cell.layoutSubtreeIfNeeded()
+                return cell.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == long.title }?.frame.width ?? 0
+            }
+            let empty = titleWidth(muted: false)
+            return empty > titleWidth(muted: true) && empty > titleWidth(muted: false, draft: true)
+                && empty > titleWidth(muted: true, draft: true) && cell.showsDraftMark
+                && titleWidth(muted: false) == empty && !cell.showsDraftMark
+        }())
+        // The visible bell must keep its intrinsic width: slack belongs to the
+        // title, never to the icon.
+        check("a visible muted bell keeps its intrinsic width", { () -> Bool in
+            guard let cell = cell(long) else { return false }
+            var model = controller.sidebarModel(for: long, unread: 0)
+            model.muted = true
+            cell.configure(model, fontSize: 13)
+            // Wide enough that the title does not truncate, so Auto Layout
+            // has slack and the bell's hugging priority is actually tested.
+            cell.frame = NSRect(x: 0, y: 0, width: 600, height: 24)
+            cell.layoutSubtreeIfNeeded()
+            return abs(cell.muted.frame.width - cell.muted.fittingSize.width) < 0.5
         }())
 
         // Space reads on.
@@ -126,6 +159,46 @@ import RavenProtocol
                 check("clicking your own reaction removes it", on && mine().isEmpty)
             } else { check("clicking your own reaction removes it", false) }
             check("a click beside the chips is left to the text", !controller.stickers.clickChip(at: NSPoint(x: chip.rect.maxX + 60, y: chip.rect.midY)))
+            // A chip press runs its own nested event loop, where main-actor
+            // work keeps running. A render there replaced the text under a
+            // peel; it now waits for the press to end, as for a link. The
+            // press goes straight to the transcript: a window that cannot
+            // become key, as when another app is active, would only take
+            // focus from it.
+            if let window = controller.window, let storage = controller.transcript.textStorage,
+               let pressed = controller.stickers.chipFrames.first(where: { $0.messageID == "delight-1" && $0.label == "👍" }) {
+                let windowNumber = window.windowNumber
+                let location = controller.transcript.convert(NSPoint(x: pressed.rect.midX, y: pressed.rect.midY), to: nil)
+                let probe = PressProbe()
+                let observer = NotificationCenter.default.addObserver(forName: NSTextStorage.didProcessEditingNotification, object: storage, queue: nil) { _ in
+                    MainActor.assumeIsolated { if probe.pressing { probe.editsDuringPress += 1 } else { probe.editsAfterPress += 1 } }
+                }
+                // Runs inside the chip's tracking loop, as a quick answer would.
+                let midPress = Timer(timeInterval: 0, repeats: false) { _ in MainActor.assumeIsolated {
+                    probe.tracked = true
+                    controller.render()
+                    let rendering = controller.renderTask
+                    Task { @MainActor in await rendering?.value; probe.rendered = true }
+                    let deadline = Date(timeIntervalSinceNow: 2)
+                    while !probe.rendered, Date() < deadline { RunLoop.current.run(mode: .eventTracking, before: Date(timeIntervalSinceNow: 0.01)) }
+                    // Escape ends the press without touching the reaction.
+                    NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53).map { NSApp.postEvent($0, atStart: true) }
+                } }
+                RunLoop.main.add(midPress, forMode: .eventTracking)
+                // Delivered from the run loop rather than a main-queue job,
+                // as the event loop does, so main-actor work can run mid-press.
+                RunLoop.main.perform(inModes: [.default]) { MainActor.assumeIsolated {
+                    guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { probe.released = true; return }
+                    probe.pressing = true; controller.transcript.mouseDown(with: down); probe.pressing = false
+                    probe.released = true
+                } }
+                let deadline = Date(timeIntervalSinceNow: 5)
+                while !probe.released, Date() < deadline { try? await Task.sleep(for: .milliseconds(20)) }
+                midPress.invalidate()
+                await controller.renderTask?.value
+                NotificationCenter.default.removeObserver(observer)
+                check("a render waits for a press on a reaction chip to end", probe.tracked && probe.rendered && probe.editsDuringPress == 0 && probe.editsAfterPress > 0 && mine().isEmpty)
+            } else { check("a render waits for a press on a reaction chip to end", false) }
         }
         if let target = controller.messages.first(where: { $0.id == "delight-1" }) {
             controller.stickers.toss("🎉", from: nil, to: target); try await settle(["🎉"])

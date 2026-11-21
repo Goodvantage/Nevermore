@@ -6,6 +6,19 @@ import NevermoreCore
     /// `messages` is a fixed list of messages (pinned messages, a
     /// conversation's files) whose rows open the message.
     enum Kind: Equatable { case messages, inbox, threads, saved, reminders, scheduled }
+    /// The reminder actions, in menu order. Complete is inserted only for a
+    /// fired, unread reminder; the others are always retained.
+    private enum ReminderAction {
+        case complete, snooze, editTime, delete
+        var title: String {
+            switch self {
+            case .complete: return "Mark Complete"
+            case .snooze: return "Snooze…"
+            case .editTime: return "Edit Time…"
+            case .delete: return "Delete Reminder"
+            }
+        }
+    }
     weak var conversationOwner: ConversationWindow?
     let session: AccountSession?
     /// The rows currently shown (the filtered view of `pager.records`).
@@ -28,10 +41,12 @@ import NevermoreCore
     let openButton = NSButton(title: "Open", target: nil, action: nil)
     let manageButton = NSButton(title: "Actions…", target: nil, action: nil)
     let markReadButton = NSButton(title: "Mark Selected Read", target: nil, action: nil)
+    let markAllButton = NSButton(title: "Mark All Read", target: nil, action: nil)
     let batchTransport: CollectionBatchActions.Transport?
     var batchTask: Task<Void, Never>?
     var batchGeneration = UUID()
     var isBatchRunning = false
+    var batchIsMarkAll = false
     var loadTask: Task<Void, Never>?
     private(set) var isClosed = false
     var isLoading = false
@@ -50,17 +65,21 @@ import NevermoreCore
         window.minSize = NSSize(width: 520, height: 300); window.center(); window.delegate = self
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("result")); column.title = "Results"; table.addTableColumn(column)
         table.headerView = nil; table.style = .inset; table.rowHeight = 44; table.delegate = self; table.dataSource = self; table.target = self; table.doubleAction = #selector(open)
-        table.onOpen = { [weak self] in self?.open() }; table.onClose = { [weak self] in self?.close() }; table.onRefresh = { [weak self] in self?.refresh() }
+        table.onOpen = { [weak self] in self?.open() }; table.onClose = { [weak self] in self?.cancelFilterOrClose() }; table.onRefresh = { [weak self] in self?.refresh() }
         table.allowsMultipleSelection = kind == .inbox
         table.canRefresh = source != nil
         table.setAccessibilityLabel("Collection results")
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
-        openButton.target = self; openButton.action = #selector(open); openButton.setAccessibilityLabel("Open selected result"); openButton.toolTip = "Open the selected item in a conversation window (Return)"
+        openButton.target = self; openButton.action = #selector(open); openButton.setAccessibilityLabel("Open selected result"); openButton.toolTip = "Show the selected item in its conversation window (Return). Option-click opens a new window."
         manageButton.target = self; manageButton.action = #selector(manage); manageButton.setAccessibilityLabel("Actions for selected result")
         markReadButton.target = self; markReadButton.action = #selector(markSelectedRead)
         markReadButton.setAccessibilityLabel("Mark selected inbox notifications read")
         markReadButton.toolTip = "Select up to 100 inbox items to mark their notifications read."
         markReadButton.isHidden = kind != .inbox
+        markAllButton.target = self; markAllButton.action = #selector(markAllRead)
+        markAllButton.setAccessibilityLabel("Mark all notifications for this account read")
+        markAllButton.toolTip = "Marks every notification for this account as read, including rows hidden by the current filter or later pages."
+        markAllButton.isHidden = kind != .inbox
         search.placeholderString = "Filter"
         search.sendsSearchStringImmediately = true; search.sendsWholeSearchString = false
         search.target = self; search.action = #selector(applySearch); search.delegate = self
@@ -77,7 +96,7 @@ import NevermoreCore
         let toolbar = NSToolbar(identifier: source == nil ? "NevermoreCollectionToolbar.static" : "NevermoreCollectionToolbar.refreshable"); toolbar.delegate = self; toolbar.displayMode = .iconOnly
         window.toolbar = toolbar; window.toolbarStyle = .unified
         window.initialFirstResponder = table
-        let bar = NSStackView(); bar.setViews([status], in: .leading); bar.setViews([moreButton, markReadButton, manageButton, openButton], in: .trailing); bar.spacing = 8
+        let bar = NSStackView(); bar.setViews([status], in: .leading); bar.setViews([moreButton, markAllButton, markReadButton, manageButton, openButton], in: .trailing); bar.spacing = 8
         for view in [scroll, bar, emptyState] as [NSView] { view.translatesAutoresizingMaskIntoConstraints = false; window.contentView?.addSubview(view) }
         NSLayoutConstraint.activate([scroll.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor), scroll.topAnchor.constraint(equalTo: window.contentView!.safeAreaLayoutGuide.topAnchor), scroll.bottomAnchor.constraint(equalTo: bar.topAnchor, constant: -10), bar.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 16), bar.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -16), bar.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor, constant: -12), emptyState.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), emptyState.centerYAnchor.constraint(equalTo: scroll.centerYAnchor)])
         updateChrome()
@@ -97,7 +116,7 @@ import NevermoreCore
         }
         if event.keyCode == 53 {
             guard flags.isEmpty else { super.keyDown(with: event); return }
-            close(); return
+            cancelFilterOrClose(); return
         }
         if event.keyCode == 15, flags == .command {
             guard source != nil else { super.keyDown(with: event); return }
@@ -122,6 +141,7 @@ import NevermoreCore
             open(); return true
         case "cancelOperation:":
             guard modifiers.isEmpty else { return false }
+            if clearFilter(editor: textView) { return true }
             close(); return true
         default: return false
         }
@@ -135,7 +155,7 @@ import NevermoreCore
     }
     func windowWillClose(_ notification: Notification) {
         // Delayed results must not repopulate a closed collection.
-        batchGeneration = UUID(); batchTask?.cancel(); batchTask = nil; isBatchRunning = false
+        batchGeneration = UUID(); batchTask?.cancel(); batchTask = nil; isBatchRunning = false; batchIsMarkAll = false
         isClosed = true; pager.invalidate(); loadTask?.cancel(); pager.records.removeAll(); records.removeAll(); table.reloadData()
         statusMessage = ""; isLoading = false
         conversationOwner?.collectionWindows.removeAll { $0 === self }
@@ -177,6 +197,53 @@ import NevermoreCore
         return item
     }
     // MARK: Local scoped filter (native search field)
+    /// Escape from the field or the results: close only when no filter is
+    /// populated, so every route enforces one policy.
+    private func cancelFilterOrClose() {
+        if !clearFilter(editor: search.currentEditor()) { close() }
+    }
+
+    /// Shared Escape policy for the field editor and the results. Returns
+    /// true when a populated filter (committed value or live editor buffer)
+    /// was cleared and the window stays open; the caller closes on false.
+    /// The selection is captured before the rows are restored and matched
+    /// afterwards by row ID, so an Inbox selection spanning several rows
+    /// survives clearing its filter instead of following the moving indices.
+    private func clearFilter(editor: NSText?) -> Bool {
+        guard !search.stringValue.isEmpty || !(editor?.string.isEmpty ?? true) else { return false }
+        let selectedIDs = Set(table.selectedRowIndexes.compactMap { index in
+            records.indices.contains(index) ? rowID(for: records[index]) : nil
+        })
+        search.stringValue = ""
+        editor?.string = ""
+        applySearch()
+        restoreSelection(matching: selectedIDs)
+        // Clearing the editor first keeps end-editing from committing the
+        // stale buffer back into the field.
+        window?.makeFirstResponder(table)
+        return true
+    }
+
+    /// A notification's message can occur in multiple records. Restore
+    /// selection only when the collection supplies the document's own ID.
+    private func rowID(for record: JSONValue) -> String? {
+        guard let id = record["name"].string, !id.isEmpty else { return nil }
+        return id
+    }
+
+    /// Reselects the rows whose IDs were selected before a filter was cleared,
+    /// wherever they now sit in the unfiltered list.
+    private func restoreSelection(matching ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        var restored = IndexSet()
+        for (index, record) in records.enumerated() {
+            guard let id = rowID(for: record), ids.contains(id) else { continue }
+            restored.insert(index)
+        }
+        guard !restored.isEmpty else { return }
+        table.selectRowIndexes(restored, byExtendingSelection: false)
+        table.scrollRowToVisible(restored.first ?? 0)
+    }
     @objc func applySearch() { applyFilter(); table.reloadData(); updateChrome() }
     @objc func findNext(_ sender: Any?) { moveResult(1) }
     @objc func findPrevious(_ sender: Any?) { moveResult(-1) }
@@ -203,16 +270,22 @@ import NevermoreCore
         return parts.joined(separator: "\n").lowercased()
     }
     // MARK: Refresh / Load More (read-only RPCs)
-    @objc func refresh() {
-        guard active, source != nil, !isLoading, !isBatchRunning else { return }
+    @objc func refresh() { _ = startRefresh() }
+
+    /// Starts a refresh and returns the task performing it, so a mutation can
+    /// await the canonical list state. Returns nil when no refresh can start.
+    @discardableResult func startRefresh(onFreshRows: (@MainActor ([JSONValue]) -> Void)? = nil) -> Task<Void, Never>? {
+        guard active, source != nil, !isLoading, !isBatchRunning else { return nil }
         isLoading = true; statusMessage = ""; updateChrome()
         loadTask?.cancel()
         let generation = pager.beginRefresh()
-        loadTask = Task { [weak self] in
+        let task = Task { [weak self] in
             guard let self, let session = self.session, let source = self.source else { return }
             do {
                 let response = try await session.client.rpc(source.method, arguments: CollectionPaging.pageArguments(source, offset: 0))
-                if self.apply(rows: try CollectionPaging.decodeRows(response), generation: generation, refresh: true) {
+                let rows = try CollectionPaging.decodeRows(response)
+                if self.apply(rows: rows, generation: generation, refresh: true) {
+                    onFreshRows?(rows)
                     if session.retainHistory { try? await session.store.cacheProjection(key: source.cacheKey, value: response) }
                     self.statusMessage = ""
                 }
@@ -233,6 +306,18 @@ import NevermoreCore
             }
             self.isLoading = false; self.updateChrome()
         }
+        loadTask = task
+        return task
+    }
+
+    /// A mutation needs the rows from its own successful refresh. Rows from
+    /// the offline cache and unrelated status updates cannot confirm a POST.
+    private func freshRowsAfterMutation() async -> [JSONValue]? {
+        if isLoading, let task = loadTask { await task.value }
+        var freshRows: [JSONValue]?
+        let task = startRefresh { freshRows = $0 }
+        await task?.value
+        return freshRows
     }
     @objc func loadMore() {
         guard active, let source, source.supportsPaging, pager.hasMore, !isLoading, !isBatchRunning else { return }
@@ -287,7 +372,9 @@ import NevermoreCore
         openButton.isEnabled = hasSelection
         manageButton.isEnabled = hasSelection
         markReadButton.isEnabled = canMarkSelectedRead
-        if isBatchRunning { status.stringValue = "Marking selected notifications read…"; status.textColor = .secondaryLabelColor }
+        markAllButton.isHidden = kind != .inbox
+        markAllButton.isEnabled = canMarkAllRead
+        if isBatchRunning { status.stringValue = batchIsMarkAll ? "Marking all notifications read…" : "Marking selected notifications read…"; status.textColor = .secondaryLabelColor }
         else if isLoading { status.stringValue = "Loading…"; status.textColor = .secondaryLabelColor }
         else if !statusMessage.isEmpty { status.stringValue = statusMessage; status.textColor = .systemRed }
         else if let source { status.stringValue = (records.count == total ? "\(total) items" : "\(records.count) of \(total) shown") + (source.supportsPaging && pager.hasMore ? " · more available" : ""); status.textColor = .secondaryLabelColor }
@@ -303,7 +390,11 @@ import NevermoreCore
         if kind == .threads { fields["is_thread"] = .bool(true); if let parentID { fields["parent_channel_id"] = .string(parentID) } }
         let channel = session.channels.first { $0.id == channelID } ?? RavenChannel(raw: .object(fields))
         let message = record["message_id"].string ?? record["message"].string ?? record["name"].string
-        owner.app.open(session: session, channel: channel, anchor: kind == .threads ? nil : message)
+        let anchor = kind == .threads ? nil : message
+        // Option opens a window of its own, as in Mail; otherwise the window
+        // this collection belongs to shows the item.
+        if NSApp.currentEvent?.modifierFlags.contains(.option) == true { owner.app.open(session: session, channel: channel, anchor: anchor) }
+        else { owner.app.reveal(session: session, channel: channel, anchor: anchor, preferring: owner) }
     }
     @objc func manage() {
         guard active, !isBatchRunning, let record = selected, let owner = conversationOwner, let session else { return }
@@ -316,12 +407,26 @@ import NevermoreCore
             }
         case .reminders:
             Task { [weak self] in
-                guard let option = await SheetPrompt.choose("Reminder", items: ["Snooze…", "Edit Time…", "Delete Reminder"], confirm: "Continue", on: self?.window), let self, self.active else { return }
-                owner.action {
-                    if option == 2 { _ = try await session.mutate("raven.api.reminders.delete_reminder", ["reminder": .string(id)]) }
-                    else if let date = await owner.pickDate(option == 0 ? "Snooze Reminder" : "Edit Reminder", confirm: option == 0 ? "Snooze" : "Save", on: self.window), self.active { _ = try await session.mutate("raven.api.reminders.\(option == 0 ? "snooze_reminder" : "update_reminder")", ["reminder": .string(id), "remind_at": .string(owner.timestamp(date))]) }
-                    else { return }
-                    self.refreshOrClose()
+                guard let self else { return }
+                var actions: [ReminderAction] = [.snooze, .editTime, .delete]
+                if ReminderCompletion.canComplete(record) { actions.insert(.complete, at: 0) }
+                guard let option = await SheetPrompt.choose("Reminder", items: actions.map(\.title), confirm: "Continue", on: self.window),
+                      self.active, actions.indices.contains(option) else { return }
+                switch actions[option] {
+                case .complete:
+                    self.completeReminder(record, owner: owner, session: session)
+                case .delete:
+                    owner.action {
+                        _ = try await session.mutate("raven.api.reminders.delete_reminder", ["reminder": .string(id)])
+                        self.refreshOrClose()
+                    }
+                case .snooze, .editTime:
+                    let snooze = actions[option] == .snooze
+                    owner.action {
+                        guard let date = await owner.pickDate(snooze ? "Snooze Reminder" : "Edit Reminder", confirm: snooze ? "Snooze" : "Save", on: self.window), self.active else { return }
+                        _ = try await session.mutate("raven.api.reminders.\(snooze ? "snooze_reminder" : "update_reminder")", ["reminder": .string(id), "remind_at": .string(owner.timestamp(date))])
+                        self.refreshOrClose()
+                    }
                 }
             }
         case .saved: owner.action { _ = try await session.mutate("raven.api.raven_message.save_message", ["message_id": .string(id), "add": .bool(false)]); self.refreshOrClose() }
@@ -332,6 +437,48 @@ import NevermoreCore
     /// A collection with a server source reloads after an action; a static
     /// one cannot, so it closes rather than keep showing a changed row.
     private func refreshOrClose() { if source == nil { close() } else { refresh() } }
+
+    /// Marks the selected fired, unread reminder complete through the pinned
+    /// `mark_reminder_read(message_id)`. The server returns no state, so the
+    /// canonical list and Home refresh decide the outcome: explicit success
+    /// only when the list no longer shows a fired, unread reminder for the
+    /// message, an explicit unavailable result on HTTP 404, and an uncertain
+    /// result otherwise. A failed POST is never replayed.
+    private func completeReminder(_ record: JSONValue, owner: ConversationWindow, session: AccountSession) {
+        guard let messageID = ReminderCompletion.messageID(record),
+              ReminderCompletion.isFiredUnread(record) else { return }
+        owner.action {
+            var unavailable = false
+            var explicitFailure: String?
+            do {
+                _ = try await session.mutate(ReminderCompletion.markReadMethod, ["message_id": .string(messageID)])
+            } catch let error as RavenError {
+                if case .http(404, _) = error { unavailable = true }
+                else if error.isPermanent { explicitFailure = StatusLocalization.errorDescription(error) }
+            } catch { explicitFailure = error.localizedDescription }
+            guard self.active else { return }
+            if self.source == nil { self.close(); return }
+            async let refreshedRows = self.freshRowsAfterMutation()
+            let homeTask = await session.home.refreshAfterInflight()
+            let rows = await refreshedRows
+            await homeTask?.value
+            guard self.active else { return }
+            let stillFired = rows?.contains {
+                ReminderCompletion.messageID($0) == messageID && ReminderCompletion.isFiredUnread($0)
+            }
+            if unavailable {
+                self.statusMessage = "This server cannot complete reminders."
+            } else if stillFired == false {
+                self.statusMessage = ""
+            } else if let explicitFailure {
+                self.statusMessage = explicitFailure
+            } else {
+                let detail = rows == nil ? self.statusMessage : ""
+                self.statusMessage = "Reminder completion could not be confirmed. " + (detail.isEmpty ? "Refresh before trying again." : detail)
+            }
+            self.updateChrome()
+        }
+    }
     private func manageScheduled(option: Int, record: JSONValue, id: String, owner: ConversationWindow, session: AccountSession) {
             if option == 0 {
                 guard let window, let html = record["text"].string else { return }
@@ -354,7 +501,7 @@ import NevermoreCore
                 if option == 1 { _ = try await session.mutate("raven.api.scheduled_message.send_now", ["name": .string(id)]) }
                 if option == 2 {
                     guard let date = await owner.pickDate("Reschedule", confirm: "Reschedule", on: self.window), self.active else { return }
-                    _ = try await session.mutateResource("Raven Scheduled Message", name: id, values: ["scheduled_time": .string(owner.timestamp(date))])
+                    _ = try await session.mutateResource("Raven Scheduled Message", name: id, values: ["scheduled_time": .string(try owner.scheduledTimestamp(date))])
                 }
                 if option == 3 {
                     guard await SheetPrompt.confirm("Cancel this scheduled message?", message: "It will not be sent. Its text is not kept anywhere else.", confirm: "Cancel Message", destructive: true, on: self.window), self.active else { return }

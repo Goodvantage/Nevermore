@@ -71,6 +71,25 @@ import RavenProtocol
             owner.executeCode(CodeCommand(reference: reference, action: .copy), pasteboard: pasteboard)
             results.append(("stale code links cannot copy an earlier message version", pasteboard.string(forType: .string) == "unchanged sentinel"))
         } else { results.append(("native code reader opens", false)) }
+        // The in-memory history window can hold more messages than the disk cache.
+        let historyChannel = "code-reader-history"
+        var oldFields = message.raw.object; oldFields["channel_id"] = .string(historyChannel)
+        let old = RavenMessage(raw: .object(oldFields))
+        let newer = (0..<1_000).map { index in
+            RavenMessage(raw: .object(["name": .string("newer-\(index)"), "channel_id": .string(historyChannel),
+                                      "creation": .string("2026-11-08 15:00:00.000001")]))
+        }
+        session.memoryMessages[historyChannel] = [old] + newer
+        let oldReader = CodeReaderWindow(session: session, reference: CodeReference(messageID: old.id, channelID: historyChannel, block: block))
+        defer { oldReader.close(); session.memoryMessages.removeValue(forKey: historyChannel) }
+        oldReader.validate()
+        await oldReader.waitUntilValidated()
+        results.append(("Code Reader keeps a cached message older than the latest 1,000", oldReader.reference != nil && oldReader.text.string == code))
+        session.memoryMessages[historyChannel] = newer
+        oldReader.validate()
+        await oldReader.waitUntilValidated()
+        results.append(("Code Reader clears a message once it is actually evicted", oldReader.reference == nil && oldReader.text.string.isEmpty))
+
         // Separate thread rooms must still inherit parent-channel authorization.
         let threadMessage = RavenMessage(raw: .object(["name": .string("thread-code-fixture"), "channel_id": .string("code-thread"), "owner": .string("fixture@example.com"), "creation": .string("2026-11-07 15:00:00.000002"), "text": .string("<pre>thread code</pre>")]))
         try await session.store.cacheMessages([threadMessage])

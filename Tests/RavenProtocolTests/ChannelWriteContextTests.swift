@@ -47,4 +47,20 @@ extension TransportSuite {
         }
         await #expect(throws: RavenError.invalidResponse) { try await client(session).channelWriteContext("thread") }
     }
+
+    @Test func ancestryDeeperThanTheWalkCapThrowsInvalidResponse() async throws {
+        // Eight distinct ancestors exhaust the walk; the ninth is never read.
+        let session = StubURLProtocol.install { request in
+            let path = request.url!.path
+            let component = path.split(separator: "/").last.map(String.init) ?? ""
+            if path.contains("Raven Channel"), let index = Int(component.dropFirst()) {
+                return stubResponse(request, 200, "{\"data\":{\"name\":\"c\(index)\",\"channel_name\":\"m\(index)\",\"is_thread\":1,\"is_archived\":0}}")
+            }
+            if path.contains("Raven Message"), let index = Int(component.dropFirst()) {
+                return stubResponse(request, 200, "{\"data\":{\"name\":\"m\(index)\",\"channel_id\":\"c\(index + 1)\"}}")
+            }
+            return stubResponse(request, 500, "{}")
+        }
+        await #expect(throws: RavenError.invalidResponse) { try await client(session).channelWriteContext("c0") }
+    }
 }

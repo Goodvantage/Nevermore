@@ -199,7 +199,82 @@ import RavenProtocol
         resizeInspector(by: 120)
         resize(height: 520)
         check("resizing the thread inspector back returns to the same scroll position", abs(replyClip.bounds.minY - replyOrigin) < 1)
+
+        // The whole window crossing the inspector's minimum width must not
+        // discard it. The pane is temporary; the root, its room interest and
+        // the reading position stay with this window and come back.
+        let windowsBeforeNarrowing = app.windows.count
+        let narrowedScroll = replyClip.bounds.minY
+        let narrowedInspectorWidth = replyClip.bounds.width
+        let narrowedLine = bottomLine(of: replies, readableMaxY: replyClip.bounds.maxY)
+        window.makeFirstResponder(controller.composer)
+        resize(width: 900)
+        check("a narrow window keeps the open thread inspector attached to this window", controller.threadInspector === inspector)
+        check("a narrow window keeps the inspector's authorized room interest", session.interests[inspector.subscriptionID] == root.id && session.threadParents[root.id] == root.channelID)
+        check("a narrow window keeps the reader's line of the thread", holds(narrowedLine, in: replies, readableMaxY: replyClip.bounds.maxY))
+        check("narrowing the window creates no thread window", app.windows.count == windowsBeforeNarrowing)
+        check("narrowing the window leaves conversation focus alone", window.firstResponder === controller.composer)
+        let hiddenCommand = NSMenuItem(title: "Show Thread Inspector", action: #selector(ConversationWindow.toggleThreadInspector(_:)), keyEquivalent: "")
+        let hiddenCommandEnabled = controller.validateMenuItem(hiddenCommand)
+        check("a narrow window offers a native, keyboard-reachable thread affordance", !controller.threadInspectorHiddenButton.isHidden && controller.threadInspectorHiddenButton.isEnabled && !(controller.threadInspectorHiddenButton.accessibilityLabel() ?? "").isEmpty && controller.transcript.nextKeyView === controller.threadInspectorHiddenButton)
+        check("the View menu's thread command offers access while the pane is hidden", hiddenCommandEnabled && hiddenCommand.title == "Open Thread in Window")
+        controller.threadInspectorHiddenButton.performClick(nil); settle()
+        check("activating the hidden-thread affordance opens exactly one thread window", app.windows.count == windowsBeforeNarrowing + 1)
+        if let opened = app.windows.last { opened.close() }
+        resize(width: home.width)
+        check("widening the window restores the same inspector instance", controller.threadInspector === inspector)
+        check("the restored inspector keeps the same authorized root", inspector.rootMessage.id == root.id && session.interests[inspector.subscriptionID] == root.id)
+        check("widening the window returns to the same thread reading position", abs(replyClip.bounds.minY - narrowedScroll) < 1)
+        check("widening the window restores the inspector at its previous width", abs(replyClip.bounds.width - narrowedInspectorWidth) < 1)
+        check("restoring the inspector hides the narrow-window affordance", controller.threadInspectorHiddenButton.isHidden && controller.transcript.nextKeyView === controller.attachButton)
+        check("widening the window creates no thread window", app.windows.count == windowsBeforeNarrowing)
+        resize(width: 1000)
+        check("a window at the minimum width keeps the inspector visible", controller.threadInspector === inspector && !controller.inspectorCollapsedByWidth && controller.threadInspectorHiddenButton.isHidden)
+        check("a visible inspector counts as reading its thread", controller.displaysConversation(root.id))
+        resize(width: 999)
+        check("one point below the minimum collapses without detaching", controller.threadInspector === inspector && controller.inspectorCollapsedByWidth && session.interests[inspector.subscriptionID] == root.id)
+        check("a collapsed inspector does not suppress thread notifications", !controller.displaysConversation(root.id))
+
+        // Losing the parent membership must clear the collapsed inspector,
+        // not leave a detached pane registered with this window.
+        session.revokedChannels.insert(root.channelID)
+        controller.openThreadInspectorInWindow(nil)
+        check("activating a hidden thread after permission loss closes the affordance immediately",
+              controller.threadInspector == nil && controller.threadInspectorHiddenButton.isHidden && app.windows.count == windowsBeforeNarrowing)
+        inspector.render()
+        await inspector.waitUntilLoaded(); settle()
+        check("losing the parent membership clears the open thread inspector", controller.threadInspector == nil && !session.interests.values.contains(root.id))
+        session.revokedChannels.remove(root.channelID)
+        resize(width: home.width)
+
+        // Closing or navigating away still releases the room interest.
+        controller.showThreadInspector(root: root)
+        guard let reopened = controller.threadInspector else { return checks + [("viewport fixture reopens its thread inspector", false)] }
+        await reopened.waitUntilLoaded(); settle()
+        // The File panel covers the thread, which comes back when it closes.
+        let threadShown = { controller.splitController.splitViewItems.contains { $0.viewController === reopened } }
+        func fileMessage(_ id: String) -> RavenMessage { RavenMessage(raw: .object(["name": .string(id), "channel_id": .string(root.channelID), "owner": .string("viewport-fixture@example.invalid"), "creation": .string("2026-11-06 09:05:00.000000"), "message_type": .string("File"), "file": .string("/files/\(id).pdf")])) }
+        let file = fileMessage("viewport-file")
+        controller.showFileInspector(for: file); settle()
+        let covered = controller.threadInspector === reopened && controller.fileInspector != nil && !threadShown() && !controller.displaysConversation(root.id)
+        // Another file replaces the panel without showing the thread between.
+        let replacedPanel = controller.fileInspector
+        let flash = PaneFlashWatcher(isShown: threadShown)
+        NotificationCenter.default.addObserver(flash, selector: #selector(PaneFlashWatcher.layoutChanged(_:)), name: NSView.frameDidChangeNotification, object: nil)
+        controller.showFileInspector(for: fileMessage("viewport-file-2")); settle()
+        NotificationCenter.default.removeObserver(flash)
+        check("another file replaces the File panel and keeps the thread covered", controller.fileInspector !== replacedPanel && controller.fileInspector?.source.messageID == "viewport-file-2" && !threadShown() && !flash.seen)
+        controller.closeFileInspector(); settle()
+        check("the File panel covers an open thread and closing it brings the same thread back", covered && controller.threadInspector === reopened && threadShown() && controller.displaysConversation(root.id) && session.interests[reopened.subscriptionID] == root.id)
         controller.closeThreadInspector(); settle()
+        check("closing the inspector releases its room interest", controller.threadInspector == nil && !session.interests.values.contains(root.id))
+        controller.showThreadInspector(root: root)
+        guard let navigated = controller.threadInspector else { return checks + [("viewport fixture opens its thread inspector for navigation", false)] }
+        await navigated.waitUntilLoaded(); settle()
+        controller.select(other)
+        check("choosing another conversation clears the thread inspector", controller.threadInspector == nil && !session.interests.values.contains(root.id))
+        controller.select(channel)
+        await controller.loadTask?.value; await controller.renderTask?.value; settle()
 
         // Picking another conversation leaves the previous text in the pane
         // until the first render arrives. Nothing in view belongs to the
@@ -246,5 +321,16 @@ import RavenProtocol
         resize(height: fitting - 60)
         check("a scroll after a legacy scroller appeared is the place a later resize keeps", !controller.isFollowing && holds(beside, in: transcript, readableMaxY: readableMaxY))
         return checks
+    }
+}
+
+/// Notes whether a pane was in the window at any layout pass, to catch a
+/// pane that is added and removed again within one call.
+@MainActor private final class PaneFlashWatcher: NSObject {
+    private let isShown: () -> Bool
+    private(set) var seen = false
+    init(isShown: @escaping () -> Bool) { self.isShown = isShown }
+    @objc nonisolated func layoutChanged(_ notification: Notification) {
+        MainActor.assumeIsolated { if isShown() { seen = true } }
     }
 }

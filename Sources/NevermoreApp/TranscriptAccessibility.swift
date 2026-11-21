@@ -11,7 +11,7 @@ import RavenProtocol
         let label: String
     }
     enum Action: String, CaseIterable, Sendable {
-        case reply = "Reply", openThread = "Open Thread", copyLink = "Copy Message Link"
+        case reply = "Reply", openThread = "Open Thread", copyLink = "Copy Message Link", showAnswered = "Show Answered Message"
     }
     private final class Result: NSAccessibilityCustomRotor.ItemResult {
         let id: String
@@ -134,7 +134,14 @@ import RavenProtocol
         case .copyLink: return true
         case .reply: return !session.readOnly && !owner.isArchivedConversation && owner.composer.isEditable
         case .openThread: return !session.readOnly && !session.demo && !owner.isArchivedConversation
+        case .showAnswered: return answeredMessageID(owner: owner) != nil
         }
+    }
+    /// The message the selected reply answers, which its quote links to.
+    private func answeredMessageID(owner: ConversationWindow) -> String? {
+        guard let entry = selectedEntry(owner: owner), let message = owner.messageRanges.first(where: { $0.1.id == entry.id })?.1,
+              message.raw["is_reply"].bool, let id = message.raw["linked_message"].string, !id.isEmpty else { return nil }
+        return id
     }
 
     /// AppKit's handler type has no isolation annotation. Build its block in
@@ -159,6 +166,7 @@ import RavenProtocol
                 case .reply: owner.reply(nil)
                 case .openThread: owner.openThread(nil)
                 case .copyLink: owner.copyMessageLink(nil)
+                case .showAnswered: if let id = self.answeredMessageID(owner: owner) { owner.showQuotedMessage(id) }
                 }
                 return true
             }
