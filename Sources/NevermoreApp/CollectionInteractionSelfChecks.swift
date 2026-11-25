@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 import RavenProtocol
 import NevermoreCore
 
@@ -255,6 +256,31 @@ import NevermoreCore
             check("thread collections cannot reopen a revoked parent channel") { owner.app.windows.count == beforeRevokedParent && owner.channel?.id == parent.id }
             threadCollection.close()
 
+            do {
+                let previousRead = session.readRPC
+                defer { session.readRPC = previousRead }
+                let incomingID = "notification-burst-incoming"
+                func row(_ id: String, channelID: String, user: String) -> JSONValue {
+                    .object(["name": .string(id), "channel_id": .string(channelID), "owner": .string(user),
+                             "creation": .string("2026-11-23 10:00:00.000000"), "message_type": .string("Text")])
+                }
+                var rows = (0..<48).map { row("notification-burst-\($0)", channelID: parent.id, user: session.account.user) }
+                rows.append(row("notification-wrong-conversation", channelID: "unrelated", user: "peer@example.invalid"))
+                rows.append(row(incomingID, channelID: parent.id, user: "peer@example.invalid"))
+                session.readRPC = { method, arguments in
+                    guard method == "raven.api.chat_stream.get_messages", arguments["channel_id"]?.string == parent.id,
+                          arguments["update_last_visit"] == .bool(false) else {
+                        throw AppError.message("Unexpected notification fixture read.")
+                    }
+                    return .object(["messages": .array(Array(rows.prefix(Int(arguments["limit"]?.nonnegativeCount ?? 0))))])
+                }
+                let page = try await session.notificationPage(channelID: parent.id)
+                let candidate = NotificationPolicy.nextNotification(in: page, user: session.account.user, seen: nil, notified: { _ in false })
+                check("a notification finds an incoming row behind a burst of the reader's own messages") {
+                    candidate?.id == incomingID && page.allSatisfy { $0.channelID == parent.id }
+                }
+            }
+
             // Notifications route through the same reuse: the conversation a
             // window shows comes forward, another one is shown in place.
             let windowsBeforeReveal = owner.app.windows.count
@@ -272,6 +298,38 @@ import NevermoreCore
             await owner.loadTask?.value
             await owner.renderTask?.value
             check("revealing another conversation shows it in place") { owner.app.windows.count == windowsBeforeReveal && owner.channel?.id == other.id }
+            NSApp.activate(ignoringOtherApps: true)
+            owner.window?.makeKeyAndOrderFront(nil)
+            for _ in 0..<100 where NSApp.keyWindow !== owner.window { try await Task.sleep(for: .milliseconds(10)) }
+
+            do {
+                let defaults = UserDefaults.standard
+                let saved = defaults.object(forKey: "notifications")
+                let savedQuietHours = NotificationPreferenceStore.quietHours(accountID: session.account.id)
+                session.channels.append(other)
+                defer {
+                    session.channels.removeAll { $0.id == other.id }
+                    defaults.set(saved, forKey: "notifications")
+                    NotificationPreferenceStore.setQuietHours(savedQuietHours, accountID: session.account.id)
+                }
+                defaults.set(true, forKey: "notifications")
+                NotificationPreferenceStore.setQuietHours(nil, accountID: session.account.id)
+                let accountID = session.account.id.uuidString
+                let selector = NSSelectorFromString("userNotificationCenter:willPresentNotification:withCompletionHandler:")
+                let app = owner.app
+                check("foreground presentation requests a banner and list entry for another conversation") {
+                    app.responds(to: selector) && NSApp.isActive && NSApp.keyWindow === owner.window &&
+                        app.foregroundChatPresentation(accountID: accountID, channelID: parent.id) == [.banner, .list]
+                }
+                check("foreground presentation stays silent in the conversation being read") {
+                    app.foregroundChatPresentation(accountID: accountID, channelID: other.id).isEmpty
+                }
+                defaults.set(false, forKey: "notifications")
+                check("foreground presentation respects disabled chat notifications") {
+                    app.foregroundChatPresentation(accountID: accountID, channelID: parent.id).isEmpty
+                }
+            }
+
             // A notification response can arrive before Session.start has read
             // the channel list. It must be retained, then replayed once the
             // channel appears, instead of being dropped at the cold-launch gap.
@@ -322,6 +380,81 @@ import NevermoreCore
             session.revokedChannels.remove(revokedChannel.id)
             session.channels.removeAll { $0.id == revokedChannel.id }
             session.notify()
+            let threadParent = RavenChannel(raw: .object(["name": .string("notification-thread-parent"), "channel_name": .string("Thread notification parent")]))
+            let rootID = "notification-thread-root"
+            let replyID = "notification-thread-reply"
+            func threadRow(_ id: String, channelID: String) -> RavenMessage {
+                RavenMessage(raw: .object([
+                    "name": .string(id), "channel_id": .string(channelID), "owner": .string("peer@example.invalid"),
+                    "creation": .string("2026-11-23 08:01:00.000000"), "text": .string("<p>Thread fixture</p>"),
+                    "message_type": .string("Text"),
+                ]))
+            }
+            try await session.store.cacheMessages([
+                threadRow(rootID, channelID: threadParent.id), threadRow(replyID, channelID: rootID),
+            ])
+            session.channels.append(threadParent)
+            session.threadParents[rootID] = threadParent.id
+
+            owner.window?.makeKeyAndOrderFront(nil)
+            owner.app.handleNotificationRoute(accountID: session.account.id.uuidString, channelID: rootID, anchor: replyID)
+            await owner.app.notificationRouteTask?.value
+            check("a thread reply notification opens the reply's own conversation and anchor") {
+                owner.channel?.id == rootID && owner.requestedAnchor == replyID
+            }
+            owner.app.handleNotificationRoute(accountID: session.account.id.uuidString, channelID: rootID, anchor: rootID)
+            await owner.app.notificationRouteTask?.value
+            check("a thread root notification opens its parent at the root") {
+                owner.channel?.id == threadParent.id && owner.requestedAnchor == rootID
+            }
+            check("only a notification's default action opens a conversation") {
+                AppDelegate.notificationResponseOpens(UNNotificationDefaultActionIdentifier) &&
+                    !AppDelegate.notificationResponseOpens(UNNotificationDismissActionIdentifier)
+            }
+
+            owner.app.handleNotificationRoute(accountID: session.account.id.uuidString, channelID: rootID, anchor: replyID)
+            let superseded = owner.app.notificationRouteTask
+            owner.app.handleNotificationRoute(accountID: session.account.id.uuidString, channelID: threadParent.id, anchor: nil)
+            await superseded?.value
+            check("a newer notification click cancels an unresolved thread route") {
+                superseded?.isCancelled == true && owner.channel?.id == threadParent.id
+            }
+
+            owner.app.handleNotificationRoute(accountID: session.account.id.uuidString, channelID: rootID, anchor: replyID)
+            let abandoned = owner.app.notificationRouteTask
+            owner.select(other)
+            await abandoned?.value
+            check("navigation cancels an unresolved notification route") {
+                abandoned?.isCancelled == true && owner.channel?.id == other.id
+            }
+            // This click arrives before any conversation window exists.
+            // Bringing up a window and selecting a conversation must win.
+            let previousKey = NSApp.keyWindow
+            let visible = NSApp.orderedWindows.filter(\.isVisible)
+            for window in visible { window.orderOut(nil) }
+            let coldApp = AppDelegate()
+            coldApp.sessions = [session]
+            let noOrigin = coldApp.activeConversationWindow == nil
+            coldApp.handleNotificationRoute(accountID: session.account.id.uuidString, channelID: rootID, anchor: replyID)
+            let coldRoute = coldApp.notificationRouteTask
+            let firstWindow = ConversationWindow(app: coldApp, session: session, lastFrameAutosaveName: nil)
+            coldApp.windows.append(firstWindow)
+            firstWindow.showWindow(nil)
+            firstWindow.window?.makeKeyAndOrderFront(nil)
+            firstWindow.select(other)
+            await coldRoute?.value
+            check("navigation in the first window cancels an unresolved cold-launch notification") {
+                noOrigin && coldRoute?.isCancelled == true && coldApp.pendingNotificationRoute == nil &&
+                    firstWindow.channel?.id == other.id
+            }
+            firstWindow.close()
+            for window in visible.reversed() { window.orderFront(nil) }
+            previousKey?.makeKeyAndOrderFront(nil)
+
+            session.channels.removeAll { $0.id == threadParent.id }
+            session.threadParents.removeValue(forKey: rootID)
+            session.notify()
+
             // A window busy with an edit is passed over for another window
             // of the account before a new one opens. Every window but a
             // spare is made busy, so the spare is the one that can take it.

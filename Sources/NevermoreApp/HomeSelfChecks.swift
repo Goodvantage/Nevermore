@@ -49,6 +49,63 @@ import RavenProtocol
         controller.window?.contentView?.layoutSubtreeIfNeeded()
     }
 
+    private static func markAllRead(app: AppDelegate) async throws -> [(String, Bool)] {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("NevermoreHomeRead-\(UUID())")
+        let origin = URL(string: "http://127.0.0.1:12345")!
+        let account = Account(origin: origin, user: "performance-fixture@example.invalid", siteName: "Fixture", clientID: "performance-loopback")
+        let session = try AccountSession(account: account, directory: root, authentication: .loopbackFixture)
+        let owner = ConversationWindow(app: app, session: session)
+        defer { owner.close(); session.stop(); try? FileManager.default.removeItem(at: root) }
+        await session.client.invalidate()
+        owner.showWindow(nil)
+        owner.showHome()
+
+        let cutoff = "2026-11-15 10:00:00"
+        func conversation(_ name: String) -> RavenChannel {
+            RavenChannel(raw: .object([
+                "name": .string(name), "channel_name": .string(name), "last_message_timestamp": .string(cutoff),
+                "last_message_details": .object(["owner": .string("peer"), "content": .string("Unread")]),
+            ]))
+        }
+        session.channels = ["normal", "revoked-before", "revoked-during", "write-failed"].map(conversation)
+        session.unread = .array(session.channels.map {
+            .object(["name": .string($0.id), "unread_count": .number(1)])
+        })
+        let digest = HomeUnreadDigest.make(channels: session.channels, unread: session.unread, mentioned: [])
+        session.revokedChannels.insert("revoked-before")
+
+        var db: OpaquePointer?
+        let opened = sqlite3_open(root.appendingPathComponent(AccountStore.databaseFileName).path, &db)
+        defer { sqlite3_close(db) }
+        let trigger = "CREATE TRIGGER fail_home_visit BEFORE INSERT ON visits WHEN NEW.channelID = 'write-failed' BEGIN SELECT RAISE(ABORT, 'fixture'); END"
+        guard opened == SQLITE_OK, sqlite3_exec(db, trigger, nil, nil, nil) == SQLITE_OK else {
+            throw AppError.message("Could not configure Home read fixture.")
+        }
+        owner.markAllRead(digest)
+        let sheet = await waitForSheet(owner.window)
+        let labels = sheet?.contentView.map { InteractionSelfChecks.descendants($0, of: NSTextField.self).map(\.stringValue) } ?? []
+        let accept = sheetButtons(sheet).first { $0.title == "Mark as Read" }
+        session.revokedChannels.insert("revoked-during")
+        var updated = session.channels[0].raw.object
+        updated["last_message_timestamp"] = .string("2026-11-15 10:01:00")
+        session.channels[0] = RavenChannel(raw: .object(updated))
+        accept?.performClick(nil)
+        if accept == nil, let sheet { owner.window?.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
+        for _ in 0..<150 where !owner.status.stringValue.contains("Could not save") {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let visits = try await session.store.visits()
+        return [
+            ("Home excludes access already lost from the Mark All Read confirmation",
+             labels.contains("Mark 3 conversations as read?")),
+            ("Home saves the confirmed cutoff and skips conversations revoked before and during the sheet",
+             visits == ["normal": cutoff]),
+            ("Home reports local read progress without counting a failed write or claiming server acceptance",
+             owner.status.stringValue.contains("Read progress saved for 1 of 4 conversations") &&
+             owner.status.stringValue.contains("Could not save 1")),
+        ]
+    }
+
     static func run(app: AppDelegate) async throws -> [(String, Bool)] {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("NevermoreHomeCheck-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -167,6 +224,8 @@ import RavenProtocol
         results.append(("a failed saved-message read cannot produce an empty Later message", HomeView.emptyLaterNote(later) == nil))
         later.saved = .loaded([]); later.reminders = .failed("offline")
         results.append(("a failed reminder read cannot produce an empty Later message", HomeView.emptyLaterNote(later) == nil))
+
+        results += try await markAllRead(app: app)
 
         // Later's draft destinations: one opens directly, several offer a
         // native chooser, and a choice rechecks the session, Home and access.

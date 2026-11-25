@@ -11,7 +11,7 @@ import RavenProtocol
         let label: String
     }
     enum Action: String, CaseIterable, Sendable {
-        case reply = "Reply", openThread = "Open Thread", copyLink = "Copy Message Link", showAnswered = "Show Answered Message"
+        case reply = "Reply", openThread = "Open Thread", copyLink = "Copy Message Link", showAnswered = "Show Answered Message", youtube = "Play YouTube Inline"
     }
     private final class Result: NSAccessibilityCustomRotor.ItemResult {
         let id: String
@@ -137,6 +137,7 @@ import RavenProtocol
         case .reply: return !session.readOnly && !owner.isArchivedConversation && owner.composer.isEditable
         case .openThread: return !session.readOnly && !session.demo && !owner.isArchivedConversation && owner.channel?.raw["is_thread"].bool != true
         case .showAnswered: return answeredMessageID(owner: owner) != nil
+        case .youtube: return owner.selectedMessage.flatMap(owner.youtubeSource(for:)) != nil
         }
     }
     /// The message the selected reply answers, which its quote links to.
@@ -169,10 +170,12 @@ import RavenProtocol
                 case .openThread: owner.openThread(nil)
                 case .copyLink: owner.copyMessageLink(nil)
                 case .showAnswered: if let id = self.answeredMessageID(owner: owner) { owner.showQuotedMessage(id) }
+                case .youtube: owner.toggleSelectedYouTube(nil)
                 }
                 return true
             }
-            return NSAccessibilityCustomAction(name: action.rawValue, handler: handler)
+            let name = action == .youtube ? owner.selectedMessage.flatMap(owner.youtubeActionTitle(for:)) ?? action.rawValue : action.rawValue
+            return NSAccessibilityCustomAction(name: name, handler: handler)
         }
     }
 

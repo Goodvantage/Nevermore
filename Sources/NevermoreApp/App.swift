@@ -77,6 +77,7 @@ struct PendingNotificationRoute: Equatable {
     let accountID: String
     let channelID: String
     let anchor: String?
+    let id = UUID()
     /// A tap should not navigate hours later; the replay expires quickly.
     let receivedAt: Date = Date()
     var isExpired: Bool { Date().timeIntervalSince(receivedAt) > 60 }
@@ -105,6 +106,10 @@ struct PendingNotificationRoute: Equatable {
     /// Set when a notification response names a channel this account has not
     /// loaded yet; replayed from `replayPendingNotificationRoute()`.
     private(set) var pendingNotificationRoute: PendingNotificationRoute?
+    private(set) var notificationRouteTask: Task<Void, Never>?
+    private var notificationRouteWindow: UUID?
+    private var notificationRouteChannelsVersion: Int?
+    private var isRestoringWindows = false
     /// Retained so the session-change observer stays registered.
     private var sessionChangeObserver: NSObjectProtocol?
     var dataRoot: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Nevermore", isDirectory: true) }
@@ -190,7 +195,7 @@ struct PendingNotificationRoute: Equatable {
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { if !flag { newWindow(nil) }; return true }
-    func applicationWillTerminate(_ notification: Notification) { interfaceSounds.stop(); updates.stop(); for window in windows { window.cancelPromisedFiles(); window.cancelEmojiPicker(); window.closePollWindows(); window.closeCodeReaders(); window.clearPreview() }; PromisedFileReceiver.cleanUpActiveReceives(); if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }; persistWindows(); for session in sessions { session.stop() } }
+    func applicationWillTerminate(_ notification: Notification) { clearNotificationRoute(); interfaceSounds.stop(); updates.stop(); for window in windows { window.cancelPromisedFiles(); window.cancelEmojiPicker(); window.closePollWindows(); window.closeCodeReaders(); window.clearPreview() }; PromisedFileReceiver.cleanUpActiveReceives(); if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }; persistWindows(); for session in sessions { session.stop() } }
     func persistWindows() {
         guard !CommandLine.arguments.contains("--demo") else { return }
         if UserDefaults.standard.object(forKey: "NSQuitAlwaysKeepsWindows") as? Bool == false {
@@ -223,6 +228,8 @@ struct PendingNotificationRoute: Equatable {
         if let routes = UserDefaults.standard.array(forKey: "restoredWindows") as? [[String: String]] { UserDefaults.standard.set(routes.filter { $0["account"] != accountID.uuidString }, forKey: "restoredWindows") }
     }
     func restoreWindows() {
+        isRestoringWindows = true
+        defer { isRestoringWindows = false }
         guard UserDefaults.standard.object(forKey: "NSQuitAlwaysKeepsWindows") as? Bool != false else { newWindow(nil); return }
         if let data = UserDefaults.standard.data(forKey: "savedWindowStates"), let states = try? JSONDecoder().decode([SavedWindowState].self, from: data) {
             for state in states.prefix(12) where state.version == 1 {
@@ -356,7 +363,7 @@ struct PendingNotificationRoute: Equatable {
         alert.informativeText = "This removes \(Self.removalContents(unsentMessages: ops.count)) from this Mac. Export needed text or files first. Backups and exported files are outside this removal."
         alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Remove Account")
         guard alert.runModal() == .alertSecondButtonReturn else { return }
-        if pendingNotificationRoute?.accountID == session.account.id.uuidString { pendingNotificationRoute = nil }
+        if pendingNotificationRoute?.accountID == session.account.id.uuidString { clearNotificationRoute() }
         session.stop(); purgeRestoration(accountID: session.account.id)
         SavedSearchStore.clear(session.account.id)
         accountPreferenceWindows.removeValue(forKey: session.account.id)?.close()
@@ -416,7 +423,27 @@ struct PendingNotificationRoute: Equatable {
         for window in windows { window.updateAccounts() }
         if !failures.isEmpty { showError(AppError.message(failures.joined(separator: "\n\n"))) }
     }
+    nonisolated static func notificationResponseOpens(_ actionIdentifier: String) -> Bool {
+        actionIdentifier == UNNotificationDefaultActionIdentifier
+    }
+
+    /// Recheck the delivery policy at presentation time in case the reader
+    /// opened the conversation while Notification Center queued the banner.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        let info = notification.request.content.userInfo
+        guard let accountID = info["account"] as? String,
+              let channelID = info["channel"] as? String else { return [] }
+        return await foregroundChatPresentation(accountID: accountID, channelID: channelID)
+    }
+
+    func foregroundChatPresentation(accountID: String, channelID: String) -> UNNotificationPresentationOptions {
+        guard let session = sessions.first(where: { $0.account.id.uuidString == accountID }),
+              session.shouldDeliverNotification(channelID: channelID) else { return [] }
+        return [.banner, .list]
+    }
+
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        guard Self.notificationResponseOpens(response.actionIdentifier) else { return }
         if response.notification.request.identifier == AppUpdateController.notificationID {
             await MainActor.run { updates.checkNow() }
             return
@@ -428,44 +455,84 @@ struct PendingNotificationRoute: Equatable {
             handleNotificationRoute(accountID: accountID, channelID: channelID, anchor: anchor)
         }
     }
-    /// Opens a notification route, or retains it while the named channel is
-    /// still loading. A response for an account that is gone is dropped.
+    /// Keep the latest click through cold launch. A listed channel can open
+    /// immediately. A thread room must be verified because it is not listed.
     func handleNotificationRoute(accountID: String, channelID: String, anchor: String?) {
-        guard let session = sessions.first(where: { $0.account.id.uuidString == accountID }) else {
-            // The account is registered but its session has not been created
-            // yet during a cold launch; retain the route until it appears.
-            if accountRecords.contains(where: { $0.id.uuidString == accountID }) {
-                pendingNotificationRoute = PendingNotificationRoute(accountID: accountID, channelID: channelID, anchor: anchor)
-            }
-            return
-        }
-        guard !session.stopped else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        guard let channel = session.channels.first(where: { $0.id == channelID }) else {
-            pendingNotificationRoute = PendingNotificationRoute(accountID: accountID, channelID: channelID, anchor: anchor)
-            return
-        }
-        guard !session.channelIsRevoked(channelID) else {
-            if let pending = pendingNotificationRoute, pending.accountID == accountID, pending.channelID == channelID { pendingNotificationRoute = nil }
-            return
-        }
-        pendingNotificationRoute = nil
-        reveal(session: session, channel: channel, anchor: anchor)
+        clearNotificationRoute()
+        let session = sessions.first { $0.account.id.uuidString == accountID }
+        guard !channelID.isEmpty, session?.stopped != true,
+              session != nil || accountRecords.contains(where: { $0.id.uuidString == accountID }) else { return }
+        if session != nil { NSApp.activate(ignoringOtherApps: true) }
+        notificationRouteWindow = activeConversationWindow?.windowID
+        pendingNotificationRoute = PendingNotificationRoute(accountID: accountID, channelID: channelID, anchor: anchor)
+        replayPendingNotificationRoute()
     }
-    /// Replays a retained response once the channel is available. Called from
-    /// the session change observer, which fires as soon as channels are read.
+
+    func cancelNotificationRoute(from window: ConversationWindow) {
+        // Restoring saved windows can select a conversation before the
+        // first manually chosen destination. Keep the click through that
+        // restoration, including when it arrived with no origin window.
+        guard pendingNotificationRoute != nil, !isRestoringWindows else { return }
+        guard notificationRouteWindow == window.windowID || window.window?.isKeyWindow == true ||
+              (notificationRouteWindow == nil && activeConversationWindow === window) else { return }
+        clearNotificationRoute()
+    }
+
+    private func clearNotificationRoute() {
+        notificationRouteTask?.cancel()
+        notificationRouteTask = nil
+        pendingNotificationRoute = nil
+        notificationRouteWindow = nil
+        notificationRouteChannelsVersion = nil
+    }
+
+    private var notificationOriginIsOpen: Bool {
+        guard let notificationRouteWindow else { return true }
+        return windows.contains { $0.windowID == notificationRouteWindow && !$0.isClosed }
+    }
+
+    /// Replay when a cold account's channel list arrives. At most one
+    /// canonical thread lookup runs for each version of that list.
     func replayPendingNotificationRoute() {
         guard let pending = pendingNotificationRoute else { return }
-        if pending.isExpired { pendingNotificationRoute = nil; return }
+        guard !pending.isExpired, notificationOriginIsOpen else { clearNotificationRoute(); return }
         guard let session = sessions.first(where: { $0.account.id.uuidString == pending.accountID }) else { return }
-        if session.stopped { pendingNotificationRoute = nil; return }
-        guard let channel = session.channels.first(where: { $0.id == pending.channelID }) else { return }
-        pendingNotificationRoute = nil
-        guard !session.channelIsRevoked(pending.channelID) else { return }
-        // The reader tapped a notification, so a delayed replay must bring
-        // the app forward, not switch a background window invisibly.
+        guard !session.stopped, !session.channelIsRevoked(pending.channelID) else { clearNotificationRoute(); return }
+        if let channel = session.channels.first(where: { $0.id == pending.channelID }) {
+            openNotificationTarget(session: session, channel: channel, anchor: pending.anchor)
+            return
+        }
+        guard let anchor = pending.anchor, !anchor.isEmpty,
+              notificationRouteTask == nil, notificationRouteChannelsVersion != session.channelsVersion,
+              !session.demo || session.threadParents[pending.channelID] != nil else { return }
+        notificationRouteChannelsVersion = session.channelsVersion
+        notificationRouteTask = Task { [weak self, weak session] in
+            guard let session else { return }
+            // A failed read keeps the cold-launch route eligible for a
+            // subsequently listed channel while the click is still fresh.
+            let target = try? await session.notificationThreadTarget(channelID: pending.channelID, anchor: anchor)
+            guard let self, !Task.isCancelled, self.pendingNotificationRoute?.id == pending.id else { return }
+            self.notificationRouteTask = nil
+            guard !pending.isExpired, self.notificationOriginIsOpen, !session.stopped,
+                  !session.channelIsRevoked(pending.channelID) else {
+                self.clearNotificationRoute()
+                return
+            }
+            if let target {
+                self.openNotificationTarget(session: session, channel: target, anchor: anchor)
+            } else if self.notificationRouteChannelsVersion != session.channelsVersion {
+                self.replayPendingNotificationRoute()
+            }
+        }
+    }
+
+    private func openNotificationTarget(session: AccountSession, channel: RavenChannel, anchor: String?) {
+        // Clearing ownership before reveal prevents its own navigation from
+        // canceling a newer route, and prevents replay after the click opens.
+        let origin = windows.first { $0.windowID == notificationRouteWindow }
+        clearNotificationRoute()
         NSApp.activate(ignoringOtherApps: true)
-        reveal(session: session, channel: channel, anchor: pending.anchor)
+        reveal(session: session, channel: channel, anchor: anchor, preferring: origin)
     }
     func configureUpdater() {
         // Demos and automated fixtures remain local unless the user explicitly

@@ -619,6 +619,7 @@ import NevermoreCore
     var activeComposer: NSTextView { inlineComposer.activeTextView ?? composer }
     func focusComposer() { window?.makeFirstResponder(activeComposer) }
     let mentionPopover = MentionPopover()
+    let shortcutPopover = SlashShortcutPopover()
     let quickReactions = QuickReactionPopover()
     let composerScroll = NSScrollView()
     let status = ObservedLabel(labelWithString: "Add an account to get started")
@@ -788,6 +789,7 @@ import NevermoreCore
         }
         return overlay
     }()
+    lazy var inlineYouTube = InlineYouTubePlayer(owner: self)
     /// Shown in the conversation pane whenever no conversation is open.
     lazy var home = HomeView(owner: self)
     /// The search results screen, shown in the conversation pane instead
@@ -843,7 +845,7 @@ import NevermoreCore
         })
         observerTokens.append(NotificationCenter.default.addObserver(forName: .sessionAvatarsChanged, object: nil, queue: .main) { [weak self] note in
             let source = note.object as? AccountSession
-            MainActor.assumeIsolated { guard let self, let source, source === self.session else { return }; self.transcript.needsDisplay = true; self.refreshSidebarAvatars() }
+            MainActor.assumeIsolated { guard let self, let source, source === self.session else { return }; self.transcript.needsDisplay = true; self.refreshSidebarAvatars(); self.mentionPopover.refreshArtwork() }
         })
         viewportKeeper.isFollowing = { [weak self] in self?.isFollowing ?? false }
         transcriptScroll.onWheelMove = { [weak self] in self?.updateFloatingDayPill(readerWheel: true) }
@@ -887,6 +889,7 @@ import NevermoreCore
         accountPicker.setAccessibilityValue(current)
     }
     func use(_ session: AccountSession?) {
+        app.cancelNotificationRoute(from: self)
         cancelSidebarKeyboardOpen()
         channelDetailsSheet?.close(); channelDetailsSheet = nil
         ComposerEditorLifetime.cancel(attachedTo: window)
@@ -901,9 +904,9 @@ import NevermoreCore
         inlineComposer.load(nil)
         cancelPromisedFiles(); navigationGeneration += 1
         self.session?.attach(window: windowID, channelID: nil)
-        conversationChooser?.cancel(); conversationChooser = nil; memberRoster?.cancel(); memberRoster = nil; closeThreadInspector(); mentionPopover.reset(); clearPreview(); closeCodeReaders()
+        conversationChooser?.cancel(); conversationChooser = nil; memberRoster?.cancel(); memberRoster = nil; closeThreadInspector(); mentionPopover.reset(); shortcutPopover.reset(); clearPreview(); closeCodeReaders()
         for collection in Array(collectionWindows) { collection.records.removeAll(); collection.table.reloadData(); collection.close() }; collectionWindows.removeAll()
-        loadTask?.cancel(); renderTask?.cancel(); self.session = session; mentionPoolCache = nil; composer.sharedUndoManager = nil; composer.useTextStorage(NSTextStorage()); channel = nil; messages = []; messageRanges = []; transcript.clearText(); animatedImages.removeAll(); isUpdatingTranscript = false; composer.string = ""; attachments = []; replyTo = nil; editing = nil; lastSeenReceipt = nil
+        loadTask?.cancel(); renderTask?.cancel(); self.session = session; mentionPoolCache = nil; composer.sharedUndoManager = nil; composer.useTextStorage(NSTextStorage()); channel = nil; messages = []; messageRanges = []; inlineYouTube.close(); transcript.clearText(); animatedImages.removeAll(); isUpdatingTranscript = false; composer.string = ""; attachments = []; replyTo = nil; editing = nil; lastSeenReceipt = nil
         navigation = NavigationHistory(); threadContextTask?.cancel(); threadRoot = nil; pendingRestoration = nil; restoreInspectorTask?.cancel(); updateAccounts(); refreshSidebar(); updateWindowTitle(); updateContext()
         // Home reads the window's session, and a switch posts no Home-shaped
         // notification for the new account until its first reconciliation. Rebuild
@@ -1040,9 +1043,11 @@ import NevermoreCore
         select(item)
     }
     func select(_ channel: RavenChannel, anchor: String? = nil, record: Bool = true) {
+        app.cancelNotificationRoute(from: self)
         cancelSidebarKeyboardOpen()
         hideFloatingDayPill(animated: false)
         if self.channel?.id != channel.id {
+            inlineYouTube.close()
             memberRoster?.cancel(); memberRoster = nil
             if window?.isVisible == true { app.interfaceSounds.play(.selection) }
             stickers.reset()
@@ -1058,7 +1063,7 @@ import NevermoreCore
         let navigationID = navigationGeneration
         if record { pendingRestoration = nil; captureNavigation(); navigation.visit(ConversationLocation(channelID: channel.id, anchorMessageID: anchor, threadParentChannelID: channel.raw["parent_channel_id"].string)) }
         threadContextTask?.cancel(); threadRoot = nil; codeCommands.removeAll(); expandedCode.removeAll()
-        restoreInspectorTask?.cancel(); closeThreadInspector(); closeFileInspector(); mentionPopover.reset(); loadTask?.cancel(); renderTask?.cancel(); self.channel = channel; refreshSidebarAvatars(); historyUpperID = nil; requestedAnchor = anchor; requestedPlacement = anchor == nil ? nil : .inView
+        restoreInspectorTask?.cancel(); closeThreadInspector(); closeFileInspector(); mentionPopover.reset(); shortcutPopover.reset(); loadTask?.cancel(); renderTask?.cancel(); self.channel = channel; refreshSidebarAvatars(); historyUpperID = nil; requestedAnchor = anchor; requestedPlacement = anchor == nil ? nil : .inView
         if let session {
             if session.sharedTextStorage[channel.id] == nil { session.sharedTextStorage[channel.id] = NSTextStorage() }
             if session.draftUndoManagers[channel.id] == nil { session.draftUndoManagers[channel.id] = UndoManager() }
@@ -1081,6 +1086,7 @@ import NevermoreCore
     /// Leaves the open conversation for Home. Drafts are saved as they are
     /// typed, so leaving loses nothing; Back returns to the conversation.
     func showHome() {
+        app.cancelNotificationRoute(from: self)
         guard session != nil else { return }
         cancelSidebarKeyboardOpen()
         hideFloatingDayPill(animated: false)
@@ -1105,9 +1111,9 @@ import NevermoreCore
         cancelPromisedFiles(); navigationGeneration += 1
         threadContextTask?.cancel(); threadRoot = nil; codeCommands.removeAll(); expandedCode.removeAll()
         memberRoster?.cancel(); memberRoster = nil
-        restoreInspectorTask?.cancel(); restoreLocationTask?.cancel(); closeThreadInspector(); mentionPopover.reset(); loadTask?.cancel(); renderTask?.cancel()
+        restoreInspectorTask?.cancel(); restoreLocationTask?.cancel(); closeThreadInspector(); mentionPopover.reset(); shortcutPopover.reset(); loadTask?.cancel(); renderTask?.cancel()
         hideHoverBar(); transcript.highlightRect = nil; transcript.caretMessageLocation = nil; autoEarlierFirstID = nil
-        channel = nil; messages = []; messageRanges = []; transcript.clearText(); animatedImages.removeAll(); isUpdatingTranscript = false
+        channel = nil; messages = []; messageRanges = []; inlineYouTube.close(); transcript.clearText(); animatedImages.removeAll(); isUpdatingTranscript = false
         // The conversation left behind may hold a draft to mark.
         refreshSidebarAvatars()
         // A fresh storage: typing can no longer reach the conversation's draft.
@@ -1162,12 +1168,13 @@ import NevermoreCore
     }
     func render() {
         guard let session, let channel else { isUpdatingTranscript = false; return }
-        if session.stopped || session.revokedChannels.contains(channel.id) || channel.raw["parent_channel_id"].string.map(session.revokedChannels.contains) == true || session.deletedIDs.contains(channel.id) {
+        if let source = inlineYouTube.source, session.deletedIDs.contains(source.messageID) { inlineYouTube.close() }
+        if session.stopped || ChannelPolicy.isRevoked(channelID: channel.id, revoked: session.revokedChannels, threadParents: session.threadParents) || channel.raw["parent_channel_id"].string.map(session.revokedChannels.contains) == true || session.deletedIDs.contains(channel.id) {
             updateStatusAnnouncements()
             renderTask?.cancel(); threadContextTask?.cancel(); threadRoot = nil; cancelPromisedFiles()
             clearReadPosition(); latestAuthorizedMessageID = nil; ink.reset(); stickers.reset()
             transcriptAccessibility.clear(); hideHoverBar(); transcript.highlightRect = nil
-            messages = []; messageRanges = []; codeCommands.removeAll(); transcript.clearText(); animatedImages.removeAll(); clearPreview()
+            messages = []; messageRanges = []; codeCommands.removeAll(); inlineYouTube.close(); transcript.clearText(); animatedImages.removeAll(); clearPreview()
             isUpdatingTranscript = false
             context.stringValue = "Access changed · unsent text remains recoverable"; return
         }
@@ -1263,6 +1270,7 @@ import NevermoreCore
                 let size = CGFloat(storedSize.isFinite && storedSize > 0 ? min(30, max(11, storedSize)) : 14)
                 var commands: [URL: CodeCommand] = [:]
                 var visibleCode = Set<String>()
+                var youtubeLocation: Int?
                 let firstUnread = self.readPosition.firstUnreadID(in: messages, currentUser: session.account.user)
                 let metrics = TranscriptMetrics(size: size, compact: UserDefaults.standard.bool(forKey: "compactMessages"))
                 // New metrics and new text both move the lines; the pane is
@@ -1349,8 +1357,17 @@ import NevermoreCore
                     if pendingSend == nil, !message.html.isEmpty, case .parsed(let document) = session.messageDocument(for: message),
                        let raw = SentLinkPreviewPresentation.previewedLink(of: message, in: document) {
                         session.sentLinkPreviews.request(raw, session: session)
-                        if let preview = session.sentLinkPreviews.preview(for: raw) {
+                        let video = InlineYouTubePlayer.Source(messageID: message.id, raw: raw)
+                        let expanded = video != nil && video == self.inlineYouTube.source
+                        if !expanded, let preview = session.sentLinkPreviews.preview(for: raw) {
                             output.append(TranscriptMedia.linkCard(preview, image: session.sentLinkPreviews.image(for: raw), imageFailed: session.sentLinkPreviews.imageFailed(raw), metrics: metrics, afterText: output.length > bodyStart))
+                        }
+                        if let video {
+                            output.append(TranscriptMedia.youtubeControls(video, expanded: expanded, metrics: metrics))
+                            if expanded {
+                                output.append(TranscriptMedia.youtubeSpace())
+                                youtubeLocation = output.length - 1
+                            }
                         }
                     }
                     let attachmentLink = TranscriptStyle.attachmentLink(for: message.id)
@@ -1440,6 +1457,7 @@ import NevermoreCore
                     }
                 }
                 else if let (id, offset) = visibleAnchor, let range = self.messageRanges.first(where: { $0.1.id == id })?.0 { self.transcriptScroll.contentView.scroll(to: NSPoint(x: 0, y: max(self.minimumTranscriptOrigin, self.rect(for: range).minY - offset))); self.transcriptScroll.reflectScrolledClipView(self.transcriptScroll.contentView) }
+                self.inlineYouTube.didRender(at: youtubeLocation)
                 self.transcriptAccessibility.refresh()
                 self.isUpdatingTranscript = false
                 self.ink.didRender(pending: inkPending, bodies: inkBodies, messages: self.messages, following: following, previousOrigin: oldOrigin)
@@ -1504,6 +1522,7 @@ import NevermoreCore
     }
     func seenVisible() {
         guard !isUpdatingTranscript else { return }
+        inlineYouTube.updatePlacement()
         let visible = readableTranscriptRect
         let includesLatest: Bool
         if let latest = latestAuthorizedMessageID {
@@ -1535,13 +1554,14 @@ import NevermoreCore
         lastSeenReceipt = (channel.id, message.creation)
         Task { await session.markSeen(channelID: channel.id, timestamp: message.creation) }
     }
+    func windowDidResignKey(_ notification: Notification) { shortcutPopover.close() }
     func windowDidBecomeKey(_ notification: Notification) { lastSeenReceipt = nil; seenVisible(); if channel != nil { session?.requestReconciliation() } else { home.refreshIfShown() } }
     /// Keep the toolbar (search, navigation, collections) in full screen, as
     /// Mail and Safari do by default; only the menu bar hides.
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
         proposedOptions.subtracting(.autoHideToolbar).union([.fullScreen, .autoHideMenuBar])
     }
-    func windowWillClose(_ notification: Notification) { cancelSidebarKeyboardOpen(); dayPillFade?.cancel(); channelDetailsSheet?.close(); channelDetailsSheet = nil; inlineComposer.tearDown(); ComposerEditorLifetime.cancel(attachedTo: window); rememberWindowFrame(); linkPreview.cancel(); ink.detach(); unkindness.reset(); stickers.detach(); clearReadPosition(); latestAuthorizedMessageID = nil; transcriptAccessibility.clear(); statusAnnouncements.invalidate(); cancelEmojiPicker(); gifSelectionTask?.cancel(); closePollWindows(); searchView.reset(session: nil); outboxWindow?.close(); outboxWindow = nil; isClosed = true; cancelPromisedFiles(); threadContextTask?.cancel(); threadRoot = nil; closeCodeReaders(); restoreInspectorTask?.cancel(); conversationChooser?.cancel(); conversationChooser = nil; memberRoster?.cancel(); memberRoster = nil; closeThreadInspector(); mentionPopover.reset(); for collection in Array(collectionWindows) { collection.close() }; collectionWindows.removeAll(); clearPreview(); session?.attach(window: windowID, channelID: nil); loadTask?.cancel(); renderTask?.cancel(); viewportKeeper.invalidate(); animatedImages.invalidate(); for token in observerTokens { NotificationCenter.default.removeObserver(token) }; app.windows.removeAll { $0 === self } }
+    func windowWillClose(_ notification: Notification) { cancelSidebarKeyboardOpen(); dayPillFade?.cancel(); channelDetailsSheet?.close(); channelDetailsSheet = nil; inlineComposer.tearDown(); ComposerEditorLifetime.cancel(attachedTo: window); rememberWindowFrame(); linkPreview.cancel(); ink.detach(); unkindness.reset(); stickers.detach(); clearReadPosition(); latestAuthorizedMessageID = nil; transcriptAccessibility.clear(); statusAnnouncements.invalidate(); cancelEmojiPicker(); gifSelectionTask?.cancel(); closePollWindows(); searchView.reset(session: nil); outboxWindow?.close(); outboxWindow = nil; isClosed = true; cancelPromisedFiles(); threadContextTask?.cancel(); threadRoot = nil; closeCodeReaders(); restoreInspectorTask?.cancel(); conversationChooser?.cancel(); conversationChooser = nil; memberRoster?.cancel(); memberRoster = nil; closeThreadInspector(); mentionPopover.reset(); shortcutPopover.reset(); for collection in Array(collectionWindows) { collection.close() }; collectionWindows.removeAll(); clearPreview(); session?.attach(window: windowID, channelID: nil); loadTask?.cancel(); renderTask?.cancel(); viewportKeeper.invalidate(); inlineYouTube.close(); animatedImages.invalidate(); for token in observerTokens { NotificationCenter.default.removeObserver(token) }; app.windows.removeAll { $0 === self } }
     func restorePendingInspector() {
         guard let state = pendingRestoration, let rootID = state.threadRootID, let session, channel?.id == state.location.channelID, session.account.id == state.accountID else { return }
         pendingRestoration?.threadRootID = nil
@@ -1633,6 +1653,8 @@ import NevermoreCore
               !isClosed, !window.styleMask.contains(.fullScreen) else { return }
         window.saveFrame(usingName: name)
     }
+    func windowDidMiniaturize(_ notification: Notification) { inlineYouTube.updatePlacement() }
+    func windowDidDeminiaturize(_ notification: Notification) { inlineYouTube.updatePlacement() }
     func windowDidMove(_ notification: Notification) { rememberWindowFrame() }
     func windowDidResize(_ notification: Notification) {
         rememberWindowFrame()
@@ -1753,6 +1775,7 @@ import NevermoreCore
         }
     }
     func updateCompletions() {
+        if updateShortcutSuggestions() { mentionPopover.close(); return }
         guard let session, composer.isEditable, !applyingDraft, channel != nil else { mentionPopover.close(); return }
         // The pool covers every user and channel, so build it only when a
         // trigger is actually at the caret; the query scan is a short
@@ -1774,6 +1797,18 @@ import NevermoreCore
     func textViewDidChangeSelection(_ notification: Notification) {
         if notification.object as? NSTextView === composer { updateCompletions(); composerFormatting.updateSelection() }
         if notification.object as? NSTextView === transcript { fileInspectorFollowSelection() }
+    }
+    /// A suggestion's portrait or channel tile, as search results draw them.
+    func mentionArtwork(for candidate: MentionCandidate) -> MentionPopover.Artwork? {
+        guard let session else { return nil }
+        switch candidate.kind {
+        case .person:
+            session.loadAvatars([candidate.serverID])
+            return MentionPopover.Artwork(image: session.avatarImage(for: candidate.serverID), symbol: "person.crop.circle", presence: session.presenceDescription(for: candidate.serverID))
+        case .channel:
+            guard let channel = session.channels.first(where: { $0.id == candidate.serverID }) else { return nil }
+            return MentionPopover.Artwork(image: session.channelAvatarImage(for: channel), symbol: channel.raw["type"].string == "Private" ? "lock" : "number")
+        }
     }
     func insertMention(_ candidate: MentionCandidate, query: MentionQuery) {
         if inlineComposer.mode == .markdown {
@@ -1848,7 +1883,7 @@ import NevermoreCore
         composerFormatting.isEnabled = composer.isEditable
         gifButton.isEnabled = composer.isEditable && gifSelectionTask == nil
         inlineComposer.configureSource()
-        if !composer.isEditable { mentionPopover.close() }
+        if !composer.isEditable { mentionPopover.close(); shortcutPopover.close() }
     }
     func updateContext() {
         updateStatusAnnouncements()
@@ -1901,6 +1936,7 @@ import NevermoreCore
         do {
             guard !session.preparingChannels.contains(channel.id), !session.acceptingChannels.contains(channel.id) else { return }
             guard !session.revokedChannels.contains(channel.id), channel.raw["parent_channel_id"].string.map(session.revokedChannels.contains) != true else { status.stringValue = "Access changed. Your draft is preserved."; return }
+            if submitShortcut() { return }
             guard !session.pendingFileReceipts.values.contains(channel.id) else { status.stringValue = "Files are still being received. Wait, or choose File → Cancel Receiving Files."; return }
             guard !app.windows.contains(where: { $0.session === session && $0.channel?.id == channel.id && $0.activeComposer.hasMarkedText() }) else { status.stringValue = "Finish text composition in the other window before sending."; return }
             // A shortcut the last key completed is formatted first, so the
@@ -2222,6 +2258,16 @@ import NevermoreCore
     }
     @objc func openBrowser(_ sender: Any?) { guard let session else { return }; NSWorkspace.shared.open(session.account.origin.appendingPathComponent("raven")) }
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        if let url = link as? URL, url.scheme == InlineYouTubePlayer.command.scheme {
+            if url == InlineYouTubePlayer.command, textView === transcript, !isUpdatingTranscript,
+               let storage = transcript.textStorage, (0..<storage.length).contains(charIndex),
+               storage.attribute(.link, at: charIndex, effectiveRange: nil) as? URL == url,
+               let message = messageRanges.first(where: { NSLocationInRange(charIndex, $0.0) })?.1,
+               let source = youtubeSource(for: message) {
+                inlineYouTube.toggle(source)
+            }
+            return true
+        }
         if let url = link as? URL, url.scheme == "nevermore-code" { if let command = codeCommands[url] { executeCode(command) }; return true }
         if let url = link as? URL, url.scheme == "nevermore-attachment", let id = url.pathComponents.last, let message = messages.first(where: { $0.id == id }) { previewAttachment(for: message); return true }
         guard let raw = (link as? URL)?.relativeString ?? link as? String, let url = URL(string: raw, relativeTo: session?.account.origin)?.absoluteURL, ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? ""), url.user == nil, url.password == nil else { return true }

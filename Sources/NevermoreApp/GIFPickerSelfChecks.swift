@@ -13,6 +13,7 @@ import RavenProtocol
         let session = try AccountSession(account: account, directory: directory, demo: true)
         let channel = RavenChannel(raw: .object(["name": .string("gif-picker"), "channel_name": .string("GIF picker")]))
         session.channels = [channel]
+        session.userNames["alice@example.invalid"] = "Alice"
         try await session.store.cacheChannels(session.channels)
         try await session.store.cacheMessages([RavenMessage(raw: .object(["name": .string("question"), "channel_id": .string(channel.id), "owner": .string("alice@example.invalid"), "creation": .string("2026-11-06 09:00:00.000000"), "text": .string("<p>How was the launch?</p>"), "message_type": .string("Text")]))])
         // Offline, so a chosen GIF stays queued where it can be inspected.
@@ -113,6 +114,81 @@ import RavenProtocol
         controller.editing = RavenMessage(raw: .object(["name": .string("question"), "channel_id": .string(channel.id)]))
         check("Send GIF is unavailable while editing a message", !controller.canSendGIF)
         controller.editing = nil
+
+        // Use the same composer input events as the mention self-checks.
+        controller.gifSourcesOverride = GIFPickerSheet.Sources(search: search, provider: .klipy, media: media)
+        parent.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        controller.focusComposer()
+        let focused = await wait { parent.isKeyWindow && parent.firstResponder === controller.composer }
+        check("the slash shortcut fixture has keyboard focus", focused)
+        func type(_ value: String) {
+            let editor = controller.activeComposer
+            editor.insertText(value, replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+            controller.updateCompletions()
+        }
+        func press(_ code: UInt16, characters: String = "") {
+            if let event = InteractionSelfChecks.key(code, window: parent, characters: characters) { controller.composer.keyDown(with: event) }
+        }
+
+        type("/")
+        check("typing slash opens both shortcuts without taking focus", controller.shortcutPopover.popover.isShown &&
+              controller.shortcutPopover.shortcuts == [.gif, .emoji] && parent.firstResponder === controller.composer)
+        press(125)
+        press(48, characters: "\t")
+        check("Down and Tab complete the selected shortcut", controller.composer.string == "/emoji" && parent.attachedSheet == nil)
+
+        type("/g")
+        if let content = controller.shortcutPopover.popover.contentViewController?.view {
+            content.layoutSubtreeIfNeeded()
+            let table = InteractionSelfChecks.descendants(content, of: NSTableView.self).first
+            let scroll = table?.enclosingScrollView
+            let row = table?.rect(ofRow: 0)
+            check("the shortcut popover shows a whole row when only one command matches",
+                  controller.shortcutPopover.popover.isShown && table?.numberOfRows == 1 &&
+                  row.map { (scroll?.documentVisibleRect.maxY ?? 0) + 0.5 >= $0.maxY } == true)
+        } else { check("the shortcut popover has a content view", false) }
+        type("@ali")
+        check("the editor switches from slash suggestions to mentions",
+              !controller.shortcutPopover.popover.isShown && controller.mentionPopover.popover.isShown)
+        type("/g")
+        check("the editor switches from mentions to slash suggestions",
+              controller.shortcutPopover.popover.isShown && !controller.mentionPopover.popover.isShown)
+        press(53)
+        controller.updateCompletions()
+        check("Escape dismisses suggestions and preserves the command", !controller.shortcutPopover.popover.isShown && controller.composer.string == "/g")
+        type("/usr/local/bin")
+        check("unknown slash text stays ordinary draft text", !controller.shortcutPopover.popover.isShown && !controller.submitShortcut())
+        type("/gif cats\nA second line")
+        check("multiline drafts stay ordinary text", !controller.shortcutPopover.popover.isShown && !controller.submitShortcut())
+
+        type("/g")
+        press(48, characters: "\t")
+        check("Tab leaves room for GIF search terms", controller.composer.string == "/gif " && parent.attachedSheet == nil)
+        type("/gif orange cats")
+        press(36, characters: "\r")
+        let searchedFromShortcut = await wait { parent.attachedSheet != nil && search.queries.last == "orange cats" }
+        check("Return consumes the slash command and searches in the GIF picker", searchedFromShortcut &&
+              GIFPickerSheet.current?.search.stringValue == "orange cats" && controller.composer.string.isEmpty)
+        GIFPickerSheet.current?.cancel()
+        let shortcutCancelled = await wait { controller.gifSelectionTask == nil }
+        let cancelledOperations = try await session.store.operations()
+        check("running the shortcut queues nothing until a GIF is chosen", shortcutCancelled && cancelledOperations.isEmpty)
+
+        controller.inlineComposer.switchMode(.markdown)
+        controller.focusComposer()
+        type("@ali")
+        check("Markdown source still shows mention suggestions",
+              controller.mentionPopover.popover.isShown && !controller.shortcutPopover.popover.isShown)
+        type("/gif moon")
+        check("Markdown source also shows slash suggestions", controller.inlineComposer.mode == .markdown &&
+              controller.shortcutPopover.popover.isShown && !controller.mentionPopover.popover.isShown &&
+              controller.shortcutPopover.shortcuts == [.gif])
+        controller.send(nil)
+        let markdownSearch = await wait { parent.attachedSheet != nil && search.queries.last == "moon" }
+        check("the Send action runs a complete command in Markdown mode", markdownSearch && controller.activeComposer.string.isEmpty)
+        GIFPickerSheet.current?.cancel()
+        _ = await wait { controller.gifSelectionTask == nil }
         return checks
     }
 }

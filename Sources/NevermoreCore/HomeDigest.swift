@@ -183,6 +183,73 @@ public struct HomeUnreadDigest: Equatable, Sendable {
     }
 }
 
+/// The newest message in one conversation's local cache, or why it could
+/// not be read. Mark All Read collects these before it confirms anything,
+/// so the sheet never promises a conversation it cannot acknowledge.
+public enum HomeCachedNewest: Equatable, Sendable {
+    /// The newest cached creation timestamp, in Frappe's datetime format.
+    case message(String)
+    /// The cache answered but held no message for the conversation.
+    case empty
+    /// Reading the cache failed.
+    case failed
+}
+
+/// One conversation Mark All Read can acknowledge, with the newest
+/// timestamp it will mark seen.
+public struct HomeMarkAllReadTarget: Equatable, Sendable {
+    public let channel: RavenChannel
+    public let timestamp: String
+}
+
+/// The conversations Mark All Read can acknowledge and the ones it
+/// cannot. Resolved from the unread digest plus the newest cached message
+/// of every conversation whose reported timestamp is missing or unusable,
+/// all before the confirmation appears.
+public struct HomeMarkAllReadPlan: Equatable, Sendable {
+    public let targets: [HomeMarkAllReadTarget]
+    /// Conversations with neither a usable reported timestamp nor a
+    /// cached message.
+    public let skipped: Int
+    /// Conversations whose cache could not be read.
+    public let unavailable: Int
+
+    public var isEmpty: Bool { targets.isEmpty }
+
+    public init(entries: [HomeUnreadEntry], cached: [String: HomeCachedNewest]) {
+        var targets: [HomeMarkAllReadTarget] = []
+        var skipped = 0
+        var unavailable = 0
+        for entry in entries {
+            if let reported = entry.latest?.timestamp, Self.acceptsTimestamp(reported) {
+                targets.append(HomeMarkAllReadTarget(channel: entry.channel, timestamp: reported))
+                continue
+            }
+            switch cached[entry.channel.id] {
+            case .message(let creation) where Self.acceptsTimestamp(creation):
+                targets.append(HomeMarkAllReadTarget(channel: entry.channel, timestamp: creation))
+            case .failed:
+                unavailable += 1
+            default:
+                // `.empty`, an invalid cached timestamp and a channel the
+                // caller never asked about all leave nothing to mark.
+                skipped += 1
+            }
+        }
+        self.targets = targets
+        self.skipped = skipped
+        self.unavailable = unavailable
+    }
+
+    /// Whether `markSeen` will accept this timestamp. The server validates
+    /// the same format with `ServerTimestampParser`, so an unparseable
+    /// value would silently mark nothing.
+    public static func acceptsTimestamp(_ timestamp: String?) -> Bool {
+        guard let timestamp, !timestamp.isEmpty else { return false }
+        return ServerTimestampParser(siteTimeZone: .gmt).date(from: timestamp) != nil
+    }
+}
+
 /// The reader's own sending over the last two weeks. Built only from
 /// messages the reader wrote; nothing here describes anyone else.
 public struct HomeWeekSummary: Equatable, Sendable {

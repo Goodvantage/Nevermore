@@ -54,9 +54,10 @@ import NevermoreCore
     /// The sheet that is open, for self-checks.
     private(set) static weak var current: GIFPickerSheet?
 
-    static func pick(on parent: NSWindow, sources: Sources, active: @escaping () -> Bool) async throws -> GIFPickerResult {
+    static func pick(on parent: NSWindow, sources: Sources, query: String, active: @escaping () -> Bool) async throws -> GIFPickerResult {
         guard parent.attachedSheet == nil else { throw AppError.message("Finish the current sheet before choosing a GIF.") }
         let controller = GIFPickerSheet(parent: parent, sources: sources, active: active)
+        controller.search.stringValue = query
         return await withTaskCancellationHandler {
             guard !Task.isCancelled else { controller.finish(.cancelled); return .cancelled }
             return await withCheckedContinuation { controller.present($0) }

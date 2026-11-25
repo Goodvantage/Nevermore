@@ -51,6 +51,8 @@ import NevermoreCore
             for (label, result) in ComposerSizingSelfChecks.run(app: app) { check(result, label) }
             for (label, result) in await composerFormattingChecks(in: first) { check(result, label) }
             for (label, result) in await InlineComposerSelfChecks.run(in: first) { check(result, label) }
+            do { for (label, result) in try await GIFPickerSelfChecks.run(app: app) { check(result, label) } }
+            catch { check(false, "GIF picker and shortcut checks: \(error.localizedDescription)") }
             print("Native composer self-check: \(failures.isEmpty ? "PASS" : "FAIL") (\(failures.count) failures)")
             return failures.isEmpty ? 0 : 1
         }
@@ -173,6 +175,22 @@ import NevermoreCore
             second.updateCompletions()
             if !second.mentionPopover.popover.isShown { print("DIAGNOSTIC completion key=\(second.window?.isKeyWindow == true) focus=\(second.window?.firstResponder === second.composer) marked=\(second.composer.hasMarkedText()) query=\(MentionCompletion.query(in: second.composer.string, selection: second.composer.selectedRange()) != nil)") }
             check(second.mentionPopover.popover.isShown && second.mentionPopover.candidates.first?.serverID == "alex@example.com", "native mention suggestions keep keyboard focus and server identity")
+            // The list is sized to its rows: every shown row whole, no
+            // scroll bar for a short list, no list background over the
+            // popover's, and the selection drawn as active while the
+            // composer keeps focus.
+            let suggestions = second.mentionPopover
+            suggestions.popover.contentViewController?.view.layoutSubtreeIfNeeded()
+            let shownRows = min(suggestions.candidates.count, MentionPopover.visibleRows)
+            let lastShown = shownRows > 0 ? suggestions.table.rect(ofRow: shownRows - 1) : .zero
+            let visible = suggestions.scroll.documentVisibleRect
+            let scrollerShown = suggestions.scroll.verticalScroller.map { !$0.isHidden } ?? false
+            let listBackground = suggestions.scroll.drawsBackground || suggestions.table.backgroundColor.alphaComponent > 0
+            let emphasized = suggestions.table.rowView(atRow: suggestions.table.selectedRow, makeIfNecessary: false)?.isEmphasized == true
+            let portrait = suggestions.table.view(atColumn: 0, row: 0, makeIfNecessary: false).map { !InteractionSelfChecks.descendants($0, of: HomeAvatar.self).isEmpty } == true
+            let listFits = shownRows > 0 && visible.maxY + 0.5 >= lastShown.maxY && (suggestions.candidates.count > shownRows || !scrollerShown) && !listBackground && emphasized && portrait
+            if !listFits { print("DIAGNOSTIC mention list rows=\(suggestions.candidates.count) visible=\(visible) lastRow=\(lastShown) scroller=\(scrollerShown) background=\(listBackground) emphasized=\(emphasized) portrait=\(portrait)") }
+            check(listFits, "mention suggestions show whole rows with portraits on the popover's background and an active selection")
             await second.saveTask?.value
             try await Task.sleep(for: .milliseconds(20))
             if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: second.window!.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) { second.composer.keyDown(with: event) }
@@ -321,6 +339,10 @@ import NevermoreCore
                 guard CommandLine.arguments.indices.contains(index + 1) else { throw AppError.message("Missing local attachment fixture origin.") }
                 for (label, result) in try await AttachmentSelfChecks.run(app: app, origin: CommandLine.arguments[index + 1]) { check(result, label) }
             } catch { check(false, "attachment fixture: \(error.localizedDescription)") }
+            if CommandLine.arguments.indices.contains(index + 1) {
+                do { for (label, result) in try await NotificationNetworkSelfChecks.run(origin: CommandLine.arguments[index + 1]) { check(result, label) } }
+                catch { check(false, "notification routing fixture: \(error.localizedDescription)") }
+            }
         }
         for (label, result) in RavenPortraitSelfChecks.run() { check(result, label) }
         do { for (label, result) in try ChannelAvatarSelfChecks.run(app: app) { check(result, label) } }

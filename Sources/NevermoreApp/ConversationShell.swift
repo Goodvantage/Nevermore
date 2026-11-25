@@ -659,7 +659,7 @@ extension ConversationWindow {
         composer.isRichText = true; composer.importsGraphics = false; composer.isAutomaticSpellingCorrectionEnabled = false; composer.isContinuousSpellCheckingEnabled = true; composer.allowsUndo = true; composer.font = ComposerMetrics.font; composer.textColor = .labelColor; composer.drawsBackground = false; composer.textContainerInset = ComposerMetrics.textInset; composer.isVerticallyResizable = true; composer.autoresizingMask = .width; composer.textContainer?.widthTracksTextView = true; composer.delegate = self; composer.setAccessibilityLabel("Message composer")
         composer.minSize = NSSize(width: 0, height: 0); composer.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         composer.registerForDraggedTypes([.fileURL] + PromisedFileReceiver.draggedTypes); composer.onPromisedFiles = { [weak self] sources in self?.receivePromisedFiles(sources) }; composer.onSend = { [weak self] in self?.send(nil) }; composer.onFiles = { [weak self] urls in self?.stage(urls) }; composer.onEscape = { [weak self] in self?.cancelContext() }
-        composer.onCompletionKey = { [weak self] event in self?.mentionPopover.handle(event) ?? false }
+        composer.onCompletionKey = { [weak self] event in self?.handleCompletionKey(event) ?? false }
         composer.onEditLast = { [weak self] in self?.editLastOwnMessage() ?? false }
         composer.onAttachmentRequest = { [weak self] in
             guard let self else { return false }
@@ -667,7 +667,11 @@ extension ConversationWindow {
             return true
         }
         composer.onPasteError = { [weak self] message in self?.status.stringValue = message }
+        shortcutPopover.onChoose = { [weak self] shortcut, input, action in
+            self?.chooseShortcut(shortcut, input: input, action: action)
+        }
         mentionPopover.onChoose = { [weak self] candidate, query in self?.insertMention(candidate, query: query) }
+        mentionPopover.artwork = { [weak self] candidate in self?.mentionArtwork(for: candidate) }
         linkPreview.onChange = { [weak self] in self?.showLinkPreview() }
         linkPreviewCard.onDismiss = { [weak self] in self?.linkPreview.dismiss() }
         linkPreviewCard.onOpen = { url in
@@ -824,7 +828,7 @@ extension ConversationWindow {
         let value = inlineComposer.mode == .markdown
             ? (try? NativeRichText.attributedString(document: inlineComposer.currentDocument())) ?? NSAttributedString(string: "")
             : composer.attributedString()
-        let links = channel == nil ? [] : NativeRichText.previewableLinks(in: value)
+        let links = channel == nil || (editing == nil && shortcutInput?.command == .gif) ? [] : NativeRichText.previewableLinks(in: value)
         let draft = [session?.account.id.uuidString, channel?.id, editing?.id].map { $0 ?? "" }.joined(separator: "/")
         linkPreview.update(links: links, loader: loader, draft: draft)
     }
@@ -1220,6 +1224,7 @@ extension ConversationWindow {
             add("Quick Look Attachment", #selector(quickLook(_:)))
             add("Save Attachment As…", #selector(saveAttachment(_:)))
         }
+        if let title = youtubeActionTitle(for: message) { add(title, #selector(toggleSelectedYouTube(_:))) }
         if message.messageType == "Poll" { menu.addItem(.separator()); add("View / Vote in Poll…", #selector(vote(_:))) }
         if let extra = transcript.codeMenuItems?(), !extra.isEmpty { menu.addItem(.separator()); for item in extra { menu.addItem(item) } }
         if message.raw["link_doctype"].string?.isEmpty == false { add("Linked Document…", #selector(linkedDocument(_:))) }
@@ -1400,6 +1405,10 @@ extension ConversationWindow {
         case #selector(schedule(_:)): return writable && channel != nil && editing == nil && composer.isEditable && attachments.isEmpty && !activeComposer.string.isEmpty && !isArchivedConversation
         case #selector(createPoll(_:)): return writable && channel != nil && !isArchivedConversation && pollCreationTask == nil
         case #selector(copyMessageLink(_:)), #selector(readers(_:)): return hasSession && selectedMessage != nil
+        case #selector(toggleSelectedYouTube(_:)):
+            let title = selectedMessage.flatMap(youtubeActionTitle(for:))
+            item.title = title ?? "Play YouTube Inline"
+            return title != nil
         case #selector(linkedDocument(_:)): return hasSession && selectedMessage?.raw["link_doctype"].string?.isEmpty == false
         default: return nil
         }

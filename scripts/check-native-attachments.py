@@ -387,6 +387,27 @@ class Fixture(BaseHTTPRequestHandler):
             with self.server.retry_lock:
                 self.reply_json({"message": dict(self.server.retry_counts)})
             return
+        if path == "/api/resource/Raven Channel/notification-fixture-denied":
+            self.reply_json({"exc_type": "PermissionError"}, 403)
+            return
+        if path == "/api/resource/Raven Channel/notification-fixture-root":
+            self.reply_json({"data": {
+                "name": "notification-fixture-root", "channel_name": "notification-fixture-root",
+                "is_thread": 1, "is_archived": 0,
+            }})
+            return
+        if path == "/api/resource/Raven Channel/notification-fixture-parent":
+            self.reply_json({"data": {"name": "notification-fixture-parent", "is_thread": 0, "is_archived": 0}})
+            return
+        message = path.removeprefix("/api/resource/Raven Message/")
+        notification_channels = {
+            "notification-fixture-root": "notification-fixture-parent",
+            "notification-fixture-reply": "notification-fixture-root",
+            "notification-fixture-other": "other-conversation",
+        }
+        if message in notification_channels:
+            self.reply_json({"data": {"name": message, "channel_id": notification_channels[message]}})
+            return
         for channel in ("poll-fixture-channel", REACTION_CHANNEL, REACTION_PAIR_CHANNEL):
             if path == "/api/resource/Raven Channel/" + channel:
                 self.reply_json({"data": {"name": channel, "is_archived": 0, "is_thread": 0}})

@@ -733,48 +733,79 @@ extension ConversationWindow {
     }
 
     /// Marks every conversation in Home's Unread module read, up to the
-    /// newest message the channel list reported. A message that arrives
-    /// meanwhile stays unread.
+    /// newest message the channel list reported or, when that is missing,
+    /// the newest cached one. A message that arrives meanwhile stays unread.
     func markAllRead(_ digest: HomeUnreadDigest) {
         guard let session, !digest.entries.isEmpty else { return }
         let count = digest.entries.count
+        let location = navigationGeneration
         Task { [weak self] in
-            let confirmed = await SheetPrompt.confirm("Mark \(count) conversation\(count == 1 ? "" : "s") as read?", message: "Muted conversations stay as they are.", confirm: "Mark as Read", on: self?.window)
-            guard confirmed, let self, self.isCurrent(session) else { return }
-            var acted = 0
-            var unreadable = 0
-            for entry in digest.entries {
-                let timestamp: String
-                if let reported = entry.latest?.timestamp {
-                    timestamp = reported
-                } else {
-                    // The channel list reported no latest message; fall back
-                    // to the newest cached one so the conversation is still
-                    // marked instead of silently skipped. cachedMessages
-                    // returns the newest `limit` rows in ascending order, so
-                    // `.last` is the newest cached message; `creation` and
-                    // `last_message_timestamp` are both Frappe datetime
-                    // strings in the format markSeen validates.
-                    do {
-                        guard let newest = try await session.cachedMessages(channelID: entry.channel.id, limit: 1).last?.creation else { continue }
-                        timestamp = newest
-                    } catch {
-                        Self.logger.error("markAllRead could not read the cached messages of \(entry.channel.id, privacy: .private): \(error.localizedDescription, privacy: .public)")
-                        unreadable += 1; continue
-                    }
-                }
-                session.intentionallyUnread.remove(entry.channel.id)
-                await session.markSeen(channelID: entry.channel.id, timestamp: timestamp)
-                acted += 1
+            guard let self else { return }
+            @MainActor func isCurrentHome() -> Bool {
+                self.isCurrentAccount(session) && self.navigationGeneration == location &&
+                    self.channel == nil && !self.isSearching && !session.readOnly
             }
+            guard isCurrentHome() else { return }
+            // Resolve every timestamp before confirming, so the sheet counts
+            // only conversations that can actually be acknowledged. The
+            // cache is consulted for a missing or unparseable reported
+            // timestamp; its creation uses the same Frappe datetime format
+            // markSeen validates. cachedMessages returns the newest `limit`
+            // rows in ascending order, so `.last` is the newest cached one.
+            var cached: [String: HomeCachedNewest] = [:]
+            for entry in digest.entries {
+                guard isCurrentHome() else { return }
+                guard !session.channelIsRevoked(entry.channel.id),
+                      !HomeMarkAllReadPlan.acceptsTimestamp(entry.latest?.timestamp) else { continue }
+                do {
+                    if let newest = try await session.cachedMessages(channelID: entry.channel.id, limit: 1).last {
+                        cached[entry.channel.id] = .message(newest.creation)
+                    } else {
+                        cached[entry.channel.id] = .empty
+                    }
+                } catch {
+                    Self.logger.error("markAllRead could not read the cached messages of \(entry.channel.id, privacy: .private): \(error.localizedDescription, privacy: .public)")
+                    cached[entry.channel.id] = .failed
+                }
+            }
+            guard isCurrentHome() else { return }
+            let readable = digest.entries.filter { !session.channelIsRevoked($0.channel.id) }
+            let plan = HomeMarkAllReadPlan(entries: readable, cached: cached)
+            var accessChanged = count - readable.count
+            var details: [String] = []
+            if plan.skipped > 0 { details.append("No message to mark in \(plan.skipped)") }
+            if plan.unavailable > 0 { details.append("Could not check \(plan.unavailable)") }
+            let priorAccess = accessChanged > 0 ? ["Access changed for \(accessChanged)"] : []
+            guard !plan.isEmpty else {
+                await SheetPrompt.inform("Nothing to Mark as Read", message: (details + priorAccess).joined(separator: ". ") + ".", on: self.window)
+                return
+            }
+            let message = (["Muted conversations stay as they are"] + details + priorAccess).joined(separator: ". ") + "."
+            let confirmed = await SheetPrompt.confirm("Mark \(plan.targets.count) conversation\(plan.targets.count == 1 ? "" : "s") as read?", message: message, confirm: "Mark as Read", on: self.window)
+            guard confirmed, isCurrentHome() else { return }
+            var recorded = 0
+            var failed = 0
+            for target in plan.targets {
+                guard isCurrentHome() else { return }
+                let id = target.channel.id
+                guard !session.channelIsRevoked(id) else { accessChanged += 1; continue }
+                session.intentionallyUnread.remove(id)
+                if await session.markSeen(channelID: id, timestamp: target.timestamp) {
+                    recorded += 1
+                } else if session.channelIsRevoked(id) {
+                    accessChanged += 1
+                } else {
+                    failed += 1
+                }
+            }
+            guard isCurrentHome() else { return }
             session.requestReconciliation()
-            if acted != count, self.isCurrent(session) {
-                let skipped = count - acted - unreadable
+            if recorded != count {
                 let noun = count == 1 ? "conversation" : "conversations"
-                var parts = [acted == 1 ? "Marked 1 conversation read" : "Marked \(acted) of \(count) \(noun) read"]
-                if skipped > 0 { parts.append(skipped == 1 ? "1 had no message to mark" : "\(skipped) had no message to mark") }
-                if unreadable > 0 { parts.append(unreadable == 1 ? "1 could not be checked" : "\(unreadable) could not be checked") }
-                self.status.stringValue = parts.joined(separator: "; ") + "."
+                var parts = ["Read progress saved for \(recorded) of \(count) \(noun)"] + details
+                if accessChanged > 0 { parts.append("Access changed for \(accessChanged)") }
+                if failed > 0 { parts.append("Could not save \(failed)") }
+                self.status.stringValue = parts.joined(separator: ". ") + "."
             }
         }
     }

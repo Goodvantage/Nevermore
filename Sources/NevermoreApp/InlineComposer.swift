@@ -17,6 +17,7 @@ import NevermoreCore
     var visualBaseline: NSAttributedString?
     var applying = false
     private var observer: NSObjectProtocol?
+    private var selectionObserver: NSObjectProtocol?
     private var keys: Any?
 
     init(owner: ConversationWindow) { self.owner = owner }
@@ -56,11 +57,18 @@ import NevermoreCore
                 self.sourceChanged()
             }
         }
+        selectionObserver = NotificationCenter.default.addObserver(forName: NSTextView.didChangeSelectionNotification, object: nil, queue: .main) { [weak self] note in
+            let object = note.object as? NSTextView
+            MainActor.assumeIsolated {
+                guard let self, !self.applying, self.mode == .markdown, object === self.textView else { return }
+                self.owner?.updateCompletions()
+            }
+        }
         keys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let owner = self.owner, self.mode == .markdown,
                   event.window === owner.window, owner.window?.firstResponder === self.textView,
                   let text = self.textView, text.isEditable, !text.hasMarkedText() else { return event }
-            if owner.mentionPopover.handle(event) { return nil }
+            if owner.handleCompletionKey(event) { return nil }
             let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
             if event.keyCode == 36 || event.keyCode == 76 {
                 if flags.contains(.command) || (!UserDefaults.standard.bool(forKey: ComposerSendKey.defaultsKey) && flags.isEmpty) { owner.send(nil); return nil }
@@ -87,6 +95,7 @@ import NevermoreCore
 
     func tearDown() {
         if let observer { NotificationCenter.default.removeObserver(observer); self.observer = nil }
+        if let selectionObserver { NotificationCenter.default.removeObserver(selectionObserver); self.selectionObserver = nil }
         if let keys { NSEvent.removeMonitor(keys); self.keys = nil }
     }
 
@@ -172,6 +181,7 @@ import NevermoreCore
                 owner.composer.setSelectedRange(NSRange(location: min(visualSelection.location, visual.length), length: 0))
             }
             mode = next; applying = false
+            owner.shortcutPopover.reset()
             updateSurface(focus: true)
             owner.persistActiveDraft()
         } catch { owner.status.stringValue = error.localizedDescription; updateSurface() }

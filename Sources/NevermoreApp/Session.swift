@@ -218,7 +218,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     /// incoming message out of the page. The durable fix is a cursor "after"
     /// the per-channel high-water mark; until the API offers one, this keeps
     /// the common multi-device case from dropping the notification.
-    private static let notificationPageLimit = 5
+    private static let notificationPageLimit = 50
     var unread: JSONValue = .null
     var unreadNotificationIDs = Set<String>()
     /// Unread conversations in which a mention arrived while the app was
@@ -369,6 +369,42 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         defer { threadCreations.removeValue(forKey: message.id) }
         return try await task.value
     }
+
+    /// Verify an unlisted notification destination without creating a
+    /// thread. Raven names the thread room after its root message.
+    func notificationThreadTarget(channelID: String, anchor: String) async throws -> RavenChannel? {
+        try Task.checkCancellation()
+        let parents: [String]
+        let message: RavenMessage
+        if demo {
+            guard let parent = threadParents[channelID],
+                  let cached = try await cachedMessage(id: anchor, channelID: anchor == channelID ? parent : channelID) else { return nil }
+            parents = [parent]
+            message = cached
+        } else {
+            let context = try await client.channelReadContext(channelID)
+            try Task.checkCancellation()
+            guard !context.parentChannelIDs.isEmpty else { return nil }
+            parents = context.parentChannelIDs
+            message = RavenMessage(raw: try await client.resource("Raven Message", name: anchor, values: nil))
+        }
+        try Task.checkCancellation()
+        guard !stopped, !channelIsRevoked(channelID), !deletedIDs.contains(channelID), !deletedIDs.contains(anchor),
+              !parents.contains(where: { channelIsRevoked($0) || deletedIDs.contains($0) }),
+              let parent = parents.first, message.id == anchor else { return nil }
+        if anchor == channelID {
+            guard message.channelID == parent else { return nil }
+            return channels.first { $0.id == parent }
+        }
+        guard message.channelID == channelID else { return nil }
+        let chain = [channelID] + parents
+        for (child, ancestor) in zip(chain, chain.dropFirst()) { threadParents[child] = ancestor }
+        return RavenChannel(raw: .object([
+            "name": .string(channelID), "channel_name": .string("Thread"), "is_thread": .bool(true),
+            "parent_channel_id": .string(parent),
+        ]))
+    }
+
     func presenceDescription(for userID: String) -> String? {
         let declared = directory[userID]?["availability_status"].string
         if declared == "Invisible" { return nil }
@@ -994,14 +1030,21 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         return memoryMessages[channelID]?.last(where: { $0.id == id }) ?? ((retainHistory || demo) ? stored : nil)
     }
 
-    func markSeen(channelID: String, timestamp: String) async {
-        if let demoWire { demoWire.markSeen(channelID: channelID, timestamp: timestamp); return }
-        guard !stopped, !demo, !readOnly, !intentionallyUnread.contains(channelID),
-              ServerTimestampParser(siteTimeZone: .gmt).date(from: timestamp) != nil,
-              timestamp > (lastSeen[channelID] ?? "") else { return }
+    /// Returns whether the cutoff was recorded locally. A durable visit
+    /// can still await server acceptance, including when the client is offline.
+    @discardableResult
+    func markSeen(channelID: String, timestamp: String) async -> Bool {
+        guard !stopped, !channelIsRevoked(channelID) else { return false }
+        if let demoWire {
+            demoWire.markSeen(channelID: channelID, timestamp: timestamp)
+            return timestamp <= (lastSeen[channelID] ?? "")
+        }
+        guard !demo, !readOnly, !intentionallyUnread.contains(channelID),
+              ServerTimestampParser(siteTimeZone: .gmt).date(from: timestamp) != nil else { return false }
+        if timestamp <= (lastSeen[channelID] ?? "") { return true }
         let writes = pendingVisitWrites[channelID] ?? VisitWrites()
         let observation = VisitObservation(timestamp: timestamp, generation: writes.generation)
-        guard writes.observations.insert(observation).inserted else { return }
+        guard writes.observations.insert(observation).inserted else { return false }
         pendingVisitWrites[channelID] = writes
         defer {
             writes.observations.remove(observation)
@@ -1011,10 +1054,14 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         }
         do {
             try await store.pendingVisit(channelID: channelID, timestamp: timestamp)
-            guard !stopped, writes.generation == observation.generation else { return }
+            guard !stopped, !channelIsRevoked(channelID), writes.generation == observation.generation else { return false }
             lastSeen[channelID] = max(lastSeen[channelID] ?? "", timestamp)
             await flush()
-        } catch { fail(error) }
+            return !stopped && !channelIsRevoked(channelID) && writes.generation == observation.generation
+        } catch {
+            fail(error)
+            return false
+        }
     }
     func markUnread(channelID: String) async throws {
         intentionallyUnread.insert(channelID)
@@ -1273,7 +1320,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         state = StatusLocalization.errorDescription(error); setStatusAttention(.accountAttention); notify()
     }
     func stop() { stopped = true; home.cancel(); sentLinkPreviews.reset(); transcriptChannelState.removeAll(); clearMessageDocuments(); timestampEnvironmentObservation = nil; setStatusAttention(nil); threadParents.removeAll(); roles.removeAll(); unreadNotificationIDs.removeAll(); (NSApp.delegate as? AppDelegate)?.updateDockBadge(); pendingFileReceipts.removeAll(); userPreferences = nil; directory.removeAll(); userNames.removeAll(); activeUsers.removeAll(); workingHours = nil; thumbnails.removeAll(); pictureSizes.removeAll(); forgetAnimatedImages(); avatars.removeAll(); generatedAvatars.removeAllObjects(); generatedChannelAvatars.removeAllObjects(); avatarLastUse.removeAll(); avatarQueue.removeAll(); avatarRequests.removeAll(); avatarWorker?.cancel(); memoryMessages.removeAll(); generation += 1; refreshTask?.cancel(); reconciliationTask?.cancel(); realtime?.disconnect(); realtime = nil; realtimeLive = false }
-    private func shouldDeliverNotification(channelID: String) -> Bool {
+    func shouldDeliverNotification(channelID: String) -> Bool {
         // The policy gate is a pure function of the cached rows: revocation on
         // the whole ancestry, and threads gated on their parent
         // conversation's row (threads are synthesized locally and never
@@ -1311,21 +1358,27 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         content.userInfo = ["account": account.id.uuidString, "channel": channelID, "message": message.id]
         return content
     }
+    /// A burst of messages the reader sent from another device can occupy
+    /// the newest rows. Leave enough room for an incoming message behind it.
+    func notificationPage(channelID: String) async throws -> [RavenMessage] {
+        let result = try await read("raven.api.chat_stream.get_messages", [
+            "channel_id": .string(channelID),
+            "limit": .number(Double(Self.notificationPageLimit)),
+            "update_last_visit": .bool(false),
+        ])
+        return result["messages"].array.map { RavenMessage(raw: $0) }.filter { $0.channelID == channelID }
+    }
     func deliverNotification(channelID: String) async {
         guard shouldDeliverNotification(channelID: channelID) else { return }
         do {
-            // Read a small page, not one row: the newest row can be the
-            // reader's own (sent from another device after the incoming
-            // one), and skipping it must not drop the notification forever.
-            let result = try await client.rpc("raven.api.chat_stream.get_messages", arguments: ["channel_id": .string(channelID), "limit": .number(Double(Self.notificationPageLimit)), "update_last_visit": .bool(false)])
-            let page = result["messages"].array.map { RavenMessage(raw: $0) }
+            let page = try await notificationPage(channelID: channelID)
             // Filter already-delivered and already-seen rows before picking
             // the newest foreign one, so a delivered row cannot mask an
             // un-notified one, and a message the reader has scrolled past
             // (at or before lastSeen) is never surfaced again.
             guard let message = NotificationPolicy.nextNotification(in: page, user: account.user, seen: lastSeen[channelID], notified: { notifiedIDs.contains($0) }) else { return }
             let notificationID = message.batchID ?? message.id
-            guard message.channelID == channelID, shouldDeliverNotification(channelID: channelID) else { return }
+            guard shouldDeliverNotification(channelID: channelID) else { return }
             // Claimed before the await, so a concurrent delivery for the same
             // batch stops at the check above.
             notifiedIDs.insert(notificationID)

@@ -1293,7 +1293,7 @@ import RavenProtocol
 }
 
 /// Rounded selection in the accent color, as the sidebar draws it.
-@MainActor final class SearchRowView: NSTableRowView {
+@MainActor class SearchRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
         let rect = bounds.insetBy(dx: 4, dy: 1)

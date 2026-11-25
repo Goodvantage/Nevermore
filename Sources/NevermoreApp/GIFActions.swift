@@ -19,14 +19,16 @@ import NevermoreCore
     /// Chooses a GIF from the reader's GIF service and sends it as its own
     /// message. A reply being written goes with the GIF, as with a typed
     /// message; the draft's text stays in the composer.
-    @objc func sendGIF(_ sender: Any?) {
+    @objc func sendGIF(_ sender: Any?) { openGIFPicker() }
+
+    func openGIFPicker(query: String = "") {
         guard canSendGIF, let session, let channel, let parent = window else { NSSound.beep(); return }
         let sources = gifPickerSources(session)
         gifSelectionTask = Task { [weak self] in
             guard let self else { return }
             defer { self.gifSelectionTask = nil; self.updateComposerAvailability() }
             do {
-                let result = try await GIFPickerSheet.pick(on: parent, sources: sources, active: { [weak self] in self?.isCurrent(session, channelID: channel.id) == true && self?.editing == nil })
+                let result = try await GIFPickerSheet.pick(on: parent, sources: sources, query: query, active: { [weak self] in self?.isCurrent(session, channelID: channel.id) == true && self?.editing == nil })
                 switch result {
                 case .cancelled: return
                 case .settings: self.app.showSettingsPane(.gifs); return

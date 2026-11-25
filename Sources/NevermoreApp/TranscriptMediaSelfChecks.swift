@@ -24,6 +24,7 @@ import RavenProtocol
             return RavenMessage(raw: .object(fields))
         }
         let forge = "https://forge.example.com/Goodvantage/GoodVault", story = "https://news.example.com/story", second = "https://second.example.com/", hidden = "https://forge.example.com/hidden", docs = "https://docs.example.com/"
+        let video = "https://youtu.be/3TNpOD6bov8"
         let screenshot = "CleanShot 2026-11-24 at 17.33.59.png", report = "Quarterly report final.pdf"
         let rows = [
             row("linked", "lukas@example.invalid", "17:25:00", #"<p>GoodVault ist am implementieren.</p><p><a href="\#(forge)">\#(forge)</a></p>"#),
@@ -34,6 +35,9 @@ import RavenProtocol
             row("plain", "bene@example.invalid", "17:39:00", #"<p>Docs: <a href="\#(docs)">\#(docs)</a></p>"#),
             row("later", "bene@example.invalid", "17:40:00", "", type: "Image", extra: ["file": .string("/files/later.jpg"), "thumbnail_width": .number(240), "thumbnail_height": .number(480)]),
             row("report", "bene@example.invalid", "17:41:00", "", type: "File", extra: ["file": .string("/files/\(report.replacingOccurrences(of: " ", with: "%20"))"), "file_size": .number(2_400_000)]),
+            row("youtube", "bene@example.invalid", "17:42:00", #"<p><a href="\#(video)">Video</a></p>"#),
+            row("hidden-video", "bene@example.invalid", "17:43:00", #"<p><a href="\#(video)">Video</a></p>"#, extra: ["hide_link_preview": .number(1)]),
+            row("spoiler-video", "bene@example.invalid", "17:44:00", #"<p><span data-spoiler="true"><a href="\#(video)">Video</a></span></p>"#),
         ]
         try await session.store.cacheMessages(rows)
         func preview(_ title: String, _ description: String, site: String, image: String?, width: JSONValue = .null, height: JSONValue = .null) -> JSONValue {
@@ -224,10 +228,88 @@ import RavenProtocol
             check("a preview picture on its way keeps its box, and one that failed leaves a text card", placement(failed: false) != nil && placement(failed: true) == nil)
         } else { check("the fixture's previews are stored", false) }
 
+        func videoControl(in id: String) -> Int? {
+            guard let range = range(id) else { return nil }
+            var location: Int?
+            storage.enumerateAttribute(.link, in: range) { value, run, _ in
+                if value as? URL == InlineYouTubePlayer.command { location = run.location }
+            }
+            return location
+        }
+        check("YouTube controls respect hidden previews and spoilers",
+              videoControl(in: "youtube") != nil && videoControl(in: "hidden-video") == nil && videoControl(in: "spoiler-video") == nil)
+        check("rendering YouTube links never opens a player",
+              controller.inlineYouTube.source == nil && transcript.subviews.allSatisfy { !($0 is YouTubeEmbedView) })
+        if let location = videoControl(in: "youtube") {
+            _ = controller.textView(transcript, clickedOnLink: InlineYouTubePlayer.command, at: location)
+            await controller.renderTask?.value
+            let space = cards(YouTubePlayerSpace.self, in: "youtube").first.flatMap { frame($0.location) }
+            check("Play inline expands the message to YouTube's minimum player size",
+                  space.map { $0.width >= 200 && $0.height >= 200 } == true && text("youtube").contains("Close player"))
+            let export = NSMutableAttributedString(attributedString: storage)
+            TranscriptView.prepareForExport(export, for: .copy)
+            check("the expanded player keeps a browser link and leaves controls out of copies",
+                  text("youtube").contains("Open on YouTube") && !export.string.contains("Open on YouTube")
+                    && !export.string.contains("Close player") && export.string.contains("Video"))
+            if let source = controller.inlineYouTube.source {
+                let request = YouTubeEmbedView.request(for: source.video)
+                let appID = Bundle.main.bundleIdentifier ?? "ch.goodvantage.Nevermore"
+                check("the player uses the canonical embed and the app identity",
+                      request.url?.absoluteString == "https://www.youtube.com/embed/3TNpOD6bov8?playsinline=1"
+                        && request.value(forHTTPHeaderField: "Referer") == "https://\(appID.lowercased())")
+                func allows(_ raw: String, main: Bool = false) -> Bool {
+                    YouTubeEmbedView.allowsDocument(URL(string: raw), inMainFrame: main, embedURL: request.url)
+                }
+                check("player document navigation stays in the canonical embed and YouTube frame origins",
+                      request.url.map { allows($0.absoluteString, main: true) } == true
+                        && !allows("https://www.youtube.com/watch?v=3TNpOD6bov8", main: true)
+                        && allows("https://www.youtube-nocookie.com/frame")
+                        && !allows("https://youtube.com.example.invalid/frame")
+                        && !allows("https://example.invalid/frame")
+                        && !allows("https://www.youtube.com:8443/frame"))
+            } else { check("the player uses the canonical embed and the app identity", false) }
+
+            // This window is never ordered into view, so the live player
+            // stays unloaded and the fixture never contacts YouTube.
+            check("an offscreen player does not start WebKit", transcript.subviews.allSatisfy { !($0 is YouTubeEmbedView) })
+            if let location = videoControl(in: "youtube") {
+                _ = controller.textView(transcript, clickedOnLink: InlineYouTubePlayer.command, at: location)
+                await controller.renderTask?.value
+            }
+            check("Close player restores the inline play control",
+                  controller.inlineYouTube.source == nil && text("youtube").contains("Play inline") && cards(YouTubePlayerSpace.self, in: "youtube").isEmpty)
+            func expand() async -> Bool {
+                guard let location = videoControl(in: "youtube") else { return false }
+                _ = controller.textView(transcript, clickedOnLink: InlineYouTubePlayer.command, at: location)
+                await controller.renderTask?.value
+                return controller.inlineYouTube.source != nil
+            }
+            let expandedBeforeDeletion = await expand()
+            session.deletedIDs.insert("youtube")
+            controller.render()
+            await controller.renderTask?.value
+            check("deleting a message closes its YouTube player", expandedBeforeDeletion && controller.inlineYouTube.source == nil)
+            session.deletedIDs.remove("youtube")
+            controller.render()
+            await controller.renderTask?.value
+
+            let expandedBeforeRevocation = await expand()
+            session.revokedChannels.insert(channel.id)
+            controller.render()
+            check("losing conversation access closes its YouTube player", expandedBeforeRevocation && controller.inlineYouTube.source == nil)
+            session.revokedChannels.remove(channel.id)
+            controller.render()
+            await controller.renderTask?.value
+            _ = await expand()
+        }
+
         if ProcessInfo.processInfo.environment["NEVERMORE_MEDIA_SNAPSHOTS"] == "1" {
             if let page = picture(width: 640, height: 427, draw: drawScreenshot) { session.thumbnails["photo"] = NSImage(cgImage: page, size: NSSize(width: page.width, height: page.height)) }
             await snapshots(of: controller, app: app)
         }
+        let playerWasOpen = controller.inlineYouTube.source != nil
+        controller.showHome()
+        check("leaving a conversation closes its YouTube player", playerWasOpen && controller.inlineYouTube.source == nil)
         return checks
     }
 

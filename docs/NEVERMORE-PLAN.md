@@ -27,7 +27,7 @@ The app should feel closer to a carefully made combination of Messages, Mail, an
 | Storage | Per-account SQLite through GRDB; durable drafts/outbox; bounded local history and media |
 | Distribution | Signed, hardened, notarized direct download first; sandbox from the outset |
 | UI reuse | Reuse Raven's concepts and protocol, **not** its React interface or phone shell |
-| Web content | No WebView for chat, composition, navigation, or settings; open external/admin pages in the browser |
+| Web content | AppKit for chat, composition, navigation, and settings. WebKit for optional inline YouTube playback. Open external and admin pages in the browser |
 | Scope | A daily-driver messaging client before a complete Frappe administration tool |
 
 “Mac OS X” here means a Mac-native application for modern macOS, not support for historical OS X 10.x releases.
@@ -145,7 +145,8 @@ This is an information-layout sketch, not final iconography or a pixel specifica
 - Preserve the reader's visible message and pixel offset when prepending history, inserting realtime messages, updating media dimensions, or resizing a window.
 - Auto-scroll only when already following the live edge. Otherwise show an unobtrusive new-message affordance. A background notification must not drag the transcript to the bottom.
 - Render code with a monospaced font, horizontal scrolling, selectable content, and Copy Code. Long code can collapse without hiding the fact that content exists.
-- Render images, files, polls, link previews, and document cards as accessible native content. Never execute embed HTML. Open YouTube/Spotify/etc. in the appropriate browser/app rather than reproducing every web player.
+- Render images, files, polls, link previews, and document cards as accessible native content. Open external players in the appropriate browser or app. Message-provided embed HTML stays inert.
+- Give eligible YouTube links a Play inline control alongside the sent link preview. Activating it opens YouTube's official embed in an isolated, nonpersistent `WKWebView` inside the message. Playback requires a user gesture in the player. Provide Close player and Open on YouTube controls. Respect sender-hidden previews and spoiler-concealed links. The transcript, composer and navigation stay AppKit.
 - Distinguish unknown/unsupported content, deleted replies, inaccessible documents, and failed media. Blank space is not a fallback.
 
 **Early go/no-go prototype:** virtualized AppKit rows do not automatically provide selection across text views. Prove cross-row text selection, keyboard selection, VoiceOver, and scroll anchoring before committing the transcript architecture. A beautiful demo that can only select one message is not sufficient.
@@ -446,6 +447,7 @@ Treat message HTML, filenames, document previews, links, server configuration, p
 
 - Site-origin isolation for all tokens/downloads, including redirects and media requests; test lookalike hostnames, ports, URL userinfo, and encoded paths.
 - No rendering/execution of remote JavaScript in privileged native UI. Parse server-formatted document fields safely; execute workflow/custom actions on the server only, after clear user confirmation for consequential changes.
+- Build the inline player URL from a validated YouTube video ID and send the app bundle ID as the referrer. Isolate the player from Raven credentials and chat content. Dispose of the player when its source leaves the conversation or access changes.
 - Permission changes close/restrict related windows, cancel queued unauthorized mutations, and remove known-revoked cached content. Be honest that an offline client cannot learn about revocation immediately.
 - Custom deep links contain routing identifiers, never credentials. They cannot trigger a send, join an unknown site, read local files, or execute a workflow without user confirmation. Copy/share canonical web message links by default.
 - Resource limits for malformed HTML, decompression/image bombs, huge code blocks, attachment staging, preview generation, and search responses.

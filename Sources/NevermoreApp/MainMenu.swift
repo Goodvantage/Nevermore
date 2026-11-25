@@ -218,6 +218,7 @@ import AppKit
         item(message, "Who Has Read This?", #selector(ConversationWindow.readers(_:)))
         item(message, "Linked Document…", #selector(ConversationWindow.linkedDocument(_:)))
         item(message, "Open Code Reader…", #selector(ConversationWindow.openCodeReader(_:)))
+        item(message, "Play YouTube Inline", #selector(ConversationWindow.toggleSelectedYouTube(_:)))
         item(message, "View / Vote in Poll…", #selector(ConversationWindow.vote(_:)))
         message.addItem(.separator())
         // Mark-all is account-wide and resolves through the app delegate, so

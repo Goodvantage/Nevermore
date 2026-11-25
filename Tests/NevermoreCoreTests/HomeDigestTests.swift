@@ -243,6 +243,71 @@ import RavenProtocol
         #expect(digest.mutedConversations == 1 && digest.mutedMessages == 5)
     }
 
+    /// Mark All Read resolves its targets before confirming: a usable
+    /// reported timestamp wins, the newest cached message stands in for a
+    /// missing one, and a conversation with neither is counted as skipped
+    /// rather than promised.
+    @Test func markAllReadPlanResolvesReportedAndCachedTimestampsBeforeConfirming() {
+        let channels = [
+            channel([
+                "name": .string("alpha"),
+                "channel_name": .string("Alpha"),
+                "last_message_details": .string(#"{"owner":"u1","message_id":"m1","content":"reported"}"#),
+                "last_message_timestamp": .string("2026-11-15 10:00:00")
+            ]),
+            // Details without a timestamp still produce a latest message,
+            // but there is nothing to acknowledge until the cache answers.
+            channel([
+                "name": .string("gamma"),
+                "channel_name": .string("Gamma"),
+                "last_message_details": .string(#"{"owner":"u1","message_id":"m2","content":"no timestamp"}"#)
+            ]),
+            // No details and no cached message: skipped.
+            channel(["name": .string("beta"), "channel_name": .string("Beta")]),
+            // No details and an unreadable cache: unavailable.
+            channel(["name": .string("delta"), "channel_name": .string("Delta")])
+        ]
+        let unread: JSONValue = .array(channels.map { .object(["name": .string($0.id), "unread_count": .number(1)]) })
+        let digest = HomeUnreadDigest.make(channels: channels, unread: unread, mentioned: [])
+        #expect(digest.entries.count == 4)
+        let gamma = digest.entries.first { $0.channel.id == "gamma" }
+        #expect(gamma?.latest != nil && gamma?.latest?.timestamp == nil)
+
+        let plan = HomeMarkAllReadPlan(entries: digest.entries, cached: [
+            "gamma": .message("2026-11-15 09:30:00"),
+            "beta": .empty,
+            "delta": .failed
+        ])
+        #expect(plan.targets.map(\.channel.id) == ["alpha", "gamma"])
+        #expect(plan.targets.map(\.timestamp) == ["2026-11-15 10:00:00", "2026-11-15 09:30:00"])
+        #expect(plan.skipped == 1)
+        #expect(plan.unavailable == 1)
+        #expect(!plan.isEmpty)
+
+        let unreported = digest.entries.filter { $0.latest?.timestamp == nil }
+        let allFailed = HomeMarkAllReadPlan(entries: unreported, cached: Dictionary(uniqueKeysWithValues: unreported.map { ($0.channel.id, HomeCachedNewest.failed) }))
+        #expect(allFailed.isEmpty)
+        #expect(allFailed.skipped == 0 && allFailed.unavailable == unreported.count)
+    }
+
+    /// An unparseable reported timestamp is not one markSeen will accept,
+    /// so the plan asks the cache instead of promising it.
+    @Test func markAllReadPlanTreatsAnUnusableReportedTimestampAsMissing() {
+        let channel = channel([
+            "name": .string("epsilon"),
+            "channel_name": .string("Epsilon"),
+            "last_message_details": .string(#"{"owner":"u1","message_id":"m3","content":"hi"}"#),
+            "last_message_timestamp": .string("not a timestamp")
+        ])
+        let unread: JSONValue = .array([.object(["name": .string("epsilon"), "unread_count": .number(1)])])
+        let digest = HomeUnreadDigest.make(channels: [channel], unread: unread, mentioned: [])
+        #expect(digest.entries.first?.latest?.timestamp == "not a timestamp")
+
+        let plan = HomeMarkAllReadPlan(entries: digest.entries, cached: ["epsilon": .message("2026-11-15 09:00:00")])
+        #expect(plan.targets.map(\.timestamp) == ["2026-11-15 09:00:00"])
+        #expect(plan.skipped == 0 && plan.unavailable == 0)
+    }
+
     // MARK: - HomeWeekSummary
 
     @Test func weekSummaryBucketsByLocalDay() {

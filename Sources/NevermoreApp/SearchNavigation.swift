@@ -9,6 +9,7 @@ extension ConversationWindow {
     /// Shows the results screen for `criteria`. `record` adds it to Back
     /// and Forward; restoring from there does not.
     func showSearch(_ criteria: SearchCriteria, record: Bool = true, immediately: Bool, origin: RavenChannel? = nil) {
+        app.cancelNotificationRoute(from: self)
         guard let session, !session.stopped else { return }
         cancelSidebarKeyboardOpen()
         let origin = origin ?? channel

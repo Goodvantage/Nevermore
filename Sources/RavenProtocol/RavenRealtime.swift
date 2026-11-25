@@ -67,9 +67,7 @@ public final class RavenRealtime {
         // per-socket cookie store to isolate them.
         if countedHost == nil, let host = account.origin.host?.lowercased() {
             countedHost = host
-            let siblings = Self.socketCountByHost[host, default: 0]
-            Self.socketCountByHost[host] = siblings + 1
-            if siblings == 0 { Self.purgeOriginCookies(host) }
+            Self.acquireHostSlot(host)
         }
         let manager = SocketManager(socketURL: account.origin, config: [
             .log(false),
@@ -103,15 +101,25 @@ public final class RavenRealtime {
     private func releaseHostSlot() {
         guard let host = countedHost else { return }
         countedHost = nil
-        // A missing count means the slot was never taken or already released;
-        // treat it as a no-op rather than purging under live siblings.
-        guard let count = Self.socketCountByHost[host] else { return }
+        Self.releaseHostSlot(host)
+    }
+
+    static func acquireHostSlot(_ host: String) {
+        let siblings = socketCountByHost[host, default: 0]
+        socketCountByHost[host] = siblings + 1
+        if siblings == 0 { purgeOriginCookies(host) }
+    }
+
+    static func releaseHostSlot(_ host: String) {
+        // A missing count means the slot was never taken or already released.
+        // Preserve any cookies still used by other sockets.
+        guard let count = socketCountByHost[host] else { return }
         let remaining = count - 1
         if remaining > 0 {
-            Self.socketCountByHost[host] = remaining
+            socketCountByHost[host] = remaining
         } else {
-            Self.socketCountByHost.removeValue(forKey: host)
-            Self.purgeOriginCookies(host)
+            socketCountByHost.removeValue(forKey: host)
+            purgeOriginCookies(host)
         }
     }
 
