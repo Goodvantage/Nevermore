@@ -6,6 +6,16 @@ import RavenProtocol
     func customEmojiPage(query: String, offset: Int) async throws -> RavenCustomEmojiPage {
         guard !stopped else { throw AppError.message("This account is unavailable.") }
         guard !demo else {
+            // Self-check fixture: the "demo-page-failure" query returns one
+            // full page and then fails, so the picker's page-failure path
+            // (keep loaded items, retry the same page) is exercisable.
+            if query == "demo-page-failure" {
+                guard offset == 0 else { throw AppError.message("Fixture page failure.") }
+                let rows: [JSONValue] = (0..<RavenCustomEmojiPage.maximumRows).map {
+                    .object(["name": .string("fixture-page-\($0)"), "emoji_name": .string("page-\($0)"), "image": .string("/files/page-\($0).png"), "keywords": .string("Demo emoji")])
+                }
+                return try RavenCustomEmojiPage(raw: .array(rows), origin: account.origin, offset: offset)
+            }
             let fixtures: [JSONValue] = ["party", "raven", "wave"].map { .object(["name": .string("fixture-\($0)"), "emoji_name": .string($0), "image": .string("/files/\($0).png"), "keywords": .string("Demo emoji")]) }
             let matching = fixtures.filter { query.isEmpty || ($0["emoji_name"].string ?? "").localizedCaseInsensitiveContains(query) }
             return try RavenCustomEmojiPage(raw: .array(Array(matching.dropFirst(max(0, offset)))), origin: account.origin, offset: offset)

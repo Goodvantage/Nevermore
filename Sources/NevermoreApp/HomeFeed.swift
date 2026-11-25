@@ -61,6 +61,9 @@ extension Notification.Name {
     private static let emptyRefreshBackoff: TimeInterval = 15
     private var localTask: Task<Void, Never>?
     private var localRefreshPending = false
+    /// A forced refresh asked for while one was in flight runs when it ends,
+    /// instead of being dropped by the `task == nil` guard.
+    private var pendingForceRefresh = false
 
     /// Home reloads server modules at most this often while it is shown.
     static let freshness: TimeInterval = 120
@@ -78,7 +81,11 @@ extension Notification.Name {
     func refresh(force: Bool = false) {
         refreshLocal()
         let inFailureBackoff = lastEmptyRefreshAt.map { Date().timeIntervalSince($0) < Self.emptyRefreshBackoff } ?? false
-        guard let session, !session.stopped, force || (isStale && !inFailureBackoff), task == nil else { return }
+        guard let session, !session.stopped, force || (isStale && !inFailureBackoff) else { return }
+        if task != nil {
+            if force { pendingForceRefresh = true }
+            return
+        }
         // Stamp only when the refresh finishes. Stamping here would make a
         // cancelled or superseded task look fresh for the whole window and
         // suppress the retry the reader expects.
@@ -93,6 +100,7 @@ extension Notification.Name {
                 self.task = nil
                 guard !Task.isCancelled else { return }
                 self.loadedAt = Date(); self.lastEmptyRefreshAt = nil
+                self.runPendingForceRefresh()
             }
             return
         }
@@ -135,7 +143,15 @@ extension Notification.Name {
             if anyModuleLoaded { self.loadedAt = Date(); self.lastEmptyRefreshAt = nil }
             else { self.lastEmptyRefreshAt = Date() }
             self.changed()
+            self.runPendingForceRefresh()
         }
+    }
+
+    /// Starts a forced refresh that arrived while one was in flight.
+    private func runPendingForceRefresh() {
+        guard pendingForceRefresh, task == nil else { return }
+        pendingForceRefresh = false
+        refresh(force: true)
     }
 
     /// Waits for an in-flight refresh, then starts a canonical one and

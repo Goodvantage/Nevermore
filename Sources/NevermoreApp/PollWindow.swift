@@ -16,6 +16,7 @@ final class PollWindow: NSWindowController, NSWindowDelegate {
         case pollChanged
         case demoReadOnly
         case missingPollID
+        case noVote
 
         var errorDescription: String? {
             switch self {
@@ -29,6 +30,8 @@ final class PollWindow: NSWindowController, NSWindowDelegate {
                 return "Demo mode does not send changes to Raven."
             case .missingPollID:
                 return "This message does not identify a poll."
+            case .noVote:
+                return "You have not voted in this poll."
             }
         }
     }
@@ -542,7 +545,9 @@ final class PollWindow: NSWindowController, NSWindowDelegate {
             } catch {
                 guard !Task.isCancelled, generation == self.mutationGeneration, !self.closed else { return }
                 self.needsRefresh = true
-                self.statusLabel.stringValue = error.localizedDescription + " Refresh to check the server before trying again."
+                // A local no-op (nothing to retract) needs no server re-check.
+                if case PollError.noVote = error { self.statusLabel.stringValue = error.localizedDescription }
+                else { self.statusLabel.stringValue = error.localizedDescription + " Refresh to check the server before trying again." }
                 self.updateChrome()
             }
         }
@@ -599,7 +604,9 @@ final class PollWindow: NSWindowController, NSWindowDelegate {
         }
         let pollID = snapshot.id
         performMutation(preflightPollID: pollID, actionName: "Retracting vote") { session, currentPollID, fresh in
-            guard !fresh.selectedOptionIDs.isEmpty else { return }
+            // The vote may already be gone when the preflight snapshot arrives;
+            // report that instead of letting the wrapper claim completion.
+            guard !fresh.selectedOptionIDs.isEmpty else { throw PollError.noVote }
             _ = try await session.mutate("raven.api.raven_poll.retract_vote", ["poll_id": .string(currentPollID)])
         }
     }

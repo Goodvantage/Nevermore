@@ -307,13 +307,31 @@ import NevermoreCore
     }
 }
 
+/// The cell's box. `CALayer.borderColor` stores a resolved `CGColor`
+/// snapshot, not the dynamic `NSColor`, so the selection ring re-resolves
+/// the theme accent on every draw and redraws on appearance changes; a
+/// theme switch then recolors a selected cell without deselecting it.
+@MainActor private final class GIFPickerCellView: NSView {
+    // updateLayer is only called when wantsUpdateLayer is true; without this
+    // the border re-resolution below is dead code.
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        super.updateLayer()
+        if let layer, layer.borderWidth > 0 { layer.borderColor = NSColor.themeAccent.cgColor }
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}
+
 /// One result: the preview, playing, with a ring when selected.
 @MainActor final class GIFPickerItem: NSCollectionViewItem {
     static let identifier = NSUserInterfaceItemIdentifier("GIFPickerItem")
     private var player: AnimatedImageView?
 
     override func loadView() {
-        let box = NSView()
+        let box = GIFPickerCellView()
         box.wantsLayer = true
         box.layer?.cornerRadius = 8
         box.layer?.masksToBounds = true
@@ -326,7 +344,7 @@ import NevermoreCore
     override var isSelected: Bool {
         didSet {
             view.layer?.borderWidth = isSelected ? 3 : 0
-            view.layer?.borderColor = NSColor.controlAccentColor.cgColor
+            view.layer?.borderColor = NSColor.themeAccent.cgColor
             view.setAccessibilitySelected(isSelected)
         }
     }

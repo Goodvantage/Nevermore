@@ -69,6 +69,19 @@ import NevermoreCore
         _ = delegate
     }
 }
+
+/// A notification response held until its conversation is loaded. A cold
+/// launch can deliver a response before `Session.start()` has read channels,
+/// and the response cannot be re-delivered later.
+struct PendingNotificationRoute: Equatable {
+    let accountID: String
+    let channelID: String
+    let anchor: String?
+    /// A tap should not navigate hours later; the replay expires quickly.
+    let receivedAt: Date = Date()
+    var isExpired: Bool { Date().timeIntervalSince(receivedAt) > 60 }
+}
+
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     var sessions: [AccountSession] = []
     var accountRecords: [Account] = []
@@ -89,6 +102,11 @@ import NevermoreCore
     /// The conversation most recently shown in any window, so New Window and
     /// reopening from the Dock continue where the person left off.
     var lastConversation: (accountID: UUID, channelID: String)?
+    /// Set when a notification response names a channel this account has not
+    /// loaded yet; replayed from `replayPendingNotificationRoute()`.
+    private(set) var pendingNotificationRoute: PendingNotificationRoute?
+    /// Retained so the session-change observer stays registered.
+    private var sessionChangeObserver: NSObjectProtocol?
     var dataRoot: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Nevermore", isDirectory: true) }
     func updateDockBadge() {
         let mode = DockBadgeMode(rawValue: UserDefaults.standard.string(forKey: "dockBadgeMode") ?? "") ?? .attention
@@ -98,6 +116,11 @@ import NevermoreCore
         NSApp.dockTile.badgeLabel = AttentionPolicy.badge(mode: mode, unreadCount: total, hasAttention: attention)
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Registered before every launch early-return so a retained
+        // notification route also replays in the demo and performance paths.
+        sessionChangeObserver = NotificationCenter.default.addObserver(forName: .sessionChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.replayPendingNotificationRoute() }
+        }
         if CommandLine.arguments.contains("--performance-check") {
             Task { await PerformanceChecks.run(self) }; return
         }
@@ -117,7 +140,12 @@ import NevermoreCore
         PromisedFileReceiver.cleanUpAbandonedReceives()
         do {
             try FileManager.default.createDirectory(at: dataRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            if CommandLine.arguments.contains("--demo") { Task { await startDemo() }; return }
+            // Older or restored directories may have broader permissions;
+            // tighten them before reading account metadata or opening stores.
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dataRoot.path)
+            // The demo path returns before the shared activate below; launch
+            // from Terminal/Finder should still bring the app forward.
+            if CommandLine.arguments.contains("--demo") { Task { await startDemo() }; NSApp.activate(ignoringOtherApps: true); return }
             let file = dataRoot.appendingPathComponent("accounts.json")
             if FileManager.default.fileExists(atPath: file.path) {
                 accountRecords = try JSONDecoder().decode([Account].self, from: Data(contentsOf: file))
@@ -328,6 +356,7 @@ import NevermoreCore
         alert.informativeText = "This removes \(Self.removalContents(unsentMessages: ops.count)) from this Mac. Export needed text or files first. Backups and exported files are outside this removal."
         alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Remove Account")
         guard alert.runModal() == .alertSecondButtonReturn else { return }
+        if pendingNotificationRoute?.accountID == session.account.id.uuidString { pendingNotificationRoute = nil }
         session.stop(); purgeRestoration(accountID: session.account.id)
         SavedSearchStore.clear(session.account.id)
         accountPreferenceWindows.removeValue(forKey: session.account.id)?.close()
@@ -395,9 +424,48 @@ import NevermoreCore
         let info = response.notification.request.content.userInfo
         let accountID = info["account"] as? String, channelID = info["channel"] as? String, anchor = info["message"] as? String
         await MainActor.run {
-            guard let session = sessions.first(where: { $0.account.id.uuidString == accountID }), let channel = session.channels.first(where: { $0.id == channelID }) else { return }
-            reveal(session: session, channel: channel, anchor: anchor)
+            guard let accountID, let channelID else { return }
+            handleNotificationRoute(accountID: accountID, channelID: channelID, anchor: anchor)
         }
+    }
+    /// Opens a notification route, or retains it while the named channel is
+    /// still loading. A response for an account that is gone is dropped.
+    func handleNotificationRoute(accountID: String, channelID: String, anchor: String?) {
+        guard let session = sessions.first(where: { $0.account.id.uuidString == accountID }) else {
+            // The account is registered but its session has not been created
+            // yet during a cold launch; retain the route until it appears.
+            if accountRecords.contains(where: { $0.id.uuidString == accountID }) {
+                pendingNotificationRoute = PendingNotificationRoute(accountID: accountID, channelID: channelID, anchor: anchor)
+            }
+            return
+        }
+        guard !session.stopped else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        guard let channel = session.channels.first(where: { $0.id == channelID }) else {
+            pendingNotificationRoute = PendingNotificationRoute(accountID: accountID, channelID: channelID, anchor: anchor)
+            return
+        }
+        guard !session.channelIsRevoked(channelID) else {
+            if let pending = pendingNotificationRoute, pending.accountID == accountID, pending.channelID == channelID { pendingNotificationRoute = nil }
+            return
+        }
+        pendingNotificationRoute = nil
+        reveal(session: session, channel: channel, anchor: anchor)
+    }
+    /// Replays a retained response once the channel is available. Called from
+    /// the session change observer, which fires as soon as channels are read.
+    func replayPendingNotificationRoute() {
+        guard let pending = pendingNotificationRoute else { return }
+        if pending.isExpired { pendingNotificationRoute = nil; return }
+        guard let session = sessions.first(where: { $0.account.id.uuidString == pending.accountID }) else { return }
+        if session.stopped { pendingNotificationRoute = nil; return }
+        guard let channel = session.channels.first(where: { $0.id == pending.channelID }) else { return }
+        pendingNotificationRoute = nil
+        guard !session.channelIsRevoked(pending.channelID) else { return }
+        // The reader tapped a notification, so a delayed replay must bring
+        // the app forward, not switch a background window invisibly.
+        NSApp.activate(ignoringOtherApps: true)
+        reveal(session: session, channel: channel, anchor: pending.anchor)
     }
     func configureUpdater() {
         // Demos and automated fixtures remain local unless the user explicitly

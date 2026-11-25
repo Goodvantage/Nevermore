@@ -179,6 +179,18 @@ import RavenProtocol
         let replies = inspector.transcript, replyClip = inspector.scroll.contentView
         func showsNewestReply() -> Bool { replyClip.bounds.maxY >= replies.bounds.maxY - 1 }
         check("the thread inspector opens on its newest reply", inspector.rows.count == 60 && showsNewestReply() && replies.bounds.height > replyClip.bounds.height * 2)
+        // The root header is rebuilt on every render, so a rename of the
+        // root's author reaches an already open inspector.
+        let originalRootName = session.authorName(root)
+        session.userNames[root.owner] = "Renamed Thread Author"
+        inspector.render()
+        await inspector.waitUntilLoaded(); settle()
+        let renamedHeader = inspector.context.attributedStringValue.string
+        session.userNames.removeValue(forKey: root.owner)
+        inspector.render()
+        await inspector.waitUntilLoaded(); settle()
+        check("the thread root header follows a rename without reopening",
+              renamedHeader.hasPrefix("Renamed Thread Author") && !renamedHeader.hasPrefix(originalRootName))
         resize(height: 520)
         check("a shorter window keeps the newest thread reply in view", showsNewestReply())
         // The inspector opens at a preferred width that a divider drag
@@ -320,6 +332,25 @@ import RavenProtocol
         let beside = bottomLine(of: transcript, readableMaxY: readableMaxY)
         resize(height: fitting - 60)
         check("a scroll after a legacy scroller appeared is the place a later resize keeps", !controller.isFollowing && holds(beside, in: transcript, readableMaxY: readableMaxY))
+
+        // A thread longer than the newest window: Load Earlier must show the
+        // page it fetched instead of trimming it back to the newest 500.
+        let pagedRootID = "viewport-210"
+        try await session.store.cacheMessages((0..<650).map { row($0, channelID: pagedRootID, prefix: "viewport-paged") })
+        controller.select(channel)
+        resize(width: home.width); resize(height: home.height)
+        controller.showThreadInspector(root: row(210, channelID: channel.id, prefix: "viewport"))
+        guard let paged = controller.threadInspector, paged.rootMessage.id == pagedRootID else { return checks + [("viewport fixture opens its paged thread inspector", false)] }
+        await paged.waitUntilLoaded(); settle()
+        let openedRows = paged.rows.count
+        InteractionSelfChecks.descendants(paged.view, of: NSButton.self).first { $0.title == "Load Earlier" }?.performClick(nil)
+        for _ in 0..<300 where paged.rows.first?.id != "viewport-paged-50" {
+            try? await Task.sleep(for: .milliseconds(10))
+            await paged.waitUntilLoaded()
+        }
+        check("Load Earlier in a long thread shows the page it fetched",
+              openedRows == 500 && paged.rows.count == 600 && paged.rows.first?.id == "viewport-paged-50")
+        controller.closeThreadInspector(); settle()
         return checks
     }
 }

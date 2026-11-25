@@ -41,7 +41,7 @@
 "error.store.immutable_field" = "A queued send is immutable: %@ cannot change. Recover the text and start a new send instead.";
 "error.store.invalid_acknowledgement" = "The server acknowledgement did not match the queued send: %@.";
 "error.store.source_not_readable" = "The file to stage could not be read: %@";
-"error.store.staging_budget" = "Staging budget of %lld bytes exceeded; remove attachments before staging more.";
+"error.store.staging_budget" = "Only %lld bytes remain for staged attachments; remove attachments before staging more.";
 "error.rich.too_large" = "This message exceeds the safe native rendering limit. Open it in Raven to inspect it.";
 "error.rich.too_deep" = "This message contains too much nested formatting. Open it in Raven to inspect it.";
 "error.rich.unsafe_edit" = "This formatting cannot be edited safely in Nevermore. Open Raven in your browser to preserve the original message.";

@@ -62,8 +62,8 @@ import RavenProtocol
                 body = RichTextCodec.plainText(RichDocument(nodes: document.nodes.map(summarize)))
             } else {
                 switch message.messageType {
-                case "File": body = "Attachment"
-                case "Image": body = "Image attachment"
+                case "File": body = TranscriptMedia.filename(of: message).map { "File: \($0)" } ?? "Attachment"
+                case "Image": body = TranscriptMedia.filename(of: message).map { "Image: \($0)" } ?? "Image attachment"
                 case "Poll": body = "Poll"
                 default: body = "Message"
                 }
@@ -130,10 +130,12 @@ import RavenProtocol
 
     private func canPerform(_ action: Action, owner: ConversationWindow) -> Bool {
         guard selectedEntry(owner: owner) != nil, let session else { return false }
+        // System events carry no message actions; only the link copy applies.
+        if owner.selectedMessage?.messageType == "System" { return action == .copyLink }
         switch action {
         case .copyLink: return true
         case .reply: return !session.readOnly && !owner.isArchivedConversation && owner.composer.isEditable
-        case .openThread: return !session.readOnly && !session.demo && !owner.isArchivedConversation
+        case .openThread: return !session.readOnly && !session.demo && !owner.isArchivedConversation && owner.channel?.raw["is_thread"].bool != true
         case .showAnswered: return answeredMessageID(owner: owner) != nil
         }
     }

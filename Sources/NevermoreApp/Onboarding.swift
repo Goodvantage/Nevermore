@@ -521,6 +521,8 @@ import UserNotifications
                     session.clearMessageDocuments()
                     session.memoryMessages.removeAll()
                     session.thumbnails.removeAll()
+                    session.forgetAnimatedImages()
+                    session.sentLinkPreviews.reset()
                     for window in app.windows where window.session === session {
                         window.clearPreview()
                     }

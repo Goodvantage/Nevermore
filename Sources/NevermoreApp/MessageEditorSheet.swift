@@ -47,6 +47,8 @@ import NevermoreCore
         visualScroll.documentView = composer; visualScroll.hasVerticalScroller = true; visualScroll.borderType = .bezelBorder
         formatting = ComposerFormattingBar(composer: composer)
         modes.target = self; modes.action = #selector(changeMode); modes.selectedSegment = mode.rawValue
+        // The theme accent, not the system blue, marks the selected mode.
+        modes.selectedSegmentBezelColor = .themeAccent
         modes.setAccessibilityLabel("Editor mode")
         let header = NSStackView(views: [modes, NSView(), formatting]); header.spacing = 8
         sourceHost.isHidden = true

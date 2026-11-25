@@ -429,7 +429,9 @@ struct ComposerEdit {
         result.deleteCharacters(in: target.markerRange)
         clearBlockFromLineBreak(before: target.range.location, in: result)
 
-        let caret = target.range.location
+        var caret = target.range.location
+        let anchor = caret
+        renumberList(in: result, around: anchor, caret: &caret)
         var typing = target.contentRange.length > 0 ? result.attributes(at: caret, effectiveRange: nil) : plainTypingAttributes
         for key in entityKeys + documentKeys { typing.removeValue(forKey: key) }
         return ComposerEdit(text: result, selection: NSRange(location: caret, length: 0), typingAttributes: typing, actionName: actionName)
@@ -598,7 +600,12 @@ struct ComposerEdit {
             // continues behind its marker.
             guard tail.markerRange.length > 0 else { return nil }
             result.deleteCharacters(in: NSRange(location: start, length: tail.range.location - start))
-            let caret = start + tail.markerRange.length
+            var caret = start + tail.markerRange.length
+            // Deleted whole lines may have been list items; the surviving
+            // line's marker must renumber (item 3 of 3 deleted down to
+            // alone becomes item 1).
+            let anchor = caret
+            renumberList(in: result, around: anchor, caret: &caret)
             return ComposerEdit(text: result, selection: NSRange(location: caret, length: 0),
                                 typingAttributes: continuingAttributes(in: result, at: caret, within: paragraph(in: result, at: caret)), actionName: actionName)
         }
@@ -640,8 +647,18 @@ struct ComposerEdit {
         func isListParagraph(_ candidate: ComposerParagraph) -> Bool {
             candidate.block == .listItem && candidate.meta?.q == nil && candidate.range.length > 0
         }
-        let here = paragraph(in: result, at: location)
-        guard isListParagraph(here) else { return }
+        var here = paragraph(in: result, at: location)
+        if !isListParagraph(here) {
+            // The paragraph at `location` may have just left the list (e.g.
+            // leavingBlock removed its marker): renumber the list run beside
+            // it, so a run after a removed item restarts at 1 the way the
+            // encoder's fresh <ol> would.
+            if NSMaxRange(here.range) < result.length, isListParagraph(paragraph(in: result, at: NSMaxRange(here.range))) {
+                here = paragraph(in: result, at: NSMaxRange(here.range))
+            } else if here.range.location > 0, isListParagraph(paragraph(in: result, at: here.range.location - 1)) {
+                here = paragraph(in: result, at: here.range.location - 1)
+            } else { return }
+        }
 
         var start = here.range.location
         while start > 0 {

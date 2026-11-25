@@ -74,6 +74,8 @@ import AppKit
         NSLayoutConstraint.activate([more.widthAnchor.constraint(equalToConstant: 28), more.heightAnchor.constraint(equalToConstant: 28)])
         addArrangedSubview(more); addArrangedSubview(NSView())
         modes.controlSize = .small; modes.segmentStyle = .rounded; modes.selectedSegment = 0
+        // The theme accent, not the system blue, marks the selected mode.
+        modes.selectedSegmentBezelColor = .themeAccent
         modes.target = self; modes.action = #selector(changeMode(_:)); modes.isHidden = true
         modes.setAccessibilityLabel("Writing mode")
         modes.setContentCompressionResistancePriority(.required, for: .horizontal)

@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import RavenProtocol
 @testable import NevermoreCore
 
 final class NotificationPolicyTests: XCTestCase {
@@ -148,5 +149,44 @@ final class NotificationPolicyTests: XCTestCase {
         let now = utcDate(2026, 3, 7, 3, 0)
         let quiet = quietHours(22 * 60, 6 * 60, "America/New_York", enabled: false)
         XCTAssertTrue(NotificationPolicy.shouldNotify(now: now, quietHours: quiet, isForeground: false, enabled: true, muted: false))
+    }
+
+    private func message(id: String, owner: String, creation: String = "2026-11-23 10:00:00.000000") -> RavenMessage {
+        RavenMessage(raw: .object(["name": .string(id), "channel_id": .string("c"), "owner": .string(owner), "creation": .string(creation), "text": .string("<p>hi</p>")]))
+    }
+
+    func testNewestForeignSkipsTheReadersOwnNewestRows() {
+        // Newest first: the reader sent from the phone after the incoming
+        // message, so the newest row is theirs; the incoming one still wins.
+        let page = [message(id: "own", owner: "me@example.com", creation: "2026-11-23 10:03:00.000000"), message(id: "theirs", owner: "alex@example.com", creation: "2026-11-23 10:02:00.000000"), message(id: "older", owner: "morgan@example.com", creation: "2026-11-23 10:01:00.000000")]
+        XCTAssertEqual(NotificationPolicy.newestForeign(page, user: "me@example.com")?.id, "theirs")
+        XCTAssertNil(NotificationPolicy.newestForeign([message(id: "own", owner: "me@example.com")], user: "me@example.com"))
+        XCTAssertNil(NotificationPolicy.newestForeign([], user: "me@example.com"))
+    }
+
+    func testNewestForeignDoesNotTrustRowOrder() {
+        // Ascending input must still yield the newest foreign message, not the
+        // oldest one.
+        let page = [message(id: "older", owner: "morgan@example.com", creation: "2026-11-23 10:01:00.000000"), message(id: "theirs", owner: "alex@example.com", creation: "2026-11-23 10:02:00.000000"), message(id: "own", owner: "me@example.com", creation: "2026-11-23 10:03:00.000000")]
+        XCTAssertEqual(NotificationPolicy.newestForeign(page, user: "me@example.com")?.id, "theirs")
+    }
+
+    func testNextNotificationSkipsDeliveredAndSeenRows() {
+        // The newest foreign row was already delivered; the older un-notified
+        // one must win instead of being masked.
+        let page = [
+            message(id: "delivered", owner: "alex@example.com", creation: "2026-11-23 10:03:00.000000"),
+            message(id: "pending", owner: "morgan@example.com", creation: "2026-11-23 10:02:00.000000"),
+            message(id: "seen", owner: "sam@example.com", creation: "2026-11-23 10:01:00.000000"),
+        ]
+        let notified: Set<String> = ["delivered"]
+        let picked = NotificationPolicy.nextNotification(in: page, user: "me@example.com", seen: "2026-11-23 10:01:00.000000", notified: { notified.contains($0) })
+        XCTAssertEqual(picked?.id, "pending")
+        // A nil high-water mark notifies the newest un-delivered foreign row.
+        XCTAssertEqual(NotificationPolicy.nextNotification(in: page, user: "me@example.com", seen: nil, notified: { notified.contains($0) })?.id, "pending")
+        // Everything delivered or seen yields nothing.
+        XCTAssertNil(NotificationPolicy.nextNotification(in: page, user: "me@example.com", seen: "2026-11-23 10:03:00.000000", notified: { _ in true }))
+        // The reader's own rows never qualify.
+        XCTAssertNil(NotificationPolicy.nextNotification(in: [message(id: "own", owner: "me@example.com")], user: "me@example.com", seen: nil, notified: { _ in false }))
     }
 }

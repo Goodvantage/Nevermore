@@ -5,6 +5,10 @@ import Darwin
 /// isolated URLSession: no cookies, no shared cache, credentials never leave
 /// the account origin (redirects to other origins are refused).
 public actor RavenClient {
+    /// Largest slice of a non-2xx body retained for error classification.
+    /// Oversized error bodies are truncated to this — never a resource limit.
+    private static let errorBodyClassificationCap = 64 * 1024
+
     public let origin: URL
     public let clientID: String
     public let accountID: UUID
@@ -276,7 +280,9 @@ public actor RavenClient {
     /// Authorization-code + PKCE exchange at the token endpoint. Token
     /// endpoints return top-level OAuth fields, never a `message` envelope.
     public static func exchange(origin: URL, clientID: String, redirectURI: URL, code: String, verifier: String) async throws -> OAuthTokens {
-        try await exchange(origin: origin, clientID: clientID, redirectURI: redirectURI, code: code, verifier: verifier, session: makeSession())
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        return try await exchange(origin: origin, clientID: clientID, redirectURI: redirectURI, code: code, verifier: verifier, session: session)
     }
 
     /// Internal seam for contract tests with a stubbed URLProtocol.
@@ -308,7 +314,7 @@ public actor RavenClient {
             request.httpMethod = "POST"
             request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
             request.httpBody = Data(Self.formBody([("token", refreshToken), ("token_type_hint", "refresh_token")]).utf8)
-            _ = try? await session.data(for: request)
+            if let (bytes, _) = try? await session.bytes(for: request) { bytes.task.cancel() }
         }
         if ownsSession { invalidateOwnedSession() }
     }
@@ -325,7 +331,7 @@ public actor RavenClient {
             var request = try build(token)
             if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
             request.setValue("application/json", forHTTPHeaderField: "Accept")
-            let (data, response) = try await load(request, maximumBytes: maximumBytes)
+            let (data, response) = try await Self.readBounded(session, request, maximumBytes: maximumBytes)
             guard !invalidated else { throw RavenError.unauthorized }
             if response.statusCode == 401, token != nil, !didRetryUnauthorized {
                 didRetryUnauthorized = true
@@ -336,15 +342,29 @@ public actor RavenClient {
         }
     }
 
-    private func load(_ request: URLRequest, maximumBytes: Int) async throws -> (Data, HTTPURLResponse) {
+    /// Reads a response body under a byte cap. The HTTP status is classified
+    /// before the cap is enforced: success bodies are capped at `maximumBytes`,
+    /// while error bodies only need enough bytes for classification (64 KiB) and
+    /// are never reported as a resource limit — so an oversized 401 can still
+    /// trigger a token refresh and an oversized 403 maps to its real status.
+    private static func readBounded(_ session: URLSession, _ request: URLRequest, maximumBytes: Int) async throws -> (Data, HTTPURLResponse) {
         let result: (Data, URLResponse)
         do {
             let (bytes, response) = try await session.bytes(for: request)
             defer { bytes.task.cancel() }
-            if response.expectedContentLength > Int64(maximumBytes) { throw RavenError.resourceLimit(maximumBytes) }
+            guard let http = response as? HTTPURLResponse else { throw RavenError.invalidResponse }
+            let success = (200..<300).contains(http.statusCode)
+            let cap = success ? maximumBytes : min(maximumBytes, Self.errorBodyClassificationCap)
+            if success, http.expectedContentLength > Int64(maximumBytes) { throw RavenError.resourceLimit(maximumBytes) }
             var data = Data()
+            // AsyncBytes yields one byte per await; reserve up front when the
+            // length is declared so the buffer does not regrow per byte.
+            if http.expectedContentLength > 0 { data.reserveCapacity(Int(min(http.expectedContentLength, Int64(cap)))) }
             for try await byte in bytes {
-                guard data.count < maximumBytes else { throw RavenError.resourceLimit(maximumBytes) }
+                guard data.count < cap else {
+                    if success { throw RavenError.resourceLimit(maximumBytes) }
+                    break
+                }
                 data.append(byte)
             }
             result = (data, response)
@@ -405,25 +425,16 @@ public actor RavenClient {
     /// Form-encoded POST to the token endpoint for authorization_code and
     /// refresh_token grants.
     private static func tokenGrant(origin: URL, fields: [(String, String)], priorRefresh: String?, session: URLSession) async throws -> OAuthTokens {
+        let maximumResponseBytes = 1024 * 1024
         var request = URLRequest(url: URL(string: origin.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + RavenEndpoints.tokenPath)!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = Data(formBody(fields).utf8)
-        let result: (Data, URLResponse)
-        do {
-            result = try await session.data(for: request)
-        } catch let error as URLError {
-            if error.code == .cancelled { throw CancellationError() }
-            throw RavenError.transport
-        } catch {
-            if error is CancellationError { throw error }
-            throw RavenError.transport
-        }
-        guard let response = result.1 as? HTTPURLResponse else { throw RavenError.invalidResponse }
-        let object = try? decode(result.0)
+        let (data, response) = try await readBounded(session, request, maximumBytes: maximumResponseBytes)
+        let object = try? decodeLenient(data)
         if let code = object?["error"].string { throw RavenError.oauth(RavenError.sanitizedOAuthCode(code)) }
-        guard (200..<300).contains(response.statusCode) else { throw Self.errorStatus(result.0, response) }
+        guard (200..<300).contains(response.statusCode) else { throw Self.errorStatus(data, response) }
         guard let object else { throw RavenError.invalidResponse }
         guard let access = object["access_token"].string, !access.isEmpty else { throw RavenError.invalidResponse }
         guard let refresh = object["refresh_token"].string ?? priorRefresh, !refresh.isEmpty else { throw RavenError.oauth("missing_refresh_token") }
@@ -444,11 +455,23 @@ public actor RavenClient {
     /// deliberately never surfaced.
     static func errorStatus(_ data: Data, _ response: HTTPURLResponse) -> RavenError {
         var kind: String?
-        if let value = try? decode(data) {
+        if let value = try? decodeLenient(data) {
             kind = RavenError.sanitizedKind(value["exc_type"].string)
             if kind == nil, let first = value["errors"].array.first { kind = RavenError.sanitizedKind(first["type"].string) }
         }
         return .http(response.statusCode, kind)
+    }
+
+    /// Decodes a JSON error body, tolerating trailing bytes (padding or a
+    /// truncated tail) after the payload: retries against the longest prefix
+    /// ending at the final `}` so a padded body still yields `exc_type`.
+    /// A body truncated mid-object still fails and yields a nil kind.
+    static func decodeLenient(_ data: Data) throws -> JSONValue {
+        if let value = try? decode(data) { return value }
+        if let end = data.lastIndex(of: UInt8(ascii: "}")) {
+            return try decode(Data(data[..<data.index(after: end)]))
+        }
+        throw RavenError.invalidResponse
     }
 
     static func decode(_ data: Data) throws -> JSONValue {

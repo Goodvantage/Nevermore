@@ -189,7 +189,9 @@ import NevermoreCore
         let operation = selectedOperation
         let available = operation != nil && !isWorking && !session.stopped
         copyButton.isEnabled = available
-        cancelButton.isEnabled = available && operation?.state == .queued && operation?.attempts == 0
+        // Share the core rule so the outbox and the transcript ink blot
+        // cannot disagree about which sends are still cancellable.
+        cancelButton.isEnabled = available && operation.map(InkRules.canTakeBack) == true
         retryButton.isEnabled = available && operation.map { Self.retryableStates.contains($0.state) } == true
     }
 
@@ -208,6 +210,9 @@ import NevermoreCore
         case .status:
             field?.stringValue = operation.state.localizedLabel()
             if let error = operation.error, !error.isEmpty { field?.toolTip = error }
+            // Retryable stays a warning, visually distinct from the red used
+            // for hard failures (themeAlert): orange means "will retry",
+            // red means "failed".
             if Self.retryableStates.contains(operation.state) { field?.textColor = .systemOrange }
         case .conversation: field?.stringValue = conversationTitle(operation)
         case .queued: field?.stringValue = operation.createdAt.formatted(date: .abbreviated, time: .shortened)

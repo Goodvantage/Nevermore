@@ -49,7 +49,7 @@ import RavenProtocol
         // Copies keep the message, not the marks.
         if let range = controller.messageRanges.first(where: { $0.1.id == "both-1" })?.0 {
             let exported = NSMutableAttributedString(attributedString: controller.transcript.attributedString().attributedSubstring(from: range))
-            TranscriptView.prepareForExport(exported)
+            TranscriptView.prepareForExport(exported, for: .copy)
             check("copying a marked message leaves the marks out", exported.string.contains("Body of both-1") && !exported.string.contains("Pinned") && !exported.string.contains("Saved") && !exported.string.contains("\u{FFFC}"))
         } else { check("copying a marked message leaves the marks out", false) }
 

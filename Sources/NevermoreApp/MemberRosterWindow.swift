@@ -13,6 +13,8 @@ import NevermoreCore
     private let channel: RavenChannel
     private let accountUser: String
     let members: [MemberRosterEntry]
+    /// Folded once per roster, so each keystroke filters precomputed haystacks.
+    private let searchIndex: MemberRoster.SearchIndex
     private(set) var matches: [MemberRosterEntry] = []
     let search = NSSearchField()
     let table = CollectionTableView()
@@ -31,6 +33,7 @@ import NevermoreCore
         self.channel = channel
         self.accountUser = session.account.user
         self.members = MemberRoster.entries(from: response, names: session.userNames)
+        self.searchIndex = MemberRoster.SearchIndex(entries: members)
         let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 480), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init(window: window)
         window.delegate = self
@@ -123,7 +126,7 @@ import NevermoreCore
 
     func updateMatches() {
         let before = selectedEntry?.userID
-        matches = MemberRoster.filtered(members, query: search.stringValue)
+        matches = searchIndex.filtered(query: search.stringValue)
         table.reloadData()
         if let before, let row = matches.firstIndex(where: { $0.userID == before }) {
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -157,6 +160,9 @@ import NevermoreCore
         label.identifier = identifier
         label.stringValue = "\(entry.displayName)\n\(detail)"
         label.maximumNumberOfLines = 2
+        // Truncate with an ellipsis; word wrap alone clips mid-glyph.
+        label.lineBreakMode = .byTruncatingTail
+        label.toolTip = detail.isEmpty ? entry.displayName : "\(entry.displayName) — \(detail)"
         label.setAccessibilityLabel("\(entry.displayName)\(entry.isAdmin ? ", admin" : ""), \(entry.userID)")
         return label
     }
@@ -173,6 +179,9 @@ import NevermoreCore
 
     func controlTextDidChange(_ notification: Notification) {
         guard (notification.object as? NSSearchField) === search else { return }
+        // An input method's marked text is not a filter change yet; refining
+        // on every composing edit would flicker the list mid-word.
+        guard (search.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
         updateMatches()
     }
 

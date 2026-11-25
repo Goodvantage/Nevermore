@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import RavenProtocol
 @testable import NevermoreCore
@@ -88,6 +89,41 @@ import RavenProtocol
         #expect(MemberRoster.filtered(entries, query: "RCM-0002").map(\.userID) == ["ana@example.com"])
         #expect(MemberRoster.filtered(entries, query: "nobody").isEmpty)
         #expect(MemberRoster.filtered(entries, query: "  ").count == 2)
+    }
+
+    @Test func searchIndexMatchesIndependentReferenceAndKeepsOrder() {
+        let entries = [
+            MemberRosterEntry(userID: "zoe@example.com", displayName: "Zoë Lane", isAdmin: false, memberID: "RCM-0009"),
+            MemberRosterEntry(userID: "ana@example.com", displayName: "Ana Silva", isAdmin: true, memberID: "RCM-0002"),
+            MemberRosterEntry(userID: "emile@example.com", displayName: "Émile Rowe", isAdmin: false, memberID: "RCM-0001"),
+        ]
+        // Reference implementation written against the documented contract
+        // (fold case/diacritics, split the query into words, every word must
+        // appear in the folded "name id memberID" haystack, order preserved)
+        // rather than against MemberRoster.filtered, which SearchIndex
+        // delegates to — a parity check against it would be circular.
+        func fold(_ value: String) -> String {
+            value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        }
+        func reference(_ query: String) -> [String] {
+            let text = fold(query).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return entries.map(\.userID) }
+            let words = text.split(whereSeparator: \.isWhitespace).map(String.init)
+            return entries.compactMap { entry in
+                let haystack = fold([entry.displayName, entry.userID, entry.memberID ?? ""].joined(separator: " "))
+                return words.allSatisfy(haystack.contains) ? entry.userID : nil
+            }
+        }
+        let index = MemberRoster.SearchIndex(entries: entries)
+        #expect(index.all.map(\.userID) == entries.map(\.userID))
+        // "SILVA" pins the en_US_POSIX locale: its uppercase I folds to "i"
+        // here, but to a dotless ı under a Turkish locale, where it would not
+        // match the haystack.
+        for query in ["", "  ", "ana", "ZOE", "SILVA", "émile", "ÉMILE", "RCM-0009", "example.com", "nobody", "ana example", "lane zoe"] {
+            #expect(index.filtered(query: query).map(\.userID) == reference(query))
+        }
+        #expect(index.filtered(query: "example.com").count == 3)
+        #expect(index.filtered(query: "  ").count == 3)
     }
 
     @Test func countLabelShowsTotalAndFilteredCount() {

@@ -74,7 +74,30 @@ import RavenProtocol
     private var observers: [NSObjectProtocol] = []
     private var previewTask: Task<Void, Never>?
     private var previewCache: [String: [RavenMessage]] = [:]
+    /// Most-recently-used-last order of `previewCache` keys.
+    private var previewRecency: [String] = []
     private(set) var attachments = SearchAttachmentReader()
+
+    /// Caches a preview context as most recently used; beyond 50 entries the
+    /// least recently used one is evicted instead of dropping the whole cache.
+    private func cachePreview(_ context: [RavenMessage], for id: String) {
+        guard !context.isEmpty else { return }
+        previewCache[id] = context
+        previewRecency.removeAll { $0 == id }
+        previewRecency.append(id)
+        while previewRecency.count > 50, let oldest = previewRecency.first {
+            previewRecency.removeFirst()
+            previewCache.removeValue(forKey: oldest)
+        }
+    }
+
+    /// Returns the cached preview, marking it most recently used.
+    private func cachedPreview(_ id: String) -> [RavenMessage]? {
+        guard let context = previewCache[id] else { return nil }
+        previewRecency.removeAll { $0 == id }
+        previewRecency.append(id)
+        return context
+    }
 
     /// Below this pane width the side column hides.
     static let sideColumnMinimumWidth: CGFloat = 900
@@ -120,6 +143,8 @@ import RavenProtocol
         tabs.segmentCount = SearchTab.allCases.count
         for (index, tab) in SearchTab.allCases.enumerated() { tabs.setLabel(tab.title, forSegment: index); tabs.setWidth(0, forSegment: index) }
         tabs.selectedSegment = 0
+        // The theme accent, not the system blue, marks the selected tab.
+        tabs.selectedSegmentBezelColor = .themeAccent
         tabs.target = self; tabs.action = #selector(tabChanged)
         tabs.setAccessibilityLabel("Result type")
         orderPopup.addItems(withTitles: ["Best Match", "Newest First"])
@@ -373,7 +398,7 @@ import RavenProtocol
         closeCompactPreview()
         feed = SearchFeed(session: session)
         feed.onChange = { [weak self] in self?.reload() }
-        criteria = SearchCriteria(); tab = .messages; expanded = []; origin = nil; previewCache.removeAll()
+        criteria = SearchCriteria(); tab = .messages; expanded = []; origin = nil; previewCache.removeAll(); previewRecency.removeAll()
         items = []; table.reloadData()
     }
 
@@ -382,8 +407,13 @@ import RavenProtocol
         guard next != tab else { return }
         tab = next
         previewTask?.cancel()
+        // Every tab, including the local Conversations and People views:
+        // a Files or Links kind left over from another tab would leak into
+        // the local result set, the Filters menu and a saved search. A
+        // detour through a local tab is a clean slate; switching back
+        // re-derives that tab's default kind.
+        criteria = criteria.on(next)
         if [.messages, .files, .links].contains(next) {
-            criteria = criteria.on(next)
             if criteria == feed.criteria { feed.ensureLoaded(next) } else { feed.search(criteria, tab: next, immediately: true) }
             owner?.recordSearch(criteria)
         }
@@ -774,7 +804,7 @@ import RavenProtocol
         }
         if !attachments.status.isEmpty { parts.insert(attachments.status, at: 0) }
         status.stringValue = parts.joined(separator: " ")
-        status.textColor = results.indexErrors[tab] != nil ? .systemRed : .themeSecondaryText
+        status.textColor = results.indexErrors[tab] != nil ? .themeAlert : .themeSecondaryText
         // The preview affordance stays ahead of the footer buttons, which a
         // reload replaces.
         for arranged in footerButtons.arrangedSubviews where arranged !== previewButton {
@@ -913,15 +943,14 @@ import RavenProtocol
         previewTask?.cancel()
         switch selectedItem {
         case .hit(let hit)?:
-            if let cached = previewCache[hit.id] { side.showPreview(hit, context: cached, loading: false); return }
+            if let cached = cachedPreview(hit.id) { side.showPreview(hit, context: cached, loading: false); return }
             side.showPreview(hit, context: [], loading: true)
             previewTask = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(150))
                 guard !Task.isCancelled, let self else { return }
                 let context = await Self.context(for: hit, session: session)
                 guard !Task.isCancelled, self.selectedHitID == hit.id else { return }
-                if !context.isEmpty { self.previewCache[hit.id] = context }
-                if self.previewCache.count > 50 { self.previewCache.removeAll() }
+                self.cachePreview(context, for: hit.id)
                 self.side.showPreview(hit, context: context, loading: false)
             }
         default:
@@ -964,7 +993,7 @@ import RavenProtocol
         let size = NSSize(width: width, height: height)
         popover.contentSize = size
         controller.preferredContentSize = size
-        let cached = previewCache[hit.id]
+        let cached = cachedPreview(hit.id)
         content.show(hit, context: cached ?? [], loading: cached == nil, owner: owner, session: session, size: size)
         popover.show(relativeTo: previewButton.bounds, of: previewButton, preferredEdge: .minY)
         compactPreviewPopover = popover
@@ -977,8 +1006,7 @@ import RavenProtocol
             guard !Task.isCancelled, let self, self.selectedHitID == hit.id, self.compactPreviewPopover === popover else { return }
             let context = await Self.context(for: hit, session: session)
             guard !Task.isCancelled, self.selectedHitID == hit.id, self.compactPreviewPopover === popover else { return }
-            if !context.isEmpty { self.previewCache[hit.id] = context }
-            if self.previewCache.count > 50 { self.previewCache.removeAll() }
+            self.cachePreview(context, for: hit.id)
             content.show(hit, context: context, loading: false, owner: owner, session: session, size: size)
         }
     }

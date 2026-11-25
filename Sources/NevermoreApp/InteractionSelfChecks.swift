@@ -34,6 +34,42 @@ import RavenProtocol
         dismissedSuggestions.table.reloadData(); dismissedSuggestions.close()
         results.append(("dismissed mention suggestions safely reject a delayed row request", dismissedSuggestions.numberOfRows(in: dismissedSuggestions.table) == 0 && dismissedSuggestions.tableView(dismissedSuggestions.table, viewFor: nil, row: 0) == nil))
         let chooser = ConversationChooser(session: session)
+        for kind in [nil, MentionCandidate.Kind.channel, .person] {
+            let candidateChooser = ConversationChooser(session: session, only: kind)
+            defer { candidateChooser.close() }
+            if let content = candidateChooser.window?.contentView {
+                let action = descendants(content, of: NSButton.self).first { $0.title == (kind == nil ? "Open" : "Choose") }
+                let emptyMessage = kind == .person ? "No matching people" : kind == .channel ? "No matching conversations" : "No matching conversations or people"
+                candidateChooser.search.stringValue = "fixture-with-no-match-7c451"
+                candidateChooser.updateMatches()
+                let empty = descendants(content, of: NSTextField.self).first { $0.stringValue == emptyMessage }
+                let scroll = descendants(content, of: NSScrollView.self).first
+                var pickedEmptyResult = false
+                candidateChooser.onPick = { _, _ in pickedEmptyResult = true }
+                let handledReturn = candidateChooser.control(
+                    candidateChooser.search, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:)))
+                results.append(("chooser shows a scoped empty message and disables its action (\(String(describing: kind)))",
+                                candidateChooser.matches.isEmpty && empty?.isHidden == false && scroll?.isHidden == true && action?.isEnabled == false))
+                results.append(("Return in an empty chooser cannot pick a destination (\(String(describing: kind)))",
+                                handledReturn && !pickedEmptyResult))
+                if kind == nil {
+                    // A # or @ prefix narrows an unscoped query to one kind,
+                    // so its empty message names that kind.
+                    for (prefix, message) in [("#", "No matching conversations"), ("@", "No matching people")] {
+                        candidateChooser.search.stringValue = prefix + "fixture-with-no-match-7c451"
+                        candidateChooser.updateMatches()
+                        results.append(("an unscoped chooser names the \(prefix) kind in its empty message",
+                                        descendants(content, of: NSTextField.self).contains { $0.stringValue == message && !$0.isHidden }))
+                    }
+                }
+                candidateChooser.search.stringValue = ""
+                candidateChooser.updateMatches()
+                results.append(("clearing a chooser query restores its selectable results (\(String(describing: kind)))",
+                                !candidateChooser.matches.isEmpty && empty?.isHidden == true && scroll?.isHidden == false && action?.isEnabled == true))
+            } else {
+                results.append(("chooser has native content (\(String(describing: kind)))", false))
+            }
+        }
         chooser.search.stringValue = "@Alex"; chooser.updateMatches()
         results.append(("conversation chooser filters people without creating a DM", !chooser.matches.isEmpty && chooser.matches.allSatisfy { $0.kind == .person }))
         var picked: MentionCandidate?

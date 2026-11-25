@@ -143,7 +143,7 @@ extension Notification.Name {
         super.init(frame: .zero)
         let dismiss = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss this update")!, target: updates, action: #selector(AppUpdateController.dismissUpdate))
         dismiss.isBordered = false
-        notice.isBordered = false; notice.contentTintColor = .controlAccentColor
+        notice.isBordered = false; notice.contentTintColor = .themeAccent
         notice.target = self; notice.action = #selector(showUpdate)
         orientation = .horizontal; spacing = 6
         edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 4, right: 10)

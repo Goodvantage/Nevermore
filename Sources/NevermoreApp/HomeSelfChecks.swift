@@ -299,6 +299,18 @@ import RavenProtocol
         } else { identityKept = false }
         results.append(("choosing for a session the window no longer shows does not navigate", identityKept))
 
+        // Switching accounts must rebuild Home from the new session without the
+        // check forcing a reload; the window has to do it itself.
+        controller.showHome()
+        controller.home.reloadNow()
+        let oldDraftShown = draftRow(in: controller) != nil
+        controller.use(other)
+        for _ in 0..<80 where draftRow(in: controller) != nil { try? await Task.sleep(for: .milliseconds(20)) }
+        let otherHomeClean = oldDraftShown && draftRow(in: controller) == nil
+        controller.use(session)
+        for _ in 0..<80 where draftRow(in: controller) == nil { try? await Task.sleep(for: .milliseconds(20)) }
+        results.append(("switching accounts rebuilds Home for the new account", otherHomeClean && draftRow(in: controller) != nil))
+
         results.append(("People You Talk With Most finds the person the reader writes to",
                          InteractionSelfChecks.descendants(card(.people) ?? NSView(), of: HomePerson.self).first?.accessibilityLabel()?.hasPrefix("Pat Peer") == true))
 

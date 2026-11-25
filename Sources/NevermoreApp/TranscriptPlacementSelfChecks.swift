@@ -126,6 +126,39 @@ import RavenProtocol
         await controller.restoreLocationTask?.value
         settle()
         check("a restored location is at its remembered offset once the server answered", controller.requestedAnchor == "placement-400" && isAtOffset("placement-400", 10) && !controller.isFollowing)
+
+        // A caret stays on its message when earlier history is prepended.
+        // The old raw-offset restore would move with the rows above it and
+        // leave the Message menu acting on a different message.
+        controller.select(channel, anchor: "placement-400")
+        await rendered()
+        if let target = controller.messageRanges.first(where: { $0.1.id == "placement-400" })?.0 {
+            let caretOffset = min(5, max(target.length - 1, 0))
+            let staleLocation = target.location + caretOffset
+            controller.transcript.setSelectedRange(NSRange(location: staleLocation, length: 0))
+            controller.historyUpperID = "placement-400"
+            controller.render(); await rendered()
+            let restored = controller.messageRanges.first(where: { $0.1.id == "placement-400" })?.0
+            check("a caret stays on its message when earlier messages are prepended",
+                  restored != nil && restored!.location > target.location
+                      && controller.selectedMessage?.id == "placement-400"
+                      && NSLocationInRange(controller.transcript.selectedRange().location, restored!))
+            if let restored {
+                // Deleting the caret's own message must collapse to a
+                // surviving message, not restore the old offset.
+                let caretLocation = restored.location + min(caretOffset, max(restored.length - 1, 0))
+                controller.transcript.setSelectedRange(NSRange(location: caretLocation, length: 0))
+                session.deletedIDs.insert("placement-400")
+                controller.render(); await rendered()
+                let survivor = controller.selectedMessage
+                check("deleting the caret's message collapses to a surviving message",
+                      controller.messageRanges.first(where: { $0.1.id == "placement-400" }) == nil
+                          && survivor != nil && survivor?.id != "placement-400")
+                session.deletedIDs.remove("placement-400")
+            }
+        } else {
+            check("a caret stays on its message when earlier messages are prepended", false)
+        }
         return checks
     }
 }

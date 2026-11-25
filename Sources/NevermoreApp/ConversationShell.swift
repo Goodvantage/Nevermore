@@ -362,6 +362,8 @@ extension SidebarConversationCell.Model {
     let stack = NSStackView()
     /// Anchors the quick reaction row.
     var reactButton: NSButton?
+    /// Hidden inside a thread, where replying stays in the current thread.
+    var threadButton: NSButton?
     init() {
         super.init(frame: .zero)
         glass.cornerRadius = 9
@@ -558,7 +560,9 @@ extension ConversationWindow {
         // Lets stickers stand in for single glyphs; see TranscriptLayoutManager.
         transcript.textContainer?.replaceLayoutManager(TranscriptLayoutManager())
         transcript.codeMenuItems = { [weak self] in
-            guard let self, let message = self.selectedMessage, let doc = try? RichTextCodec.parse(message.html), !CodeBlocks.extract(from: doc).isEmpty else { return [] }
+            // Use the cached parsed document (as validateMenuItem does) instead
+            // of re-parsing the HTML on the main thread for every menu build.
+            guard let self, let message = self.selectedMessage, let session = self.session, case .parsed(let doc) = session.messageDocument(for: message), !CodeBlocks.extract(from: doc).isEmpty else { return [] }
             let item = NSMenuItem(title: "Open Code Reader…", action: #selector(ConversationWindow.openCodeReader(_:)), keyEquivalent: ""); item.target = self; return [item]
         }
         transcript.messageMenu = { [weak self] in self?.messageContextMenu() }
@@ -1053,10 +1057,18 @@ extension ConversationWindow {
     // MARK: Transcript interaction
 
     func messageRange(at point: NSPoint) -> (NSRange, RavenMessage)? {
-        messageRanges.first { entry in
-            let rect = highlightRect(for: entry.0)
-            return point.y >= rect.minY && point.y < rect.maxY
+        // Ranges run top to bottom, so find the first whose bottom edge is
+        // below the pointer by binary search. Measuring every row turned one
+        // pointer move into a text-layout query per visible message.
+        var low = 0, high = messageRanges.count
+        while low < high {
+            let middle = (low + high) / 2
+            if highlightRect(for: messageRanges[middle].0).maxY <= point.y { low = middle + 1 } else { high = middle }
         }
+        guard low < messageRanges.count else { return nil }
+        let entry = messageRanges[low]
+        let rect = highlightRect(for: entry.0)
+        return point.y >= rect.minY && point.y < rect.maxY ? entry : nil
     }
 
     /// The message rectangle without its trailing separator lines, widened to
@@ -1075,7 +1087,16 @@ extension ConversationWindow {
 
     func updateMessageHighlight() {
         let selection = transcript.selectedRange()
-        guard selection.length == 0, selection.location != NSNotFound, let entry = messageRanges.first(where: { NSLocationInRange(selection.location, $0.0) }) else { transcript.highlightRect = nil; transcript.caretMessageLocation = nil; return }
+        guard selection.length == 0, selection.location != NSNotFound else { transcript.highlightRect = nil; transcript.caretMessageLocation = nil; return }
+        // Range locations increase with layout order, so the caret's message
+        // is found without scanning every row.
+        var low = 0, high = messageRanges.count
+        while low < high {
+            let middle = (low + high) / 2
+            if NSMaxRange(messageRanges[middle].0) <= selection.location { low = middle + 1 } else { high = middle }
+        }
+        guard low < messageRanges.count, NSLocationInRange(selection.location, messageRanges[low].0) else { transcript.highlightRect = nil; transcript.caretMessageLocation = nil; return }
+        let entry = messageRanges[low]
         transcript.highlightRect = highlightRect(for: entry.0)
         transcript.caretMessageLocation = entry.0.location
     }
@@ -1102,9 +1123,12 @@ extension ConversationWindow {
         if hoverBar.stack.arrangedSubviews.isEmpty {
             hoverBar.reactButton = hoverBar.addButton(symbol: "face.smiling", label: "React…", target: self, action: #selector(hoverReact(_:)))
             hoverBar.addButton(symbol: "arrowshape.turn.up.left", label: "Reply", target: self, action: #selector(hoverReply(_:)))
-            hoverBar.addButton(symbol: "bubble.left.and.bubble.right", label: "Reply in Thread", target: self, action: #selector(hoverThread(_:)))
+            hoverBar.threadButton = hoverBar.addButton(symbol: "bubble.left.and.bubble.right", label: "Reply in Thread", target: self, action: #selector(hoverThread(_:)))
             hoverBar.addButton(symbol: "ellipsis", label: "More Actions", target: self, action: #selector(hoverMore(_:)))
         }
+        // Inside a thread a reply stays in that thread; offering the command
+        // here would create a nested thread server-side.
+        hoverBar.threadButton?.isHidden = channel?.raw["is_thread"].bool == true
         if hoverBar.superview !== transcript { hoverBar.translatesAutoresizingMaskIntoConstraints = true; transcript.addSubview(hoverBar) }
         let size = hoverBar.fittingSize
         let rect = highlightRect(for: range)
@@ -1129,6 +1153,9 @@ extension ConversationWindow {
     /// Scrolling moves messages under a still pointer. An open reaction row
     /// follows its message instead, and closes once the message leaves view.
     func transcriptDidScroll() {
+        // Another card may now be under the still pointer; the mark returns
+        // with the pointer's next move, as the hover bar does.
+        transcript.hoveredCardLocation = nil
         ink.transcriptDidScroll()
         stickers.transcriptDidScroll()
         guard quickReactions.isShown else { hideHoverBar(); return }
@@ -1166,9 +1193,20 @@ extension ConversationWindow {
         let menu = NSMenu(title: "Message")
         func add(_ title: String, _ action: Selector) { menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self }
         if transcript.selectedRange().length > 0 { menu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: ""); menu.addItem(.separator()) }
+        if message.messageType == "System" {
+            // System events carry no message actions (matching Raven web); only
+            // the copy commands apply to them.
+            add("Copy Text", #selector(copyMessageText(_:)))
+            add("Copy Link", #selector(copyMessageLink(_:)))
+            menu.addItem(.separator())
+            add("Copy Transcript", #selector(copyTranscript(_:)))
+            return menu
+        }
         add("Reply", #selector(reply(_:)))
-        add("Reply in Thread", #selector(openThread(_:)))
-        add("Open Thread in New Window", #selector(openThreadWindow(_:)))
+        if channel?.raw["is_thread"].bool != true {
+            add("Reply in Thread", #selector(openThread(_:)))
+            add("Open Thread in New Window", #selector(openThreadWindow(_:)))
+        }
         add("React…", #selector(react(_:)))
         menu.addItem(.separator())
         add(Self.saveTitle(saved: MessageMarks.isSaved(message, by: session.account.user)), #selector(saveForLater(_:)))
@@ -1345,6 +1383,9 @@ extension ConversationWindow {
         case #selector(toggleCompactMessages(_:)):
             item.state = UserDefaults.standard.bool(forKey: "compactMessages") ? .on : .off
             return true
+        case #selector(editMarkdown(_:)):
+            item.state = inlineComposer.mode == .markdown ? .on : .off
+            return composer.isEditable
         case #selector(actualTextSize(_:)):
             let size = UserDefaults.standard.double(forKey: "fontSize")
             return size != 0 && size != 14
@@ -1354,7 +1395,9 @@ extension ConversationWindow {
         case #selector(showInParentChannel(_:)): return channel?.raw["parent_channel_id"].string != nil
         case #selector(copyTranscript(_:)): return canCopyDisplayedTranscript
         case #selector(clearAttachments): return composer.isEditable && (!attachments.isEmpty || !promisedReceives.isEmpty)
-        case #selector(schedule(_:)): return writable && channel != nil && composer.isEditable && attachments.isEmpty && !activeComposer.string.isEmpty && !isArchivedConversation
+        // Not while editing: scheduling reads the live composer, which then
+        // holds the edit, and would post the edited text as a new message.
+        case #selector(schedule(_:)): return writable && channel != nil && editing == nil && composer.isEditable && attachments.isEmpty && !activeComposer.string.isEmpty && !isArchivedConversation
         case #selector(createPoll(_:)): return writable && channel != nil && !isArchivedConversation && pollCreationTask == nil
         case #selector(copyMessageLink(_:)), #selector(readers(_:)): return hasSession && selectedMessage != nil
         case #selector(linkedDocument(_:)): return hasSession && selectedMessage?.raw["link_doctype"].string?.isEmpty == false

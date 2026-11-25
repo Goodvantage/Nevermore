@@ -59,4 +59,40 @@ import RavenProtocol
         let selfParent = channel(["parent_channel_id": .string("c")])
         #expect(ChannelPolicy.isArchived(channelID: "c", channels: [selfParent], threadParents: [:]))
     }
+
+    @Test func notificationGateCoversRevocationAncestryAndThreadRows() {
+        let open = channel()
+        // A plain channel notifies; revoking the channel itself suppresses it.
+        #expect(ChannelPolicy.shouldNotify(channelID: "c", channels: [open], revoked: [], threadParents: [:]))
+        #expect(!ChannelPolicy.shouldNotify(channelID: "c", channels: [open], revoked: ["c"], threadParents: [:]))
+        // Muted, archived or notifications-off rows suppress.
+        #expect(!ChannelPolicy.shouldNotify(channelID: "c", channels: [channel(["muted": .bool(true)])], revoked: [], threadParents: [:]))
+        #expect(!ChannelPolicy.shouldNotify(channelID: "c", channels: [channel(["is_archived": .bool(true)])], revoked: [], threadParents: [:]))
+        #expect(!ChannelPolicy.shouldNotify(channelID: "c", channels: [channel(["allow_notifications": .bool(false)])], revoked: [], threadParents: [:]))
+        #expect(ChannelPolicy.shouldNotify(channelID: "c", channels: [channel(["allow_notifications": .bool(true)])], revoked: [], threadParents: [:]))
+        // An unknown ID never notifies.
+        #expect(!ChannelPolicy.shouldNotify(channelID: "ghost", channels: [open], revoked: [], threadParents: [:]))
+        // A thread is gated on its parent's row: parent muted/revoked/
+        // archived suppresses, an open parent allows.
+        let threads = ["thread": "c"]
+        #expect(ChannelPolicy.shouldNotify(channelID: "thread", channels: [open], revoked: [], threadParents: threads))
+        #expect(!ChannelPolicy.shouldNotify(channelID: "thread", channels: [channel(["muted": .bool(true)])], revoked: [], threadParents: threads))
+        #expect(!ChannelPolicy.shouldNotify(channelID: "thread", channels: [open], revoked: ["c"], threadParents: threads))
+        #expect(!ChannelPolicy.shouldNotify(channelID: "thread", channels: [channel(["is_archived": .bool(true)])], revoked: [], threadParents: threads))
+        #expect(!ChannelPolicy.shouldNotify(channelID: "thread", channels: [channel(["allow_notifications": .bool(false)])], revoked: [], threadParents: threads))
+        // Nested threads walk to the top-most ancestor; a cycle stops there
+        // and fails closed (the root is not in `channels`).
+        let nested = ["t2": "t1", "t1": "c"]
+        #expect(ChannelPolicy.shouldNotify(channelID: "t2", channels: [open], revoked: [], threadParents: nested))
+        #expect(!ChannelPolicy.shouldNotify(channelID: "t2", channels: [open], revoked: ["c"], threadParents: nested))
+        // A revoked intermediate ancestor must also suppress the thread.
+        #expect(!ChannelPolicy.shouldNotify(channelID: "t2", channels: [open], revoked: ["t1"], threadParents: nested))
+        #expect(!ChannelPolicy.shouldNotify(channelID: "t2", channels: [], revoked: [], threadParents: ["t2": "t1", "t1": "t2"]))
+        // A cycle fails closed even when a row for a cycle node exists.
+        #expect(!ChannelPolicy.shouldNotify(channelID: "t2", channels: [open], revoked: [], threadParents: ["t2": "c", "c": "t2"]))
+        // An immediate self-parent is the other corrupt shape; it fails closed too.
+        #expect(!ChannelPolicy.shouldNotify(channelID: "c", channels: [open], revoked: [], threadParents: ["c": "c"]))
+        // A thread whose parent row is missing never notifies.
+        #expect(!ChannelPolicy.shouldNotify(channelID: "thread", channels: [], revoked: [], threadParents: threads))
+    }
 }

@@ -160,10 +160,10 @@ import NevermoreCore
         title = ""
         isBordered = false
         setButtonType(.momentaryChange)
-        toolTip = "\(theme.name): \(theme.tagline)"
+        toolTip = theme.name
         setAccessibilityRole(.radioButton)
         setAccessibilityLabel(theme.name)
-        setAccessibilityHelp(theme.tagline)
+        setAccessibilityHelp(nil)
         setAccessibilityValue(0)
         translatesAutoresizingMaskIntoConstraints = false
         widthAnchor.constraint(equalToConstant: Self.previewSize.width + 8).isActive = true
@@ -179,8 +179,8 @@ import NevermoreCore
         self.theme = theme
         if customized != isCustomized { needsDisplay = true }
         isCustomized = customized
-        toolTip = "\(theme.name): \(theme.tagline)" + (customized ? " (customized)" : "")
-        setAccessibilityHelp(customized ? "\(theme.tagline). Customized." : theme.tagline)
+        toolTip = theme.name + (customized ? " (customized)" : "")
+        setAccessibilityHelp(customized ? "Customized." : nil)
         if preview == nil { refreshPreview() }
     }
 
@@ -216,9 +216,9 @@ import NevermoreCore
         if isChosen {
             let ring = NSBezierPath(roundedRect: frame.insetBy(dx: -2.5, dy: -2.5), xRadius: 10, yRadius: 10)
             ring.lineWidth = 3
-            NSColor.controlAccentColor.setStroke()
+            NSColor.themeAccent.setStroke()
             ring.stroke()
-            drawBadge("checkmark", in: NSRect(x: frame.maxX - 22, y: frame.maxY - 22, width: 18, height: 18), fill: .controlAccentColor)
+            drawBadge("checkmark", in: NSRect(x: frame.maxX - 22, y: frame.maxY - 22, width: 18, height: 18), fill: .themeAccent)
         }
         if isCustomized { drawBadge("paintbrush.pointed.fill", in: NSRect(x: frame.minX + 4, y: frame.maxY - 22, width: 18, height: 18), fill: NSColor.black.withAlphaComponent(0.55)) }
         let paragraph = NSMutableParagraphStyle()

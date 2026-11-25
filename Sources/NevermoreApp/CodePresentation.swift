@@ -74,6 +74,13 @@ struct CodeCommand {
                     replacement.addAttribute(key, value: value, range: NSRange(location: 0, length: replacement.length))
                 }
             }
+            // Spacing above the block (after a quote) belongs to its control line only.
+            if let style = replacement.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle, style.paragraphSpacingBefore > 0 {
+                let body = (replacement.string as NSString).range(of: "\n").location + 1
+                let rest = style.mutableCopy() as! NSMutableParagraphStyle
+                rest.paragraphSpacingBefore = 0
+                replacement.addAttribute(.paragraphStyle, value: rest, range: NSRange(location: body, length: replacement.length - body))
+            }
             output.replaceCharacters(in: range, with: replacement)
         }
         return Output(text: output, commands: commands, references: references.reversed())

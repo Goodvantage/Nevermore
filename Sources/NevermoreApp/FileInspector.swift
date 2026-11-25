@@ -97,6 +97,10 @@ struct FileInspectorSource {
 
         let name = NSTextField(wrappingLabelWithString: source.filename)
         name.font = .systemFont(ofSize: NSFont.systemFontSize + 1, weight: .semibold); name.isSelectable = true; name.maximumNumberOfLines = 3
+        // Truncate with an ellipsis; word wrap alone clips mid-glyph. Middle
+        // truncation keeps the extension visible, which identifies the type.
+        name.lineBreakMode = .byTruncatingMiddle
+        name.toolTip = source.filename
         nameRow.orientation = .vertical; nameRow.alignment = .leading; nameRow.setViews([name], in: .top)
 
         details.orientation = .vertical; details.alignment = .leading; details.spacing = 4

@@ -178,8 +178,10 @@ public struct SearchSnippet: Equatable, Sendable {
     /// matched them: case and diacritics are ignored, and a match starts a
     /// word. The text is cut to a window around the first match.
     public static func local(_ plain: String, query: String) -> SearchSnippet {
-        let words = plain.split(whereSeparator: \.isWhitespace)
-        let line = words.prefix(maximumLength).joined(separator: " ")
+        // Normalize runs of whitespace for the single-line row, but search the
+        // whole indexed body. Truncating to a word count first hides matches
+        // late in a long pasted log and shows the message's opening instead.
+        let line = plain.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         let terms = query.split(whereSeparator: \.isWhitespace).map(String.init).filter { !$0.isEmpty }
         let ns = line as NSString
         var found: [Range<Int>] = []

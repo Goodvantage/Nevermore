@@ -131,6 +131,9 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     var approvedOldSends = Set<UUID>()
     var preparingChannels = Set<String>()
     var acceptingChannels = Set<String>()
+    /// GIF sends in flight, keyed by channel + body: a different GIF to the
+    /// same channel may proceed, the same GIF confirmed twice may not.
+    var acceptingGIFs = Set<String>()
     var pendingFileReceipts: [UUID: String] = [:]
     var draftPersistenceFailures: [String: String] = [:]
     var unpersistedDraftRevisions: [String: Int] = [:]
@@ -148,6 +151,11 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     var realtimeLive = false
     var thumbnails: [String: NSImage] = [:]
     var thumbnailOrder: [String] = []
+    /// The box each image message's picture had when it last loaded. Only
+    /// a few pictures stay decoded; one scrolled back into view keeps its
+    /// place while it loads again.
+    var pictureSizes: [String: CGSize] = [:]
+    private static let maximumPictureSizes = 4096
     var thumbnailRequests = Set<String>()
     /// Frames of animated images (GIF uploads and GIFs embedded in message
     /// bodies), by `AnimatedImageKey`. Thumbnails keep the first frame.
@@ -200,9 +208,17 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     var reconcileRequested = false
     /// Internal rather than private so the self-check can pin the live tick.
     var lastLiveRefresh = Date()
+    /// Conversations with unnotified activity, drained once per reconciliation
+    /// pass. Bounded by the account's channel count; the drain bounds the work.
     var notificationChannels = Set<String>()
     /// Messages and batches already notified, newest kept.
     var notifiedIDs = RecentIdentifiers(capacity: 1000)
+    /// Rows read per notification lookup. A heuristic, not a correctness
+    /// bound: a burst of 5+ of the reader's own newer rows can still push an
+    /// incoming message out of the page. The durable fix is a cursor "after"
+    /// the per-channel high-water mark; until the API offers one, this keeps
+    /// the common multi-device case from dropping the notification.
+    private static let notificationPageLimit = 5
     var unread: JSONValue = .null
     var unreadNotificationIDs = Set<String>()
     /// Unread conversations in which a mention arrived while the app was
@@ -372,11 +388,15 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         // deactivate on sleep/quit: that would also erase this user's phone activity.
     }
     func reauthenticate(clientID: String, tokens: OAuthTokens) async throws {
-        await client.invalidate()
+        // Persist the new tokens before tearing down the live client: a
+        // transient Keychain failure must leave the old client usable rather
+        // than stranding the account until relaunch.
         try KeychainTokenStore.save(tokens, accountID: account.id)
+        await client.invalidate()
         generation += 1; presenceUnavailable = false; presenceFailedAt = nil; account.clientID = clientID
         client = RavenClient(origin: account.origin, tokens: tokens, clientID: clientID, accountID: account.id)
         realtime?.disconnect(); realtime = nil; realtimeToken = nil
+        realtimeLive = false
         setStatusAttention(nil)
         state = StatusLocalization.text(.reconnecting); notify()
         do { try await refresh(); ensureRealtime(); await flush() } catch { fail(error) }
@@ -457,7 +477,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         let threads = Set(interests.values).subtracting(channels.map(\.id))
         let revoked = Set(channels.map(\.id)).subtracting(allowed)
         revokedChannels.formUnion(revoked); revokedChannels.subtract(allowed)
-        if !revoked.isEmpty { generation += 1; thumbnails.removeAll(); thumbnailOrder.removeAll(); forgetAnimatedImages() }
+        if !revoked.isEmpty { generation += 1; thumbnails.removeAll(); thumbnailOrder.removeAll(); pictureSizes.removeAll(); forgetAnimatedImages() }
         let permitted = allowed.union(threads.filter { !channelIsRevoked($0) })
         let withdrawn = historyChannels(under: revoked)
         try await writeHistory { [store] in
@@ -501,6 +521,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         guard !demo, !stopped, let tokens = try? KeychainTokenStore.load(accountID: account.id) else { return }
         if realtime == nil || realtimeToken != tokens.accessToken {
             realtime?.disconnect(); realtimeToken = tokens.accessToken
+            realtimeLive = false
             realtime = RavenRealtime(account: account, accessToken: tokens.accessToken) { [weak self] event, payload in self?.event(event, payload) }
             realtime?.connect(); updateRooms()
         }
@@ -521,12 +542,12 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         if ["message_deleted", "disconnect"].contains(name) { generation += 1 }
         if name == "message_deleted" {
             let id = payload["message_id"].string ?? payload["name"].string
-            if let id { deletedIDs.insert(id); thumbnails.removeValue(forKey: id); for channel in memoryMessages.keys { memoryMessages[channel]?.removeAll { $0.id == id } }; Task { try? await store.deleteMessages(ids: [id]); notify() } }
+            if let id { deletedIDs.insert(id); thumbnails.removeValue(forKey: id); pictureSizes.removeValue(forKey: id); for channel in memoryMessages.keys { memoryMessages[channel]?.removeAll { $0.id == id } }; Task { try? await store.deleteMessages(ids: [id]); notify() } }
         }
         if ["message_created", "raven_mention", "raven_reaction_notification", "raven:unread_channel_count_updated"].contains(name),
            let channel = payload["channel_id"].string,
            (payload["sender"].string ?? payload["sent_by"].string ?? "") != account.user,
-           payload["event_type"].string != "message_deleted", notificationChannels.count < 10 { notificationChannels.insert(channel) }
+           payload["event_type"].string != "message_deleted" { notificationChannels.insert(channel) }
         notify()
         requestReconciliation()
     }
@@ -617,7 +638,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
             if let e = error as? RavenError, e.isPermissionDenied {
                 guard !stopped, access == channelAccessEpoch(channelID) else { throw error }
                 revokedChannels.insert(channelID)
-                thumbnails.removeAll(); forgetAnimatedImages(); updateRooms()
+                thumbnails.removeAll(); pictureSizes.removeAll(); forgetAnimatedImages(); updateRooms()
                 let targets = historyChannels(under: [channelID])
                 let deniedAccess = channelAccessEpoch(channelID)
                 notify()
@@ -735,10 +756,35 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         guard !demo || demoWire != nil else { throw AppError.message("Demo mode does not send messages. Add a Raven account to chat.") }
         guard !readOnly, !ChannelPolicy.isRevoked(channelID: channelID, revoked: revokedChannels, threadParents: threadParents) else { throw AppError.message("This conversation is read only or access changed.") }
         guard !ChannelPolicy.isArchived(channelID: channelID, channels: channels, threadParents: threadParents) else { throw OutboxTargetError.archived }
-        let accepted = try await store.acceptGIF(channelID: channelID, html: GIFMessage.html(for: item), replyTo: replyTo, sendSilently: sendSilently)
+        // Re-entrancy guard keyed by channel + body: two windows confirming
+        // the same GIF at once must not queue it twice, but a different GIF
+        // to the same channel may proceed.
+        let key = channelID + "\u{0}" + GIFMessage.html(for: item)
+        guard !acceptingGIFs.contains(key) else { throw AppError.message("This GIF is already being sent to this conversation.") }
+        acceptingGIFs.insert(key)
         notify()
-        if let demoWire { demoWire.deliver() } else { Task { await flush() } }
-        return accepted
+        func release() { acceptingGIFs.remove(key); notify() }
+        do {
+            let accepted = try await store.acceptGIF(channelID: channelID, html: GIFMessage.html(for: item), replyTo: replyTo, sendSilently: sendSilently)
+            notify()
+            if let demoWire {
+                release()
+                demoWire.deliver()
+            } else {
+                // Hold the guard until delivery finishes, so a staggered
+                // second confirm cannot queue the same GIF twice. The task's
+                // defer also covers cancellation; flush itself is bounded by
+                // the outbox machinery.
+                Task {
+                    defer { release() }
+                    await flush()
+                }
+            }
+            return accepted
+        } catch let error {
+            release()
+            throw error
+        }
     }
     /// Raven's idempotent send refuses a body without text, so a GIF goes
     /// through `send_message`, which has no client ID. A lost answer may
@@ -903,12 +949,35 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
                     fail(error); continue
                 }
             }
+            var firstVisitError: Error?
             for visit in try await store.visitSnapshots() {
                 let channel = visit.channelID, timestamp = visit.timestamp
                 if intentionallyUnread.contains(channel) { continue }
-                let result = try await client.rpc("raven.api.raven_channel_member.track_visit", arguments: ["channel_id": .string(channel), "last_visit": .string(timestamp)], mutation: true)
-                if result.bool { try await store.completeVisit(channelID: channel, timestamp: timestamp, generation: visit.generation) }
+                // A visit belongs to one conversation. One failed RPC must
+                // not abandon the remaining snapshots; leaving the snapshot
+                // pending lets a later flush retry it. A `false` result is a
+                // refusal and stays silent; the first thrown error still
+                // surfaces after the loop so connectivity and permission
+                // problems are not invisible.
+                let approved: Bool
+                do {
+                    approved = try await client.rpc("raven.api.raven_channel_member.track_visit", arguments: ["channel_id": .string(channel), "last_visit": .string(timestamp)], mutation: true).bool ?? false
+                } catch is CancellationError {
+                    return
+                } catch RavenError.transport {
+                    // A dead network would make every remaining visit wait
+                    // out its own timeout during a reconnect. Leave the
+                    // snapshots pending and let the next flush retry.
+                    throw RavenError.transport
+                } catch {
+                    if firstVisitError == nil { firstVisitError = error }
+                    continue
+                }
+                // A local persistence failure is session-level, not a refusal;
+                // leave it to the outer catch and fail().
+                if approved { try await store.completeVisit(channelID: channel, timestamp: timestamp, generation: visit.generation) }
             }
+            if let error = firstVisitError { throw error }
         } catch { fail(error) }
     }
     func cachedMessages(channelID: String, limit: Int = 500) async throws -> [RavenMessage] {
@@ -1022,7 +1091,7 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
                           let metadata = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
                           let width = metadata[kCGImagePropertyPixelWidth] as? Int, let height = metadata[kCGImagePropertyPixelHeight] as? Int,
                           width > 0, height > 0, width <= 20000, height <= 20000, width * height <= 40_000_000,
-                          let still = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 512, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { return nil }
+                          let still = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: Self.animatedPixelSide, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { return nil }
                     // Only an image with several frames keeps them all.
                     let animated = CGImageSourceGetCount(source) > 1 ? Self.decodeAnimated(data) : nil
                     return (still, animated)
@@ -1032,6 +1101,8 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
                       !ChannelPolicy.isRevoked(channelID: message.channelID, revoked: revokedChannels, threadParents: threadParents) else { return }
                 thumbnails[message.id] = NSImage(cgImage: still, size: NSSize(width: still.width, height: still.height)); thumbnailOrder.append(message.id)
                 while thumbnailOrder.count > 20 { thumbnails.removeValue(forKey: thumbnailOrder.removeFirst()) }
+                if pictureSizes.count >= Self.maximumPictureSizes { pictureSizes.removeAll() }
+                pictureSizes[message.id] = pictureBox(for: message)
                 if let animated, self.generation == generation {
                     let key = AnimatedImageKey.message(message.id)
                     animatedSources[key] = url
@@ -1042,8 +1113,8 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         }
     }
     nonisolated static let imageDownloadBytes = 32 * 1024 * 1024
-    /// Animated frames are decoded for the transcript's largest image, 320
-    /// points, on a Retina display.
+    /// Pictures and animated frames are decoded for the transcript's
+    /// largest image, 320 points, on a Retina display.
     nonisolated static let animatedPixelSide = 640
     nonisolated static func decodeAnimated(_ data: Data) -> AnimatedImage? {
         var limits = AnimatedImageDecoder.Limits.standard
@@ -1201,12 +1272,15 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
         guard !stopped, !Task.isCancelled, !(error is CancellationError) else { return }
         state = StatusLocalization.errorDescription(error); setStatusAttention(.accountAttention); notify()
     }
-    func stop() { stopped = true; home.cancel(); sentLinkPreviews.reset(); transcriptChannelState.removeAll(); clearMessageDocuments(); timestampEnvironmentObservation = nil; setStatusAttention(nil); threadParents.removeAll(); roles.removeAll(); unreadNotificationIDs.removeAll(); (NSApp.delegate as? AppDelegate)?.updateDockBadge(); pendingFileReceipts.removeAll(); userPreferences = nil; directory.removeAll(); userNames.removeAll(); activeUsers.removeAll(); workingHours = nil; thumbnails.removeAll(); forgetAnimatedImages(); avatars.removeAll(); generatedAvatars.removeAllObjects(); generatedChannelAvatars.removeAllObjects(); avatarLastUse.removeAll(); avatarQueue.removeAll(); avatarRequests.removeAll(); avatarWorker?.cancel(); memoryMessages.removeAll(); generation += 1; refreshTask?.cancel(); reconciliationTask?.cancel(); realtime?.disconnect(); realtime = nil }
+    func stop() { stopped = true; home.cancel(); sentLinkPreviews.reset(); transcriptChannelState.removeAll(); clearMessageDocuments(); timestampEnvironmentObservation = nil; setStatusAttention(nil); threadParents.removeAll(); roles.removeAll(); unreadNotificationIDs.removeAll(); (NSApp.delegate as? AppDelegate)?.updateDockBadge(); pendingFileReceipts.removeAll(); userPreferences = nil; directory.removeAll(); userNames.removeAll(); activeUsers.removeAll(); workingHours = nil; thumbnails.removeAll(); pictureSizes.removeAll(); forgetAnimatedImages(); avatars.removeAll(); generatedAvatars.removeAllObjects(); generatedChannelAvatars.removeAllObjects(); avatarLastUse.removeAll(); avatarQueue.removeAll(); avatarRequests.removeAll(); avatarWorker?.cancel(); memoryMessages.removeAll(); generation += 1; refreshTask?.cancel(); reconciliationTask?.cancel(); realtime?.disconnect(); realtime = nil; realtimeLive = false }
     private func shouldDeliverNotification(channelID: String) -> Bool {
-        guard !stopped, !revokedChannels.contains(channelID),
-              let channel = channels.first(where: { $0.id == channelID }),
-              !ChannelPolicy.isArchived(channelID: channelID, channels: channels, threadParents: threadParents), !channel.raw["muted"].bool,
-              channel.raw["allow_notifications"] == .null || channel.raw["allow_notifications"].bool else { return false }
+        // The policy gate is a pure function of the cached rows: revocation on
+        // the whole ancestry, and threads gated on their parent
+        // conversation's row (threads are synthesized locally and never
+        // listed in `channels`); an unknown non-thread still never notifies.
+        // This enables thread notifications for the first time: previously
+        // the channel-row lookup below failed for every thread ID.
+        guard !stopped, ChannelPolicy.shouldNotify(channelID: channelID, channels: channels, revoked: revokedChannels, threadParents: threadParents) else { return false }
         let controller = (NSApp.keyWindow?.windowController ?? NSApp.keyWindow?.sheetParent?.windowController) as? ConversationWindow
         let reading = NSApp.isActive && controller?.session === self && controller?.displaysConversation(channelID) == true
         return NotificationPolicy.shouldNotify(now: Date(), quietHours: NotificationPreferenceStore.quietHours(accountID: account.id), isForeground: reading, enabled: UserDefaults.standard.bool(forKey: "notifications"), muted: userPreferences?.availabilityStatus == "Do not disturb")
@@ -1218,7 +1292,8 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     /// without revealing anything.
     func notificationContent(for message: RavenMessage, level: NotificationPreview = .current()) -> UNMutableNotificationContent {
         let channelID = message.channelID
-        let channel = channels.first { $0.id == channelID }
+        // Threads are not in `channels`; show the top-most ancestor's row.
+        let channel = channels.first { $0.id == channelID } ?? channels.first { $0.id == ChannelPolicy.rootAncestor(of: channelID, threadParents: threadParents).id }
         let accountName = account.displayName.isEmpty ? account.user : account.displayName
         var text: String?
         if level == .message, !message.html.isEmpty, case .parsed(let document) = messageDocument(for: message) { text = RichTextCodec.plainText(document) }
@@ -1239,11 +1314,18 @@ private final class TimestampEnvironmentObservation: @unchecked Sendable {
     func deliverNotification(channelID: String) async {
         guard shouldDeliverNotification(channelID: channelID) else { return }
         do {
-            let result = try await client.rpc("raven.api.chat_stream.get_messages", arguments: ["channel_id": .string(channelID), "limit": .number(1), "update_last_visit": .bool(false)])
-            guard let raw = result["messages"].array.first else { return }
-            let message = RavenMessage(raw: raw)
+            // Read a small page, not one row: the newest row can be the
+            // reader's own (sent from another device after the incoming
+            // one), and skipping it must not drop the notification forever.
+            let result = try await client.rpc("raven.api.chat_stream.get_messages", arguments: ["channel_id": .string(channelID), "limit": .number(Double(Self.notificationPageLimit)), "update_last_visit": .bool(false)])
+            let page = result["messages"].array.map { RavenMessage(raw: $0) }
+            // Filter already-delivered and already-seen rows before picking
+            // the newest foreign one, so a delivered row cannot mask an
+            // un-notified one, and a message the reader has scrolled past
+            // (at or before lastSeen) is never surfaced again.
+            guard let message = NotificationPolicy.nextNotification(in: page, user: account.user, seen: lastSeen[channelID], notified: { notifiedIDs.contains($0) }) else { return }
             let notificationID = message.batchID ?? message.id
-            guard message.channelID == channelID, message.owner != account.user, !notifiedIDs.contains(notificationID), shouldDeliverNotification(channelID: channelID) else { return }
+            guard message.channelID == channelID, shouldDeliverNotification(channelID: channelID) else { return }
             // Claimed before the await, so a concurrent delivery for the same
             // batch stops at the check above.
             notifiedIDs.insert(notificationID)

@@ -180,7 +180,11 @@ extension ConversationWindow {
     static let shared = SavedSearchMenu()
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        // The key window is not always a conversation window (a collection
+        // window can be key); fall back to the active conversation window so
+        // the menu does not show "No Saved Searches" over one.
         let window = NSApp.keyWindow.flatMap { ($0 as? ConversationNativeWindow)?.conversation }
+            ?? (NSApp.delegate as? AppDelegate)?.activeConversationWindow
         let saved = window?.session.map { SavedSearchStore.load($0.account.id) } ?? []
         if saved.isEmpty {
             let empty = NSMenuItem(title: "No Saved Searches", action: nil, keyEquivalent: "")

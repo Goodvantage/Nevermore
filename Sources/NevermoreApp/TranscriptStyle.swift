@@ -17,6 +17,9 @@ extension NSAttributedString.Key {
     /// Replaces the run's text in copies, so a header showing "12:23"
     /// copies with its date.
     static let nevermoreCopyText = NSAttributedString.Key("Nevermore.CopyText")
+    /// On a picture: its file name, which a copy carries in its place.
+    /// Printouts keep the picture.
+    static let nevermorePictureName = NSAttributedString.Key("Nevermore.PictureName")
     /// A reply quote; the value is the color of the bar drawn beside it.
     static let nevermoreQuoteBar = NSAttributedString.Key("Nevermore.QuoteBar")
     static let nevermoreBodyQuote = NSAttributedString.Key("Nevermore.BodyQuote")
@@ -250,40 +253,6 @@ struct TranscriptMetrics: Equatable {
         return URL(string: "nevermore-attachment://message/\(id)")
     }
 
-    /// "[icon] report.pdf  Click for details, Space for Quick Look". The icon is a
-    /// reading control, so copying the transcript yields only the file name.
-    static func attachmentLine(filename: String, size: CGFloat, link: URL?) -> NSAttributedString {
-        let output = NSMutableAttributedString(string: "\n")
-        let icon = NSTextAttachment(); icon.image = fileIcon(for: (filename as NSString).pathExtension)
-        icon.bounds = NSRect(x: 0, y: -4, width: size + 4, height: size + 4)
-        let iconString = NSMutableAttributedString(attachment: icon)
-        iconString.append(NSAttributedString(string: " "))
-        iconString.addAttribute(.nevermoreReadingControl, value: true, range: NSRange(location: 0, length: iconString.length))
-        if let link { iconString.addAttribute(.link, value: link, range: NSRange(location: 0, length: iconString.length)) }
-        output.append(iconString)
-        var nameAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: size, weight: .medium), .foregroundColor: NSColor.themeLink]
-        if let link { nameAttributes[.link] = link }
-        output.append(NSAttributedString(string: filename, attributes: nameAttributes))
-        var hintAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: max(10, size - 3)), .foregroundColor: NSColor.themeTertiaryText, .nevermoreReadingControl: true]
-        if let link { hintAttributes[.link] = link }
-        output.append(NSAttributedString(string: "  Click for details, Space for Quick Look", attributes: hintAttributes))
-        return output
-    }
-
-    /// A staged file in a message that has not been sent yet: the name
-    /// alone, since there is nothing on the server to Quick Look.
-    static func pendingAttachmentLine(filename: String, size: CGFloat, first: Bool) -> NSAttributedString {
-        let output = NSMutableAttributedString(string: first ? "" : "\n")
-        let icon = NSTextAttachment(); icon.image = fileIcon(for: (filename as NSString).pathExtension)
-        icon.bounds = NSRect(x: 0, y: -4, width: size + 4, height: size + 4)
-        let iconString = NSMutableAttributedString(attachment: icon)
-        iconString.append(NSAttributedString(string: " "))
-        iconString.addAttribute(.nevermoreReadingControl, value: true, range: NSRange(location: 0, length: iconString.length))
-        output.append(iconString)
-        output.append(NSAttributedString(string: filename, attributes: [.font: NSFont.systemFont(ofSize: size, weight: .medium), .foregroundColor: NSColor.themeText]))
-        return output
-    }
-
     /// "Not sent · Needs review · reason", under a send the outbox cannot
     /// finish by itself. A reading control: it is not part of the message.
     static func pendingStatus(state: String, error: String?, metrics: TranscriptMetrics) -> NSAttributedString {
@@ -413,7 +382,10 @@ extension TranscriptView {
                 font = .monospacedDigitSystemFont(ofSize: size, weight: .regular)
             }
             let text = NSAttributedString(string: time, attributes: [.font: font, .foregroundColor: NSColor.themeTertiaryText])
-            text.draw(at: NSPoint(x: origin.x - 8 - text.size().width, y: baseline - font.ascender))
+            // Beside a picture or card that starts the message, at its top
+            // edge; on its baseline the time would sit at the picture's foot.
+            let top = AnimatedImageOverlay.attachmentFrame(at: location, layout: layout, origin: origin).map { $0.minY + 1 } ?? baseline - font.ascender
+            text.draw(at: NSPoint(x: origin.x - 8 - text.size().width, y: top))
         }
     }
 

@@ -129,8 +129,18 @@ enum EmojiSelection: Sendable { case unicode(String), custom(RavenCustomEmoji) }
                 if self.items.count >= 500 { self.status.stringValue += " Search by name to find more." }
             } catch {
                 guard !Task.isCancelled, request == self.generation, !self.finished else { return }
-                self.items.removeAll(); self.nextOffset = nil; self.table.reloadData()
-                self.status.stringValue = "Custom emoji could not be loaded. Try Refresh."
+                // A failed page never erases the pages before it: keep the
+                // items and leave nextOffset on the failed page, so Load
+                // More or Refresh retries exactly that page.
+                if reset && self.items.isEmpty {
+                    self.nextOffset = nil
+                    self.status.stringValue = "Custom emoji could not be loaded. Try Refresh."
+                } else if reset {
+                    self.status.stringValue = "The site could not be reached; showing \(self.items.count) cached custom emoji. Try Refresh."
+                } else {
+                    self.status.stringValue = "More custom emoji could not be loaded. Try Load More."
+                }
+                self.table.reloadData()
             }
         }
     }
@@ -156,7 +166,9 @@ enum EmojiSelection: Sendable { case unicode(String), custom(RavenCustomEmoji) }
         guard items.indices.contains(row) else { return nil }
         let item = items[row]
         let field = NSTextField(wrappingLabelWithString: "\(Self.shortcode(item))\n\(item.keywords.prefix(120))")
-        field.maximumNumberOfLines = 2; field.setAccessibilityLabel("Custom emoji \(Self.shortcode(item))"); return field
+        // The tooltip shows the uncapped keywords: the label slices them at
+        // 120 characters, and hover is the only way to read the rest.
+        field.maximumNumberOfLines = 2; field.lineBreakMode = .byTruncatingTail; field.toolTip = "\(Self.shortcode(item))\n\(item.keywords)"; field.setAccessibilityLabel("Custom emoji \(Self.shortcode(item))"); return field
     }
     static func shortcode(_ item: RavenCustomEmoji) -> String { item.name.hasPrefix(":") && item.name.hasSuffix(":") ? item.name : ":\(item.name):" }
     @objc private func accept() {

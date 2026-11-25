@@ -47,12 +47,33 @@ public enum MemberRoster {
     /// Case- and diacritic-insensitive search over the display name, user ID
     /// and membership document name. The input order is preserved.
     public static func filtered(_ entries: [MemberRosterEntry], query: String) -> [MemberRosterEntry] {
-        let text = fold(query).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return entries }
-        let words = text.split(whereSeparator: \.isWhitespace).map(String.init)
-        return entries.filter { entry in
-            let haystack = fold([entry.displayName, entry.userID, entry.memberID ?? ""].joined(separator: " "))
-            return words.allSatisfy(haystack.contains)
+        SearchIndex(entries: entries).filtered(query: query)
+    }
+
+    /// A roster prepared for repeated filtering: each entry's folded
+    /// haystack is computed once in `init`, not on every keystroke.
+    /// Building the index folds every entry once (O(roster)); each
+    /// `filtered(query:)` call then costs O(entries × words × haystack).
+    public struct SearchIndex: Sendable {
+        private let indexed: [(entry: MemberRosterEntry, haystack: String)]
+        private let allEntries: [MemberRosterEntry]
+
+        public init(entries: [MemberRosterEntry]) {
+            self.indexed = entries.map { ($0, fold([$0.displayName, $0.userID, $0.memberID ?? ""].joined(separator: " "))) }
+            self.allEntries = entries
+        }
+
+        public var all: [MemberRosterEntry] { allEntries }
+
+        /// Case- and diacritic-insensitive search; an empty query returns the
+        /// whole roster. The input order is preserved.
+        public func filtered(query: String) -> [MemberRosterEntry] {
+            let text = fold(query).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return all }
+            let words = text.split(whereSeparator: \.isWhitespace).map(String.init)
+            return indexed.compactMap { entry, haystack in
+                words.allSatisfy(haystack.contains) ? entry : nil
+            }
         }
     }
 

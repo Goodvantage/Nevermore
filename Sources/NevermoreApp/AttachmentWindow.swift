@@ -27,6 +27,8 @@ enum AttachmentPresentation {
     private(set) var savePanel: NSSavePanel?
     private let reveal = NSButton(title: "Reveal Saved File", target: nil, action: nil)
     private let openWith = NSPopUpButton()
+    /// Reveal/Open-With only make sense once a copy is saved; hidden until then.
+    private let savedActions = NSStackView()
     private let detail = NSTextField(wrappingLabelWithString: "")
     private var closed = false
     private var exporting = false
@@ -60,7 +62,7 @@ enum AttachmentPresentation {
         reveal.target = self; reveal.action = #selector(revealSavedFile); reveal.isEnabled = false
         openWith.addItem(withTitle: "Open Saved File With…"); openWith.target = self; openWith.action = #selector(openSavedFile); openWith.isEnabled = false
         let actions = NSStackView(views: [preview, save, share, copy]); actions.spacing = 8
-        let savedActions = NSStackView(views: [reveal, openWith]); savedActions.spacing = 8
+        savedActions.setViews([reveal, openWith], in: .leading); savedActions.spacing = 8; savedActions.isHidden = true
         detail.stringValue = ByteCountFormatter.string(fromByteCount: Int64(attachment.byteCount), countStyle: .file) + (previewKind == .unsupported ? " · Preview unavailable for this file type. Save it to use another app." : " · Drag the file to export a copy.")
         detail.textColor = .secondaryLabelColor
         let stack = NSStackView(views: [drag, detail, actions, savedActions]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 16; stack.translatesAutoresizingMaskIntoConstraints = false
@@ -134,7 +136,7 @@ enum AttachmentPresentation {
         savePanel = panel
         do {
             guard let target = try await AttachmentExport.saveCopy(of: attachment, using: panel, over: parent, isCurrent: { [weak self] in self.map { !$0.closed && $0.active() } ?? false }) else { return nil }
-            savedURL = target; reveal.isEnabled = true
+            savedURL = target; reveal.isEnabled = true; savedActions.isHidden = false
             openWith.removeAllItems(); openWith.addItem(withTitle: "Open Saved File With…")
             if previewKind != .unsupported { for item in AttachmentExport.openWithItems(for: target) { openWith.menu?.addItem(item) } }
             openWith.isEnabled = openWith.numberOfItems > 1

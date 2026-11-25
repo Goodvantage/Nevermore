@@ -168,6 +168,30 @@ import RavenProtocol
 
         // Saved searches live in the side column while nothing is selected.
         try SavedSearchStore.save([SavedSearch(title: "Launch", criteria: criteria)], account: account.id)
+        // One entry with an unknown kind must not discard the valid ones.
+        var broken = (try JSONSerialization.jsonObject(with: JSONEncoder().encode(SavedSearch(title: "Broken", criteria: criteria)))) as? [String: Any] ?? [:]
+        var brokenCriteria = broken["criteria"] as? [String: Any] ?? [:]
+        brokenCriteria["kind"] = "future-kind"
+        broken["criteria"] = brokenCriteria
+        let valid = (try JSONSerialization.jsonObject(with: JSONEncoder().encode(SavedSearch(title: "Launch", criteria: criteria)))) as? [String: Any] ?? [:]
+        let seededKey = "savedSearches.\(account.id.uuidString)"
+        // Restore the pre-seed state even if a check throws mid-block, so an
+        // interrupted run cannot leave fixture data persisted for the account.
+        defer { try? SavedSearchStore.save([SavedSearch(title: "Launch", criteria: criteria)], account: account.id) }
+        // The broken entry alone must decode to nothing, so the mixed check
+        // below cannot pass without exercising the per-entry decoder.
+        UserDefaults.standard.set(try JSONSerialization.data(withJSONObject: [broken]), forKey: seededKey)
+        results.append(("an undecodable saved search is skipped", SavedSearchStore.load(account.id).isEmpty))
+        UserDefaults.standard.set(try JSONSerialization.data(withJSONObject: [broken, valid]), forKey: seededKey)
+        let loaded = SavedSearchStore.load(account.id)
+        results.append(("an undecodable saved search does not discard the valid ones", loaded.count == 1 && loaded.first?.title == "Launch"))
+        // A list written by a newer version with a larger limit keeps its
+        // first entries instead of reading as empty.
+        let many = (try JSONSerialization.jsonObject(with: JSONEncoder().encode((0..<(SavedSearchStore.limit + 5)).map { SavedSearch(title: "S\($0)", criteria: criteria) }))) as? [Any] ?? []
+        UserDefaults.standard.set(try JSONSerialization.data(withJSONObject: many), forKey: seededKey)
+        let capped = SavedSearchStore.load(account.id)
+        results.append(("an over-limit stored list keeps its first entries", capped.count == SavedSearchStore.limit && capped.first?.title == "S0"))
+        try SavedSearchStore.save([SavedSearch(title: "Launch", criteria: criteria)], account: account.id)
         view.table.deselectAll(nil)
         view.reloadSide()
         let savedRows = InteractionSelfChecks.descendants(view.side, of: HomeRow.self).compactMap { $0.accessibilityLabel() }
@@ -184,6 +208,30 @@ import RavenProtocol
         results.append(("the Conversations tab counts only the conversations it lists", view.items.isEmpty && view.tabs.label(forSegment: conversationsTab) == "Conversations 0"))
         session.revokedChannels.remove("design")
         view.select(tab: .messages)
+
+        // A Files kind must not survive a switch to the local Conversations
+        // tab: the local tabs search the Messages kind, and a leftover kind
+        // would show a filter and be saved with the search.
+        var images = view.criteria
+        images.query = "handbook"
+        images.kind = .images
+        controller.showSearch(images, immediately: true)
+        try await settle()
+        view.select(tab: .conversations)
+        results.append(("switching to Conversations clears a Files kind but keeps the query", view.criteria.kind == .all && !view.criteria.hasFilters && view.criteria.query == "handbook"))
+        view.select(tab: .messages)
+        try await settle()
+
+        // People is a local tab too: a Links kind must clear there as well.
+        var links = view.criteria
+        links.query = "handbook"
+        links.kind = .links
+        controller.showSearch(links, immediately: true)
+        try await settle()
+        view.select(tab: .people)
+        results.append(("switching to People clears a Links kind but keeps the query", view.criteria.kind == .all && !view.criteria.hasFilters && view.criteria.query == "handbook"))
+        view.select(tab: .messages)
+        try await settle()
 
         // A link whose message was deleted goes, as messages and files do.
         var linked = SearchFeed.Results()

@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import OSLog
 import RavenProtocol
 import SwiftSoup
 #if canImport(Darwin)
@@ -81,6 +82,14 @@ public struct SendOperation: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// The chronological position of a cached message, used to read the page
+/// before it without loading a whole channel window.
+public struct MessageBoundary: Sendable, Hashable {
+    public let creation: String
+    public let id: String
+    public init(creation: String, id: String) { self.creation = creation; self.id = id }
+}
+
 // MARK: - Errors
 
 public enum StoreError: Error, Sendable, Equatable {
@@ -93,6 +102,8 @@ public enum StoreError: Error, Sendable, Equatable {
     case immutableFieldChanged(String)
     case invalidAcknowledgement(String)
     case sourceNotReadable(URL)
+    /// The room still available for the next attachment at refusal time:
+    /// never negative, and never larger than the per-file allowance (64 MiB).
     case stagingBudgetExceeded(Int64)
 }
 
@@ -156,7 +167,7 @@ public actor AccountStore {
         self.maxStagingBytes = Self.defaultMaxStagingBytes
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         let staging = directory.appendingPathComponent(Self.stagingDirectoryName, isDirectory: true)
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: staging.path)
@@ -254,12 +265,20 @@ public actor AccountStore {
             let affected = try Data.fetchCursor(db, sql: "SELECT payload FROM operations WHERE state IN ('queued', 'retryable') AND attempts > 0")
             var uncertain: [SendOperation] = []
             while let payload = try affected.next() {
-                var operation = try Self.decode(SendOperation.self, from: payload)
-                if operation.isGIF {
-                    operation.state = .needsReview
-                    operation.error = StatusLocalization.text(.outboxGifReview)
-                    uncertain.append(operation)
+                // One undecodable payload must not abort the migration — and
+                // with it the store's open. The row keeps its original state
+                // and payload: rewriting a row we cannot decode would guess at
+                // its contents, and leaving it queued/retryable is the safe
+                // failure mode (the outbox can still surface it for review).
+                guard let decoded = try? Self.decode(SendOperation.self, from: payload) else {
+                    Self.logger.warning("Skipping undecodable operations payload during v3 GIF-retry migration; row left untouched")
+                    continue
                 }
+                guard decoded.isGIF else { continue }
+                var operation = decoded
+                operation.state = .needsReview
+                operation.error = StatusLocalization.text(.outboxGifReview)
+                uncertain.append(operation)
             }
             for operation in uncertain { try Self.replaceOperation(db, operation) }
         }
@@ -330,11 +349,17 @@ public actor AccountStore {
         return operation
     }
 
-    /// All non-terminal operations (excludes acknowledged and cancelled).
+    /// Non-terminal operations, optionally scoped to a channel before decoding.
     /// Terminal rows are retained durably; they are simply not pending work.
-    public func operations() async throws -> [SendOperation] {
+    public func operations(channelID: String? = nil) async throws -> [SendOperation] {
         try await queue.read { db in
-            let rows = try Data.fetchAll(db, sql: "SELECT payload FROM operations WHERE state NOT IN ('acknowledged', 'cancelled') ORDER BY createdAt, id")
+            var query: SQL = "SELECT payload FROM operations WHERE state NOT IN ('acknowledged', 'cancelled')"
+            if let channelID {
+                // Match channel IDs as Swift String equality did at the call site.
+                query += " AND channelID = \(channelID) COLLATE swiftCompare"
+            }
+            query += " ORDER BY createdAt, id"
+            let rows = try SQLRequest<Data>(literal: query).fetchAll(db)
             return try rows.map { try Self.decode(SendOperation.self, from: $0) }
         }
     }
@@ -533,7 +558,15 @@ public actor AccountStore {
         try await queue.write { db in
             let rows = try Data.fetchAll(db, sql: "SELECT payload FROM operations WHERE state IN ('uploading', 'sending')")
             for data in rows {
-                var operation = try Self.decode(SendOperation.self, from: data)
+                // Skip a payload that no longer decodes instead of failing the
+                // whole recovery — and the account's start — on one bad row.
+                // The row keeps its interrupted state: it cannot be resumed
+                // safely without its payload, and operations() will keep
+                // refusing to surface it rather than showing a half-empty op.
+                guard var operation = try? Self.decode(SendOperation.self, from: data) else {
+                    Self.logger.warning("Skipping undecodable operations payload during interrupted-operation recovery; row left untouched")
+                    continue
+                }
                 if operation.state == .sending && operation.isGIF {
                     operation.state = .needsReview
                     operation.error = StatusLocalization.text(.outboxGifReview)
@@ -550,19 +583,35 @@ public actor AccountStore {
     public func cacheMessages(_ messages: [RavenMessage]) async throws {
         guard !messages.isEmpty else { return }
         try await queue.write { db in
-            for message in messages { try Self.upsertMessage(db, message) }
-            try Self.trimMessages(db)
+            var changed = 0
+            for message in messages {
+                if try Self.upsertMessage(db, message) { changed += 1 }
+            }
+            // Reconciliation re-reads the newest page on every pass. The
+            // bounds can only be exceeded by an inserted or changed row, so
+            // an unchanged page skips both the index work and the trim.
+            if changed > 0 { try Self.trimMessages(db) }
         }
     }
 
     /// Cached messages for a channel in chronological order (oldest first).
-    public func messages(channelID: String, limit: Int = 500) async throws -> [RavenMessage] {
+    /// When `before` is set, only messages that sort before that boundary are
+    /// considered, which lets a caller fetch the page above its oldest row.
+    public func messages(channelID: String, limit: Int = 500, before boundary: MessageBoundary? = nil) async throws -> [RavenMessage] {
         let bounded = max(1, min(limit, Self.maxMessagesQueryLimit))
         return try await queue.read { db in
-            let rows = try Data.fetchAll(
-                db,
-                sql: "SELECT raw FROM messages WHERE channelID = ? ORDER BY creation DESC, id DESC LIMIT ?",
-                arguments: [channelID, bounded])
+            let rows: [Data]
+            if let boundary {
+                rows = try Data.fetchAll(
+                    db,
+                    sql: "SELECT raw FROM messages WHERE channelID = ? AND (creation, id) < (?, ?) ORDER BY creation DESC, id DESC LIMIT ?",
+                    arguments: [channelID, boundary.creation, boundary.id, bounded])
+            } else {
+                rows = try Data.fetchAll(
+                    db,
+                    sql: "SELECT raw FROM messages WHERE channelID = ? ORDER BY creation DESC, id DESC LIMIT ?",
+                    arguments: [channelID, bounded])
+            }
             return try rows.reversed().map { try Self.decode(RavenMessage.self, from: $0) }
         }
     }
@@ -611,7 +660,6 @@ public actor AccountStore {
         try await queue.write { db in
             try db.execute(sql: "DELETE FROM messages")
             try db.execute(sql: "DELETE FROM messages_fts")
-            try db.execute(sql: "DELETE FROM projections")
         }
     }
 
@@ -671,6 +719,12 @@ public actor AccountStore {
                 sql: "DELETE FROM messages_fts WHERE id IN (SELECT id FROM messages WHERE channelID IN (\(marks)))",
                 arguments: StatementArguments(chunk))
             try db.execute(sql: "DELETE FROM messages WHERE channelID IN (\(marks))", arguments: StatementArguments(chunk))
+            // A read receipt queued for a channel whose history is withdrawn
+            // can never be applied: the server refuses it until membership
+            // returns. Keeping it makes every flush retry the refused visit
+            // (and, with the current flush loop, skip the receipts queued
+            // after it).
+            try db.execute(sql: "DELETE FROM visits WHERE channelID IN (\(marks))", arguments: StatementArguments(chunk))
         }
     }
 
@@ -687,8 +741,13 @@ public actor AccountStore {
             guard let attributes = try? fm.attributesOfItem(atPath: source.path) else { throw StoreError.sourceNotReadable(file) }
             guard attributes[.type] as? FileAttributeType == .typeRegular, let size = attributes[.size] as? NSNumber else { throw StoreError.sourceNotReadable(file) }
             let total = try Int64.fetchOne(db, sql: "SELECT COALESCE(SUM(size), 0) FROM staging") ?? 0
+            // Report the room this file actually had, not the global budget:
+            // once earlier staging consumes part of the allowance, a file can
+            // be refused by the remaining bytes alone. Negative room means the
+            // allowance is spent; refuse every file, even an empty one, and
+            // report the clamped value.
             let limit = min(64 * 1024 * 1024, budget - total)
-            guard size.int64Value <= limit else { throw StoreError.stagingBudgetExceeded(min(budget, 64 * 1024 * 1024)) }
+            guard size.int64Value <= limit else { throw StoreError.stagingBudgetExceeded(max(0, limit)) }
             let id = UUID(), destination = destinationDirectory.appendingPathComponent(UUID().uuidString)
             do {
                 guard fm.createFile(atPath: destination.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { throw StoreError.sourceNotReadable(file) }
@@ -697,7 +756,7 @@ public actor AccountStore {
                 var copied: Int64 = 0
                 while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
                     copied += Int64(chunk.count)
-                    guard copied <= limit else { throw StoreError.stagingBudgetExceeded(min(budget, 64 * 1024 * 1024)) }
+                    guard copied <= limit else { throw StoreError.stagingBudgetExceeded(max(0, limit)) }
                     try output.write(contentsOf: chunk)
                 }
                 try output.synchronize()
@@ -807,8 +866,15 @@ public actor AccountStore {
 
     // MARK: Internals
 
+    private static let logger = Logger(subsystem: "ch.goodvantage.Nevermore", category: "store")
+
     private static func encode<T: Encodable>(_ value: T) throws -> Data {
-        try JSONEncoder().encode(value)
+        // Canonical key order. `messages.raw` is compared byte for byte by the
+        // conditional upsert below, so the same content must encode to the
+        // same bytes; Swift Dictionary order is not stable enough for that.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(value)
     }
 
     private static func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -829,13 +895,25 @@ public actor AccountStore {
             arguments: [operation.channelID, operation.state.rawValue, operation.createdAt.timeIntervalSince1970, operation.attempts, payload, operation.id.uuidString])
     }
 
-    private static func upsertMessage(_ db: Database, _ message: RavenMessage) throws {
+    /// Inserts or updates a cached message. Returns false when the stored row
+    /// already held exactly this payload, in which case the full-text row is
+    /// left untouched; re-indexing parses the HTML again and rewrites an FTS
+    /// row for no new content.
+    @discardableResult
+    private static func upsertMessage(_ db: Database, _ message: RavenMessage) throws -> Bool {
         let raw = try encode(message)
         try db.execute(
-            sql: "INSERT INTO messages(id, channelID, creation, owner, raw) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET channelID = excluded.channelID, creation = excluded.creation, owner = excluded.owner, raw = excluded.raw",
+            sql: """
+            INSERT INTO messages(id, channelID, creation, owner, raw) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET channelID = excluded.channelID, creation = excluded.creation,
+                owner = excluded.owner, raw = excluded.raw
+            WHERE messages.raw IS NOT excluded.raw
+            """,
             arguments: [message.id, message.channelID, message.creation, message.owner, raw])
+        guard db.changesCount > 0 else { return false }
         try db.execute(sql: "DELETE FROM messages_fts WHERE id = ?", arguments: [message.id])
         try db.execute(sql: "INSERT INTO messages_fts(id, body) VALUES (?, ?)", arguments: [message.id, searchText(for: message)])
+        return true
     }
 
     /// Plain-text index body for a message with spoiler contents masked out.

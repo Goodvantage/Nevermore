@@ -28,4 +28,12 @@ public enum AttachmentDetails {
     }
 
     public static func dimensionsText(width: Int, height: Int) -> String { "\(width) × \(height) pixels" }
+
+    /// The line under a file's name in the transcript: its kind, then its
+    /// size when the server reported one, such as "PDF document · 2.4 MB".
+    public static func summary(filename: String, byteCount: Int64?) -> String {
+        let kind = kind(filename: filename, mimeType: nil)
+        guard let byteCount, byteCount > 0 else { return kind }
+        return "\(kind) · \(ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file))"
+    }
 }

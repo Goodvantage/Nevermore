@@ -27,6 +27,38 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(deleted)
     }
 
+    func testPendingOperationsReadOnlyTheRequestedChannel() async throws {
+        let directory = track(makeStoreDirectory())
+        let store = try AccountStore(directory: directory)
+        let channel = "caf\u{e9}"
+        let equivalentChannel = "cafe\u{301}"
+
+        func accept(in channelID: String) async throws -> SendOperation {
+            try await store.saveDraft(Draft(channelID: channelID, html: "<p>Test</p>"))
+            return try await store.acceptDraft(channelID: channelID)
+        }
+
+        let queued = try await accept(in: channel)
+        let other = try await accept(in: "other")
+        var retryable = try await accept(in: channel)
+        retryable.state = .retryable
+        _ = try await store.updateOperation(retryable)
+        let cancelled = try await accept(in: channel)
+        _ = try await store.takeBack(id: cancelled.id)
+
+        let database = try openDB(directory)
+        try await database.write { db in
+            try db.execute(sql: "UPDATE operations SET payload = X'00' WHERE id = ?", arguments: [other.id.uuidString])
+            XCTAssertEqual(db.changesCount, 1)
+        }
+
+        let operations = try await store.operations(channelID: equivalentChannel)
+        let expected = [queued, retryable].sorted {
+            ($0.createdAt.timeIntervalSince1970, $0.id.uuidString) < ($1.createdAt.timeIntervalSince1970, $1.id.uuidString)
+        }
+        XCTAssertEqual(operations, expected)
+    }
+
     // MARK: Helpers
 
     private func makeStoreDirectory() -> URL {
@@ -180,6 +212,17 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try posixPermissions(dir.appendingPathComponent(AccountStore.databaseFileName)), 0o600)
         let error = await captureError { try AccountStore(directory: dir) }
         XCTAssertEqual(error as? StoreError, .directoryInUse(dir))
+        _ = store
+    }
+
+    func testExistingAccountDirectoryIsMadePrivateBeforeOpening() throws {
+        let dir = track(makeStoreDirectory())
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+
+        let store = try AccountStore(directory: dir)
+
+        XCTAssertEqual(try posixPermissions(dir), 0o700)
         _ = store
     }
 
@@ -357,6 +400,65 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(byID[queuedOp.id]?.attempts, 0)
     }
 
+    func testRecoverInterruptedOperationsSkipsOneUndecodablePayload() async throws {
+        let dir = track(makeStoreDirectory())
+        var store: AccountStore? = try AccountStore(directory: dir)
+        try await store!.saveDraft(Draft(channelID: "c", html: "<p>good</p>"))
+        let goodOp = try await store!.acceptDraft(channelID: "c")
+        var good = goodOp
+        good.state = .uploading
+        try await store!.updateOperation(good)
+        try await store!.saveDraft(Draft(channelID: "c", html: "<p>bad</p>"))
+        let badOp = try await store!.acceptDraft(channelID: "c")
+        var bad = badOp
+        bad.state = .sending
+        try await store!.updateOperation(bad)
+
+        // Corrupt one row's payload directly; recovery must not fail on it.
+        let db = try openDB(dir)
+        try await db.write { try $0.execute(sql: "UPDATE operations SET payload = ? WHERE id = ?", arguments: [Data("not json".utf8), badOp.id.uuidString]) }
+        store = nil
+
+        let reopened = try reopen(directory: dir)
+        try await reopened.recoverInterruptedOperations()
+        // Assert through SQL: operations() rightly refuses the corrupt row.
+        let goodState = try await fetchStrings(db, "SELECT state FROM operations WHERE id = '\(goodOp.id)'")
+        XCTAssertEqual(goodState, ["retryable"])
+        // The undecodable row is left exactly as it was, not dropped or rewritten.
+        let badState = try await fetchStrings(db, "SELECT state FROM operations WHERE id = '\(badOp.id)'")
+        XCTAssertEqual(badState, ["sending"])
+    }
+
+    func testGIFRetryMigrationSkipsOneUndecodablePayload() async throws {
+        let directory = track(makeStoreDirectory())
+        var store: AccountStore? = try AccountStore(directory: directory)
+        let html = #"<p><img src="https://media.tenor.com/a/b.gif"></p>"#
+        var gif = try await store!.acceptGIF(channelID: "c", html: html)
+        gif.state = .retryable
+        gif.attempts = 1
+        try await store!.updateOperation(gif)
+        try await store!.saveDraft(Draft(channelID: "c", html: "<p>plain</p>"))
+        let plainOp = try await store!.acceptDraft(channelID: "c")
+        var plain = plainOp
+        plain.state = .queued
+        plain.attempts = 1
+        try await store!.updateOperation(plain)
+
+        let db = try openDB(directory)
+        try await db.write { try $0.execute(sql: "UPDATE operations SET payload = ? WHERE id = ?", arguments: [Data("garbage".utf8), plainOp.id.uuidString]) }
+        try await db.write { try $0.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v3_review_legacy_gif_retries'") }
+        store = nil
+
+        // The migration must complete despite the corrupt row.
+        _ = try reopen(directory: directory)
+        // Assert through SQL: operations() rightly refuses the corrupt row.
+        let gifState = try await fetchStrings(db, "SELECT state FROM operations WHERE id = '\(gif.id)'")
+        XCTAssertEqual(gifState, ["needsReview"])
+        // The undecodable row is left untouched (still queued, not needsReview).
+        let plainState = try await fetchStrings(db, "SELECT state FROM operations WHERE id = '\(plainOp.id)'")
+        XCTAssertEqual(plainState, ["queued"])
+    }
+
     func testRestartPreservesAllDurableState() async throws {
         let dir = track(makeStoreDirectory())
         let src = try makeSourceFile(contents: "staged-payload")
@@ -423,6 +525,31 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(Set(results.map(\.id)).isSubset(of: Set(cached.map(\.id))))
     }
 
+    func testMessagesBeforeBoundaryReadsTheOlderPage() async throws {
+        let store = try AccountStore(directory: track(makeStoreDirectory()))
+        var batch: [RavenMessage] = []
+        for i in 0..<10 {
+            batch.append(makeMessage(id: String(format: "b%02d", i), channel: "c", creation: creation(i), text: "<p>msg \(i)</p>"))
+        }
+        try await store.cacheMessages(batch)
+
+        let newest = try await store.messages(channelID: "c", limit: 4)
+        XCTAssertEqual(newest.map(\.id), ["b06", "b07", "b08", "b09"])
+        let boundary = MessageBoundary(creation: newest.first!.creation, id: newest.first!.id)
+        let older = try await store.messages(channelID: "c", limit: 4, before: boundary)
+        XCTAssertEqual(older.map(\.id), ["b02", "b03", "b04", "b05"])
+
+        // Equal creations order by ascending id, so the boundary excludes
+        // the row itself without dropping its identical-timestamp sibling.
+        try await store.cacheMessages([
+            makeMessage(id: "same-a", channel: "tie", creation: "2026-11-07 10:00:00.000000", text: "<p>a</p>"),
+            makeMessage(id: "same-b", channel: "tie", creation: "2026-11-07 10:00:00.000000", text: "<p>b</p>"),
+        ])
+        let tied = try await store.messages(channelID: "tie", limit: 1,
+                                            before: MessageBoundary(creation: "2026-11-07 10:00:00.000000", id: "same-b"))
+        XCTAssertEqual(tied.map(\.id), ["same-a"])
+    }
+
     func testDeleteMessagesRemovesCacheAndIndexRows() async throws {
         let dir = track(makeStoreDirectory())
         let store = try AccountStore(directory: dir)
@@ -479,15 +606,59 @@ final class StoreTests: XCTestCase {
         await XCTAssertEqualA(try await fetchInt64(q, "SELECT COUNT(*) FROM staging"), 1)
 
         // Budget: staging beyond maxStagingBytes throws and stages nothing.
+        // The staging area already holds 20 bytes, so the applied limit is 0.
         await store.setMaxStagingBytes(10)
         let budgetError = await captureError { try await store.stage(file: src) }
-        XCTAssertEqual(budgetError as? StoreError, .stagingBudgetExceeded(10))
+        XCTAssertEqual(budgetError as? StoreError, .stagingBudgetExceeded(0))
         await XCTAssertEqualA(try await fetchInt64(q, "SELECT COUNT(*) FROM staging"), 1)
+
+        // A file refused by the remaining room reports that room, not the
+        // whole budget: 20 bytes are staged, 30 are allowed, 20 more arrive.
+        await store.setMaxStagingBytes(30)
+        let roomError = await captureError { try await store.stage(file: src) }
+        XCTAssertEqual(roomError as? StoreError, .stagingBudgetExceeded(10))
+        await XCTAssertEqualA(try await fetchInt64(q, "SELECT COUNT(*) FROM staging"), 1)
+
+        // A file that exactly fills the remaining room is accepted: the
+        // check is <=, not <. With 20 bytes staged and 40 allowed, the
+        // 20-byte source fits precisely.
+        await store.setMaxStagingBytes(40)
+        try await store.stage(file: src)
+        await XCTAssertEqualA(try await fetchInt64(q, "SELECT COUNT(*) FROM staging"), 2)
 
         // Missing sources are rejected.
         let missing = dir.appendingPathComponent("no-such-file")
         let missingError = await captureError { try await store.stage(file: missing) }
         XCTAssertEqual(missingError as? StoreError, .sourceNotReadable(missing))
+    }
+
+    func testRecachingAnUnchangedPageLeavesItsIndexRowsAlone() async throws {
+        let dir = track(makeStoreDirectory())
+        let store = try AccountStore(directory: dir)
+        let q = try openDB(dir)
+        func indexRowIDs() async throws -> [Int64] {
+            try await q.read { db in try Int64.fetchAll(db, sql: "SELECT rowid FROM messages_fts WHERE id LIKE 'm%' ORDER BY id") }
+        }
+        let page = (0..<5).map { makeMessage(id: "m\($0)", channel: "c", creation: creation($0), text: "<p>Row \($0)</p>") }
+
+        try await store.cacheMessages(page)
+        let firstIndex = try await indexRowIDs()
+        XCTAssertEqual(firstIndex.count, 5)
+
+        // Reconciliation re-reads the newest page on every pass. An unchanged
+        // row must not be re-encoded, re-parsed and re-indexed.
+        try await store.cacheMessages(page)
+        let secondIndex = try await indexRowIDs()
+        XCTAssertEqual(secondIndex, firstIndex)
+
+        // An edited message is re-indexed and searchable by its new text.
+        var edited = page
+        edited[2] = makeMessage(id: "m2", channel: "c", creation: creation(2), text: "<p>Row two changed</p>")
+        try await store.cacheMessages(edited)
+        let thirdIndex = try await indexRowIDs()
+        XCTAssertEqual(thirdIndex.count, 5)
+        let hits = try await store.search("changed")
+        XCTAssertEqual(hits.map(\.id), ["m2"])
     }
 
     // MARK: Watermarks and mark-unread generation guard
@@ -544,6 +715,26 @@ final class StoreTests: XCTestCase {
         await XCTAssertEqualA(try await fetchInt64(q, "SELECT generation FROM unread_generations WHERE channelID = 'c'"), 2)
     }
 
+    func testWithdrawnChannelsDropTheirQueuedReadReceipts() async throws {
+        let store = try AccountStore(directory: track(makeStoreDirectory()))
+        try await store.pendingVisit(channelID: "kept", timestamp: "2026-11-07 10:01:00.000000")
+
+        // A channel whose access is revoked and whose history is withdrawn.
+        try await store.pendingVisit(channelID: "gone", timestamp: "2026-11-07 10:00:00.000000")
+        try await store.withdrawHistory(channelIDs: ["gone"])
+        var visits = try await store.visits()
+        XCTAssertNil(visits["gone"])
+        XCTAssertEqual(visits["kept"], "2026-11-07 10:01:00.000000")
+
+        // A channel removed from the channel list is withdrawn the same way.
+        try await store.pendingVisit(channelID: "revoked", timestamp: "2026-11-07 10:02:00.000000")
+        try await store.cacheChannels([makeChannel(id: "revoked", title: "Revoked")])
+        try await store.removeRevokedChannels(allowed: [])
+        visits = try await store.visits()
+        XCTAssertNil(visits["revoked"])
+        XCTAssertEqual(visits["kept"], "2026-11-07 10:01:00.000000")
+    }
+
     // MARK: Channels, revoked access, projections, clear history
 
     func testCollectionCacheEvictsOldSnapshotsWithoutTouchingDrafts() async throws {
@@ -590,7 +781,7 @@ final class StoreTests: XCTestCase {
         await XCTAssertEqualA(try await store.operations().map(\.id), [op.id])
     }
 
-    func testClearHistoryPreservesUnsentWorkAndClearsReceivedProjections() async throws {
+    func testClearHistoryPreservesUnsentWorkAndProjections() async throws {
         let dir = track(makeStoreDirectory())
         let store = try AccountStore(directory: dir)
         try await store.cacheChannels([makeChannel(id: "c1", title: "Alpha")])
@@ -608,7 +799,8 @@ final class StoreTests: XCTestCase {
         await XCTAssertEqualA(try await store.operations().map(\.id), [op.id])
         await XCTAssertEqualA(try await store.visits(), ["c1": "t1"])
         await XCTAssertEqualA(try await store.channels().map(\.id), ["c1"])
-        await XCTAssertTrueA(try await store.projection(key: "k") == nil)
+        // The documented contract: projections survive clearing history.
+        await XCTAssertEqualA(try await store.projection(key: "k"), .string("v"))
     }
 
     func testOutboxIsNeverAgeDeleted() async throws {

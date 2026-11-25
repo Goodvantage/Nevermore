@@ -12,7 +12,14 @@ import AppKit
     @objc func performFormatting(_ sender: NSMenuItem) {
         guard let command = ComposerFormattingBar.Command(rawValue: sender.tag) else { return }
         if let owner = sourceOwner { owner.inlineComposer.format(command) }
-        else { NSApp.sendAction(command.selector, to: nil, from: sender) }
+        else if NSApp.sendAction(command.selector, to: nil, from: sender) {
+            // A caret-only format changes the typing attributes, not the
+            // selection, so no selection notification refreshes the toolbar.
+            // sendAction applies the handler synchronously, so the refresh
+            // below already sees the new typing attributes — and only runs
+            // when something in the responder chain actually handled it.
+            (NSApp.keyWindow?.windowController as? ConversationWindow)?.composerFormatting.updateSelection()
+        }
     }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let command = ComposerFormattingBar.Command(rawValue: item.tag) else { return false }

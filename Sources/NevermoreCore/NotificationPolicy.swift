@@ -1,4 +1,5 @@
 import Foundation
+import RavenProtocol
 
 /// A per-account quiet-hours window stored locally on this Mac.
 ///
@@ -57,5 +58,28 @@ public enum NotificationPolicy {
         guard enabled, !muted, !isForeground else { return false }
         if let quietHours, quietHours.contains(now) { return false }
         return true
+    }
+
+    /// The newest message not authored by `user`, regardless of the page's
+    /// row order. The newest rows can all be the reader's own (sent from
+    /// another device after an incoming one); the page must still yield the
+    /// incoming one instead of dropping its notification.
+    public static func newestForeign(_ messages: [RavenMessage], user: String) -> RavenMessage? {
+        messages.filter { $0.owner != user }.max(by: { $0.creation < $1.creation })
+    }
+
+    /// The message a notification run should surface: the newest foreign row
+    /// that was not already delivered and is newer than the reader's
+    /// high-water mark. Filtering happens before picking, so one delivered or
+    /// already-seen row can never mask an older un-notified one.
+    ///
+    /// `seen` is the channel's last-seen server timestamp; both it and
+    /// `creation` are server-generated in the same format, so the textual
+    /// comparison is chronological. A nil `seen` means nothing recorded yet.
+    public static func nextNotification(in page: [RavenMessage], user: String, seen: String?, notified: (String) -> Bool) -> RavenMessage? {
+        let pending = page.filter { message in
+            !notified(message.batchID ?? message.id) && (seen.map { message.creation > $0 } ?? true)
+        }
+        return newestForeign(pending, user: user)
     }
 }

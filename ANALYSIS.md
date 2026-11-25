@@ -60,6 +60,32 @@ where the problem lives, what to change, and how to know it worked.
   earlier passes would otherwise have re-derived. Its three PRs (#116-#118)
   are in §1; new findings carry a `2026-11-20` note in §2 and §3, and the
   entries checked and found not to be defects are in §12.
+- **Epic-chicken follow-up (`d86965c`, 23 November 2026):** reviewed the
+  composer, transcript rendering, conversation picker, preferences and
+  outbox against the current backlog. Two changes have separate PRs in §1.
+  Remaining tasks are folded into the relevant sections below.
+- **Nevermore sweep (`d86965c`, 23 November 2026, epic-chicken worktree):**
+  a fresh read of the session, store, transport, render, composer, Home,
+  Search, sidebar and update paths, with the backlog checked rather than
+  re-derived. Six small fixes have PRs in §1; the pass also confirmed which
+  findings were still live and recorded its checks in §13.10.
+- **Epic-chicken audit pass (`d86965c`, 23 November 2026):** a fresh read
+  of the session, outbox, transport, store, transcript render, sidebar and
+  Home/Search paths, plus three bounded LongCat 2.5 audits of
+  `Session`/`RavenRealtime`/`RavenClient`, the transcript shell, and
+  `Store`/Search/Home. PRs #145, #146 and #153 carry the implementations;
+  new findings carry a `2026-11-23` note in §2, §3 and §4.
+- **Independent pass (`e9a2041`, 23 November 2026):** a separate private
+  worktree read the session, transport, store, transcript, composer, Home
+  and Search paths, with seven bounded LongCat 2.5 audits (three completed
+  and were folded in after the cited code was checked). Five small fixes
+  are PRs #175, #176, #177, #180 and #181; new findings carry a
+  `2026-11-23 independent` note.
+- **Epic-chicken task pass (`db515b7`, 23 November 2026):** a fresh read
+  of notification routing, session lifecycle, the thread inspector,
+  transcript hover and the animated-image cache. Four small fixes are PRs
+  #170, #178, #184 and #186; new findings carry a `2026-11-23 epic-chicken`
+  note.
 - **Tags:** `[V]` verified in code, on screen or by a test. `[H]` found by a
   helper review, cited code supports it, not traced end to end. `[P]`
   plausible, needs a closer look before building.
@@ -85,6 +111,7 @@ where the problem lives, what to change, and how to know it worked.
 12. Checked and rejected
 13. Validation record
 14. Working notes for whoever picks this up
+15. Deep-model pass of 2026-11-23 (consolidated findings)
 
 ---
 
@@ -158,6 +185,71 @@ URLSession change through three.
 | A cancelled Home refresh looked fresh for 120 s | [#116](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/116) stamps `loadedAt` when a refresh finishes, guards the task slot with a refresh generation, keeps a total failure stale so the next display retries, and adds a 15 s backoff for that case. `swift test`; a dedicated regression test is impractical because the cancellation window is not deterministic. |
 | `RavenClient` leaked one `URLSession` per re-login and account removal | [#117](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/117) derives session ownership, invalidates an owned session in `invalidate`, `revoke` and `deinit`, and leaves an injected session alone. `SessionInvalidationTests` observes the real teardown through the session delegate for all four paths. |
 | Equal thread timestamps ordered nondeterministically | [#118](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/118) breaks ties by ascending thread id, reads the sort keys once per row, and documents the textual comparison. `threadsIdsBreakEqualTimestampsByName` fails on the base and covers a duplicate id, an empty name and an out-of-scope parent. |
+
+**Epic-chicken follow-up on `d86965c`.** Implementation PRs are left open
+for integration. The backlog links each implementation and its verification.
+
+| Finding | Implementation and verification | Review |
+| --- | --- | --- |
+| Rendering one conversation decoded pending sends from other channels | [#123](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/123) filters in SQLite and preserves Swift channel equality, pending-state exclusion and order. The store regression failed before the fix and passed after it, along with the full local Swift suite. A synthetic 1,000-operation SQLite workload returned 10 matching payloads for one of 100 channels. The query still scans metadata. Frame timing remains open. | Two GLM rounds. Verified collation registration and column/payload consistency. |
+| A chooser query with zero matches showed a blank list and an active default action | [#124](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/124) shows scoped empty feedback and enables the default action when a result is selected. Nine native assertions cover empty query results, Return and recovery across the three picker modes. | Two GLM rounds. Prefix-specific empty wording remains in §6.5. |
+
+**Nevermore sweep on `d86965c`.** Six small fixes, each with a targeted
+check. The pull requests were open at the time of writing; the verification
+record is §13.10.
+
+| Finding | Implementation and verification |
+| --- | --- |
+| A failed emoji page erased pages already loaded | [#134](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/134) keeps rows and the failed offset so Load More retries that page; a demo fixture and a native self-check drive a 50-row first page whose second page fails. |
+| Staging errors named the global budget | [#125](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/125) reports the room that applied, refuses empty stages once the allowance is spent, and pins exact-fit and partial-room boundaries. |
+| Roster and chooser filters ran during marked input-method text | [#139](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/139) adds the `hasMarkedText()` guard to both fields and checks the notification sender. |
+| A send that never left could not be cancelled | [#143](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/143) derives Cancel Send from `InkRules.canTakeBack` so the outbox and transcript agree; a state-matrix unit test covers attempted and unattempted sends. |
+| The search thread cache never evicted | [#144](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/144) caps the cache at 24 entries and drops the stalest by fetch time. |
+| The update panel kept Download after dismissal | [#147](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/147) derives Download and Dismiss from one `visibleOffer` predicate. |
+
+A seventh branch (a silent no-op for a missing host-slot count) was closed as
+a duplicate of #126, which is already on main.
+
+**Epic-chicken audit pass on `d86965c`.** The PRs are open for integration;
+the entries they implement stay in the sections below, marked with their
+number, until they merge.
+
+| Finding | Implementation and verification | Review |
+| --- | --- | --- |
+| A re-render restored the caret by raw character offset, so prepending history could move the Message menu to another message | [#145](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/145) captures the caret's message and offset within it before the ranges are rebuilt, restores strictly inside that message's new range, maps an end-of-text caret to the last message, and collapses to the nearest surviving message when the caret's message is gone. A new placement self-check fails on the base revision and passes after the change; `swift test` and the full demo self-check pass. | Three GLM rounds. Round 3 was minor-only; the end-of-text caret and collapse target were fixed. A non-empty selection still restores by raw offset (recorded below); the confirming round and native checks are queued. |
+| Home's Mark All Read counted conversations it could not acknowledge | [#146](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/146) adds `HomeUnreadDigest.actionable`, counts only entries with a readable newest-message timestamp and reports the remainder, with an informational sheet when none can be acknowledged. `HomeDigestTests` covers the no-details, details-without-timestamp and cached-fallback cases; `swift test` passes. | Two GLM rounds, minor only. The empty-actionable copy and the latest-without-timestamp test were fixed; a confirming round and native checks are queued. |
+| A Files or Links search kind survived a switch to the local Conversations and People tabs | [#153](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/153) applies `criteria.on(next)` for every tab, so the local tabs search the Messages kind and a saved search stores the right kind. A new search self-check fails on the base revision and passes after the change. | Three GLM rounds. Round 3 was minor-only: the filter-semantics test gap is recorded below; native checks are queued. |
+
+**Concurrent follow-up on `d86965c`, merged as `db515b7`.** Two entries
+from the 2026-11-20 list are done; the code is in `main`.
+
+| Finding | Implementation |
+| --- | --- |
+| `releaseHostSlot` contradicted its own comment (N6) | #126 returns silently when the host count is missing instead of calling `assertionFailure`. |
+| `Store.stage` named the global budget (N9) | The same merge throws the applied `limit` at both the size guard and the copy guard. |
+
+**Independent pass on `e9a2041`.** Five small fixes, each with a check
+observed failing on the base revision before it passed. The PRs are open for
+integration; the entries they implement stay in §3 and §4 until they merge.
+
+| Finding | Implementation and verification | Review |
+| --- | --- | --- |
+| A transient OAuth `server_error` rejected a queued message | [#175](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/175) classifies the token endpoint's server fault as retryable, like `temporarily_unavailable`. `MutationOutcomeTests` gained transient and client-fault cases; the transient case failed on the base. Protocol suite 91/91. | Open |
+| A local search snippet dropped a match past the 400th word | [#176](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/176) normalizes whitespace but searches the whole indexed body, then windows around the first match. `localSnippetFindsAMatchPastTheWordWindow` failed on the base; 40 search tests pass. | Open |
+| A withdrawn channel's queued read receipt was retried on every flush | [#177](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/177) deletes withdrawn channels' `visits` with their history. `testWithdrawnChannelsDropTheirQueuedReadReceipts` failed on the base; `NevermoreCoreTests` 406/406. | Open |
+| Home kept the previous account's content on an account switch | [#180](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/180) schedules a Home rebuild and starts the new account's feed in `use(_:)`. A new `HomeSelfChecks` case failed on the base and the Home module then passed with zero failures. | Open |
+| Re-caching an unchanged page re-parsed and re-indexed every row | [#181](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/181) compares the stored payload in the upsert, skips the FTS rewrite for unchanged rows, skips the trim when nothing changed, and encodes stored JSON with sorted keys so equal content has equal bytes. A new store case pins the FTS rowids across a repeated cache; `NevermoreCoreTests` 406/406. | Open |
+
+**Epic-chicken task pass on `db515b7`.** Four fixes, each with a native
+check or a documented fixture procedure. The PRs are open for integration;
+the entries they implement stay in the sections below until they merge.
+
+| Finding | Implementation and verification | Review |
+| --- | --- | --- |
+| A notification click at cold launch is dropped before channels load | [#170](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/170) retains the route while the account or channel is still loading, replays it from the session-change observer, expires it after 60 seconds, honors revocation and stopped sessions, and activates only once a live session is found. Collection self-checks cover retention, replay, a revoked channel and teardown; the first run exposed an observer token that was not retained, now fixed. | Open |
+| The thread inspector's root goes stale, its failures hide behind a cached render, and it cannot page back | [#178](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/178) rebuilds the header during render, latches refresh errors behind Retry, and adds Load Earlier with a window that grows by one server page per page-back. A rename assertion and `testMessagesBeforeBoundaryReadsTheOlderPage` cover it; the full native suite passes. | Open |
+| Hover and caret lookup scan every message range per pointer move | [#184](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/184) binary-searches layout order for both, shares one band scan between thumbnails and the read receipt, and remembers the newest receipt per channel. Layout self-checks probe the first and bottom visible rows, assert range order, and fail against the linear base. | Open |
+| One failed visit aborts the flush and marks the account failed; `realtimeLive` survives a disconnect | [#186](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/186) gives each `track_visit` its own catch and leaves the snapshot pending, and clears `realtimeLive` in `reauthenticate` and `stop`. Build and the native suite pass; the loopback fixture is the remaining procedure. | Open |
 
 **Opus review follow-up on `63194f6`.** One branch per finding, each with
 new native or unit checks; for #90, #93 and #106 the new check was seen
@@ -300,7 +392,72 @@ follow-up), by PR:
   and still skips the Services subtree would cover it; give the clash
   fixture a nested duplicate.
 
+**Epic-chicken pass on `d86965c` (23 November 2026).** One branch per
+finding, each with a PR against main; verification ran locally (`swift test`
+plus `--demo --self-check` where noted) and in CI. All twelve merged into
+main by `acfe5bb` (the "open" markers below were written before the merges);
+the matching entries in the sections below can now be dropped. #127 (staging
+budget) and #130 (host-slot no-op) were closed as duplicates of #125 and
+#126, which landed on main.
+
+| Finding | Implementation and verification | Review |
+| --- | --- | --- |
+| `clearHistory()` deleted projections although its contract keeps them (§3.2) | [#131](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/131) drops the `DELETE FROM projections`; `StoreTests` asserts messages are gone and the projection survives. Caller audit: the only callers are retention-off sync and the user-facing clear; account removal deletes the whole account directory. Full suite green. | 1 GLM round; the Major (caller audit) was answered with the audit on the PR. Merged as `7bb2427`. |
+| Selection marks and segmented controls ignored the theme accent (§5.2) | [#141](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/141) uses `themeAccent`/`selectedSegmentBezelColor` for the gallery ring and badge, quick-reaction fill, GIF selection border (re-resolved on redraw via a `wantsUpdateLayer` cell view), Visual/Markdown segments, search tabs, and the update notice. | 2 GLM rounds; round 2's Major (`updateLayer` dead without `wantsUpdateLayer`) fixed. |
+| A failed emoji-picker page erased the pages already loaded | [#142](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/142) keeps `items` and the failed `nextOffset` on a page failure (reset failures already re-zero the offset); a demo fixture (`demo-page-failure`) and `EmojiSelfChecks` case drive it; local self-check passes. #134 covers the same fix concurrently. | 2 GLM rounds; the round-1 Major (stale offset) was refuted with the reset path that sets `nextOffset = 0` before fetching; round 2 found nothing actionable. |
+| Presence parsing treated empty strings as skippable | [#149](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/149) skips only `.null` entries (cache-key expiry race); an empty user ID is malformed and rejects the reply, so an empty set never silently clears every presence dot. `PresenceReadTests` updated. | 2 GLM rounds; round 1's Major (empty string must be malformed) fixed; round 2 caught an accidentally committed `tmp.md`, removed. |
+| `deliverNotification` could swallow an incoming message (§3.5 N4) | [#155](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/155) reads a named-constant page (`notificationPageLimit = 5`) and picks via `NotificationPolicy.nextNotification(in:user:seen:notified:)`, which filters delivered and already-seen (`lastSeen`) rows before choosing the newest foreign one; `newestForeign` is order-agnostic (max by `creation`). Unit tests cover masking, nil watermark, ordering. | 2 GLM rounds; both Majors (heuristic ceiling, phantom re-notify) addressed — named constant plus the `lastSeen` bound and filter-before-pick. |
+| Line-capped labels clipped mid-glyph | [#156](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/156) sets `lineBreakMode`/`truncatesLastVisibleLine` on the roster, emoji picker, file inspector and thread-inspector labels; the filename truncates middle so the extension stays visible; truncated labels got tooltips with the full text. | 1 GLM round; Minors (middle truncation, tooltips) applied. |
+| Retryable outbox rows and hard errors shared one color | [#157](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/157) moves collection status and search footer errors to `themeAlert`, but keeps retryable outbox rows `systemOrange` so will-retry stays distinct from failed. | 1 GLM round; the Major (collapsing warning onto the alert token) fixed by reverting that one line. |
+| Thread replies never raised notifications | [#158](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/158) gates a thread on its parent conversation via a pure, tested `ChannelPolicy.shouldNotify(channelID:channels:revoked:threadParents:)` — revocation on the whole ancestry, gate ID walked to the top-most ancestor with a cycle guard. `ChannelPolicyTests` cover revoked/archived/muted/allow_notifications, unknown IDs, threads, nested threads, cycles. | 2 GLM rounds; the Critical (self-revocation) and Major (one-level gate) folded into the extracted helper with table-driven tests. |
+| Collection bottom bar overflowed at minimum width | [#160](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/160) hides the two inbox-only buttons below 720 pt in `updateBarVisibility()` (called from `updateChrome()` and `windowDidResize`, writes guarded against redundant `isHidden`); both actions stay in the Message menu. | 2 GLM rounds; Minors (redundant writes, initial state, menu fallback) addressed; the outside-diff Major was answered — both items exist in MainMenu. |
+| Thread root re-parsed on every `updateContext()` | [#161](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/161) reads through `session.messageDocument(for:)`, which parses synchronously on a miss and re-parses when the html bytes change. | 1 GLM round; the Major (cache miss degrades) was refuted — `MessageDocumentResult` has no pending state, a miss parses on the spot. |
+| One undecodable saved search discarded all of them | [#165](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/165) decodes entry by entry via `JSONSerialization` and skips undecodable entries; an over-limit stored list (written by a newer version) truncates to its first 30 instead of reading as empty. `SearchSelfChecks` seeds the broken entry alone first (non-vacuous) plus an over-limit case; local self-check passes. | 1 GLM round; both Minors applied. |
+| Schedule accepted a message while an edit was open | [#166](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/166) adds `editing == nil` to the schedule validator and guard. | 1 GLM round; nothing actionable. |
+
 ---
+
+**Deep-model pass (`epic-chicken-mine` worktree, 2026-11-23).** A fresh read
+of the whole app plus five bounded LongCat 2.5 audits (transcript/window,
+composer, core/protocol, Home/Search/collections, shell/theme/onboarding).
+Findings are consolidated in §15; the implementations are these PRs, each on
+its own branch off the then-current main, labelled `zai-model:deep`:
+
+| Finding | PR and status |
+| --- | --- |
+| Missing host-slot count was not a silent no-op | [#126](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/126) merged |
+| Conversation chooser's Cancel had no Escape key equivalent | [#128](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/128) merged |
+| An 11th conversation in one burst was never queued (count cap) | [#129](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/129) merged |
+| Saved Searches had no target in a non-conversation window | [#135](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/135) merged |
+| A forced Home refresh could pass an in-flight one | [#136](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/136) merged |
+| Notification picked the newest row even when it was the reader's own | [#132](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/132) closed as duplicate of #155, which landed the same fix on main via `NotificationPolicy.nextNotification` |
+| `sendGIF` could post the same GIF twice | [#133](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/133) merged — `acceptingChannels` guard now held through delivery |
+| Visual composer accepted an unbounded text paste | [#137](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/137) merged — `paste` refuses text above `RichTextCodec.maximumBytes` |
+| Menu-driven caret format left the toolbar stale | [#138](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/138) merged — refresh only when `sendAction` was handled |
+| Write in Markdown was not a checked toggle | [#140](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/140) merged |
+| Home Mark All Read skipped conversations with no reported latest | [#148](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/148) merged — falls back to the newest cached message and reports acted/skipped/unreadable truthfully |
+| Empty poll retraction reported success | [#151](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/151) merged — `PollError.noVote` |
+| Attachment window showed saved-file actions before saving | [#152](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/152) merged |
+| Buffered responses enforced the byte cap before status classification | [#159](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/159) merged — `readBounded` classifies first; oversized 401 refreshes, oversized 403 maps to its status; 6 boundary tests |
+| Re-login invalidated the live client before the Keychain save | [#163](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/163) merged — save first |
+| "Mark All Notifications Read" could act on an arbitrary account | [#164](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/164) merged — disabled when ambiguous |
+| Clear Received History left decoded GIFs and link previews in memory | [#167](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/167) merged |
+| Code-reader context menu re-parsed HTML instead of the cache | [#168](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/168) merged |
+| "Reply in Thread" inside a thread created a nested thread; actions offered on System events | [#169](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/169) merged — menu, hover bar, validation and AX all gated |
+| Home rows built a DateFormatter per row and dropped the year past a week | [#171](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/171) merged — cached per template/time zone/calendar; `d MMM y` |
+| People card showed the empty note on a failed load | [#172](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/172) merged |
+| Cancelled search attachment read kept a stale status | [#173](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/173) merged |
+| Search preview cache cleared entirely at 51 entries | [#174](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/174) merged — real LRU |
+| Ordered lists kept stale numbers after leavingBlock / whole-line delete | [#179](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/179) merged — renumber beside the caret |
+| Theme taglines still in the Settings gallery tooltip/AX help | [#182](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/182) merged — owner rule restored |
+| Member roster refolded every entry per keystroke | [#183](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/183) merged — `MemberRoster.SearchIndex`, equivalence test |
+| One undecodable payload aborted store recovery / the v3 migration | [#185](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/185) merged — rows skipped and os.log-logged, tests corrupt a row via GRDB |
+| Composer placeholder was not exposed to VoiceOver | [#188](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/188) merged — placeholder surfaced as accessibility value/help |
+| `--demo` never activated the app | [#189](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/189) merged — demo branch activates like the shared path |
+| Keyboard Shortcuts window was hand-written and drifted from the menus | [#190](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/190) merged — generated from `NSApp.mainMenu`, HIG modifier order, correct function-key glyphs |
+| Reply/edit could clobber each other; deleting the edited message orphaned the edit | [#187](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/187) merged — reply/edit/delete all gated on `editing == nil`; draft no longer persisted mid-edit |
+| "writeHistory wedge" / "refreshAfterInflight shadowing" | [#162](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/162), [#154](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/154) closed as false positives — see §12 |
+
 
 ## 2. Priorities
 
@@ -326,16 +483,30 @@ The ten items with the best value for the effort, in order.
 **From the 2026-11-20 pass** (see the tags in §3):
 
 - **Notification delivery can lose a message** (§3.5, N4 and N5): a newer
-  message from the reader swallows the notification, and an 11th
-  conversation in one burst is never queued. Higher user impact than most
+  message from the reader swallows the notification (N4, implemented in
+  #155), and an 11th conversation in one burst is never queued (N5, open).
+  Higher user impact than most
   of the items above because the reader never learns a message arrived.
-- **A failed emoji-picker page erases the pages already loaded** (§3.5,
-  N3).
 - **Home's Mark All Read skips a conversation without a latest message**
   (§3.5, N8) while still counting it in the confirmation.
-- **`Store.stage` names the global budget, not the limit that applied**
-  (§3.5, N9).
-- **`releaseHostSlot` contradicts its own comment** (§3.5, N6).
+
+**From the 2026-11-23 pass** (see the tags in §3):
+
+- **Serialize `refresh()`** (§3.5, 2026-11-23). Two overlapping refreshes
+  can publish a stale channel list and resurrect a newly revoked channel.
+  This is the strongest remaining correctness lead in the session.
+- **Confirm room joins** (§3.5, 2026-11-23). A silently rejected
+  `doc_subscribe` is remembered as joined and never retried, so an open
+  conversation can miss live messages until the socket reconnects.
+- **Give the large directory and history RPCs their own budget**
+  (§4.5, 2026-11-23). `get_list` is read with `try?` under the 8 MB default,
+  so a large site silently loses names, DM titles and avatars.
+- **Do not let a failed Home module clear the last good value**
+  (§3.5, 2026-11-23): a failed `get_unread_threads` empties every thread
+  badge, and a forced refresh during an in-flight one is dropped.
+- **Copy staged files outside the store transaction** (§4.5, 2026-11-23);
+  the existing note already says the copy blocks the queue, and the fsync
+  makes the stall longer.
 
 ---
 
@@ -346,15 +517,14 @@ The ten items with the best value for the effort, in order.
 A cached read failure after switching conversations keeps previous rows visible under a new title and leaves viewport tracking suspended. Start with a deterministic read-failure fixture. Preserve same-channel text on a background refresh failure, clear foreign rows on failed navigation, release the updating state, and offer a contextual Retry against the current navigation generation. Test access removal and attachment presses explicitly because `TranscriptView.clearText()` retains pressed link storage until mouse-up. [Render path](Sources/NevermoreApp/ConversationWindow.swift#L1032) · [Press retention](Sources/NevermoreApp/TranscriptViewportKeeper.swift#L185)
 
 ### 3.2 `clearHistory()` deletes projections although its contract keeps them `[V]`
-- **Where:** Store.swift:576-584. The doc comment says drafts, outbox,
-  visits, channels, projections and staging survive; the body runs
-  `DELETE FROM projections`. With "retain history" off, `flush()` calls it
-  after every acknowledged send (Session.swift:676, 695).
-- **Fix:** decide which is intended (§11). If projections should survive,
-  drop the `DELETE`; otherwise fix the comment and stop clearing after every
-  send.
-- **Check:** a Core test that seeds a projection, calls `clearHistory()`, and
-  asserts the documented contract.
+
+Done in #131 (merged as `7bb2427`): the code was wrong, the doc comment was
+the contract. The `DELETE FROM projections` is dropped; `StoreTests` seeds a
+projection, clears, and asserts messages are gone while the projection
+survives. Caller audit recorded on the PR: the only callers are
+retention-off sync and the user-facing "Clear Received History"; account
+removal deletes the whole account data directory, so no erase path relied
+on this method clearing projections. See §1 for the full entry.
 
 ### 3.3 Bodies are cut at 4,096 characters without a mark `[V]`
 - **Where:** plain-text fallback and system events use
@@ -386,7 +556,7 @@ Each is small and local. `[V]` unless tagged. An entry marked
   `X-Frappe-Site-Name` (App.swift:225-230, Session.swift:286-290). `[H]`
 - `reauthenticate` drops the socket but leaves `realtimeLive` true, so the
   status shows live and polling waits up to a minute (Session.swift:286-294).
-  `[H]`
+  `[H]` Implemented in #186, which also clears it in `stop()`.
 - `presenceUnavailable` is set for good by one 403/404 and cleared only by
   re-login (Session.swift:281); clear it on reconnect like `avatarFailures`.
   Implemented in #111: a reconnect clears it and a refusal retries once
@@ -397,7 +567,8 @@ Each is small and local. `[V]` unless tagged. An entry marked
 - One failing `track_visit` aborts the remaining visits and marks the
   account failed; per-operation send failures also raise account attention
   (Session.swift:696-714). Only session-level errors should call `fail()`.
-  `[H]`
+  The store half, dropping a withdrawn channel's queued receipt, is #177;
+  the Session half is implemented in #186. `[H]`
 - `markUnread` polls `flushing` every 25 ms without a bound
   (Session.swift:735); behind a large upload it hangs with no feedback.
   `[H]`
@@ -432,7 +603,7 @@ Each is small and local. `[V]` unless tagged. An entry marked
   `App.swift:381-392` resolves the response while `Session.start` populates
   channels after async store reads. Retain and replay the response once
   channels are ready; also call `NSApp.activate` like the update path.
-  (2026-11-18 pass) `[H]`
+  (2026-11-18 pass) `[H]` Implemented in #170.
 - `forgetAnimatedImages()`/`stop()` leave `animatedRequests` and
   `thumbnailRequests` populated, blocking retries for up to the 300 s timeout
   (Session.swift:136,143,998,1121). Clear them. (2026-11-18 pass) `[H]`
@@ -480,10 +651,6 @@ Each is small and local. `[V]` unless tagged. An entry marked
   (AppUpdateController.swift:86-94). `[H]` Implemented in #87:
   `UpdateMonitor.check` no longer joins a cancelled request after
   stop/start (UpdateMonitor.swift:65-83).
-- The update panel keeps a dismissed offer's Download visible and hides
-  Dismiss (AppUpdateController.swift:40-47,94-96), and a failed update check
-  hides the offer text but leaves Download visible (:40-47,95). Base both on
-  `visibleOffer`. (2026-11-18 pass) `[V]`
 - The menu bar item's "Check for Updates…" title never becomes "Update
   Available…" (NativeShell.swift:48, 58). `[H]`
 - Turning on notifications swallows a denied permission: the checkbox stays
@@ -523,7 +690,10 @@ Each is small and local. `[V]` unless tagged. An entry marked
 - `PressTracking.next()` dequeues and drops every key except Escape during a
   sticker drag (Stickers.swift:902). `[H]`
 - A failed "Load More" in the emoji picker erases the loaded list
-  (EmojiPickerSheet.swift:132). `[H]`
+  (EmojiPickerSheet.swift:132). `[H]` Implemented in #142 (merged; #134
+  covered the same fix concurrently): a page failure keeps the loaded rows
+  and the failed offset so Load More retries that page, with a demo fixture
+  and self-check.
 - Implemented in #79: `insertRow(at: 0)` on a table with a header added a
   second header row (EditableRichTable.swift:57-70). Any inserted row now
   uses body cells. The top-inserted row still lands inside `<thead>`; that
@@ -545,17 +715,17 @@ Each is small and local. `[V]` unless tagged. An entry marked
   it. Remember the selected message's ID and offset within it and restore
   into its new range, or clear it when the message is gone. Check: select a
   message, prepend 20 older ones, `selectedMessage` keeps its ID.
+  The caret case is fixed in #145; a non-empty selection still restores by
+  raw offset, so extending the same anchoring to a range is the remaining
+  work.
 - The thread inspector cannot page back: it renders cached replies and
   `start()` loads the newest page only (ThreadInspector.swift:83, :95).
-  Reuse the main pane's load-earlier pattern.
+  Reuse the main pane's load-earlier pattern. Implemented in #178 with an
+  explicit Load Earlier control.
 - The thread inspector's root header (author and text) is built once in
   `loadView()` (ThreadInspector.swift:47-49) and stays stale after an edit
   to the root or a rename; rebuild it in `render()`.
-- Grouped replies never show their gutter time: `.nevermoreGutterTime` is
-  added at `bodyStart`, after the reply quote (ConversationWindow.swift:1229),
-  but hover and caret probe the message's `start`
-  (ConversationShell.swift:1028, :1063). Add it at `start` or probe
-  `bodyStart`.
+  Implemented in #178.
 - Take-back loses Markdown mode: `SendOperation` does not keep the
   accepted draft's `editorState`, so `takeBack` restores HTML and caret
   only (Store.swift:432) and `inlineComposer.load(nil)` switches to Visual.
@@ -653,9 +823,6 @@ Each is small and local. `[V]` unless tagged. An entry marked
 - The attachment actions window shows a disabled Reveal/Open-With row before
   anything is saved (AttachmentWindow.swift:60-66 vs FileInspector.swift:108,210-212);
   hide it until `savedURL` is set. (2026-11-18 pass) `[V]`
-- Roster and chooser search filters run during IME marked text
-  (MemberRosterWindow.swift:174-177, ConversationChooser.swift:45); add the
-  `hasMarkedText()` guard the newer pickers have. (2026-11-18 pass) `[V]`
 - `ChannelDetails.rows` checks `deletedIDs` as the revoked set
   (ChannelDetails.swift:20-21). (2026-11-18 pass) `[H]`
 - Retracting an already-gone vote reports "completed"
@@ -679,10 +846,13 @@ Each is small and local. `[V]` unless tagged. An entry marked
   retrying a failed tab keeps the other tab's results visible.
 - Implemented in #77: file results showed the name twice when it had
   percent escapes (SearchResults.swift:272). Local snippets still stop at
-  400 words (SearchResults.swift:181). `[H]`
+  400 words (SearchResults.swift:181). `[H]` The whole indexed body is
+  searched in #176.
 - Home's Mark All Read skips conversations whose latest message is unknown
   (HomeView.swift:683); the Later card can show stale drafts after
-  `.draftChanged` (HomeView.swift:102). `[H]`
+  `.draftChanged` (HomeView.swift:102). `[H]` The confirmation now counts
+  only the actionable entries and reports the remainder in #146; the
+  cached-latest fallback already existed. The Later staleness remains.
 - Implemented in #86: Home's people module was titled "You Talk with Most"
   (HomeDigest.swift:14); Your Week said "11 more than the week before"
   after an empty week (HomeView.swift:479).
@@ -736,13 +906,6 @@ Each is small and local. `[V]` unless tagged. An entry marked
 **2026-11-20 pass.** Read in the current code; each entry says what to
 change and how to know it worked.
 
-- **A failed emoji-picker page erases the pages already loaded** `[V]`
-  (N3). `EmojiPickerSheet.load` has one `catch` for the first page and for
-  a page fetch, and it always runs `items.removeAll()`, clears `nextOffset`
-  and reloads. Keep the first page on a first-page failure, keep `items`
-  and `nextOffset` on a page failure so Retry refetches the same page, and
-  say that more emoji could not be loaded. The existing `EmojiSelfChecks`
-  fixture can drive it.
 - **`deliverNotification` swallows an incoming message** `[V]` (N4).
   `Session.deliverNotification` reads `limit: 1` and gives up unless the
   newest row is from someone else. A message the reader sent from the
@@ -751,27 +914,24 @@ change and how to know it worked.
   newest row not authored by the reader, then apply the existing batch
   dedupe. A stub `get_messages` whose newest row is the reader and whose
   second-newest is a teammate must still deliver one notification.
+  Implemented in #155 (merged): reads a named 5-row page and picks via
+  `NotificationPolicy.nextNotification(in:user:seen:notified:)`, which
+  filters delivered and already-seen rows before choosing the newest
+  foreign one.
 - **`notificationChannels` drops the 11th conversation in a burst** `[V]`
   (N5). `AccountSession.event` only inserts when `notificationChannels.count
   < 10`; the set drains once per reconciliation pass and events debounce by
   350 ms, so an 11th conversation in the same burst is never queued and the
   server will not re-emit. Carry the overflow into the next pass, or drop
   the cap and let the drain bound the work.
-- **`releaseHostSlot` contradicts its own comment** `[V]` (N6).
-  `RavenRealtime.releaseHostSlot` says a missing host count is a no-op, then
-  calls `assertionFailure`. The state is unreachable today, but the comment
-  and the code disagree; return silently or precondition on the invariant.
 - **Home's Mark All Read skips a conversation without a latest message**
   `[V]` (N8). `HomeView.markAllRead` does `guard let timestamp =
   entry.latest?.timestamp else { continue }`, so a conversation counted in
   the confirmation is not marked and the reader gets no feedback. Fall back
   to the newest cached message and report any difference between the
-  confirmed and acted-on counts.
-- **`Store.stage` names the global budget, not the limit that applied**
-  `[V]` (N9). `stage` computes `limit = min(64 MB, budget - total)` but
-  throws `stagingBudgetExceeded(min(budget, 64 MB))`, so a file that exceeds
-  only the remaining room is reported against the whole budget. Carry the
-  applied limit into the error.
+  confirmed and acted-on counts. Addressed in #146: the cached-latest
+  fallback was already passed into the digest, and the sheet now counts
+  `digest.actionable` and states how many have no readable newest message.
 - **A failed Home refresh overwrites the last good module data** `[V]`.
   `HomeFeed.refresh` assigns `snapshot.reminders = results.0` even when
   `results.0` is `.failed`, so one failed refresh replaces the previous
@@ -781,10 +941,198 @@ change and how to know it worked.
 - **`OutboxWindow` Return can trigger Retry and the table action** `[P]`.
   `retryButton.keyEquivalent = "\r"` while the table is first responder;
   confirm a selected row does not activate both.
-- **`OutboxWindow` cannot cancel a send that never left** `[H]`.
-  `cancelButton` enables only for `state == .queued && attempts == 0`; a
-  send that failed before its first attempt (`.retryable`, `attempts == 0`)
-  can be retried but not cancelled, although it never reached the server.
+- **Thread fetch failures can disappear under a cache render** `[V]`.
+  The initial fetch and the cache render write the same status label.
+  Give them separate state and a Retry action, following the File
+  inspector's pattern. In the loopback fixture, fail a thread's first
+  page with cached replies present, post an unrelated session change and
+  retry successfully. Also test an empty cache and withdrawal of parent
+  membership during the retry. [ThreadInspector.swift](Sources/NevermoreApp/ThreadInspector.swift#L69)
+- **Account Preferences can overwrite edits typed during Save** `[V]`.
+  The response and the recovery readback both repopulate editable server
+  fields. Hold a Raven User mutation in the fixture, try to edit while it
+  waits, and check success, failure and close/reopen during cancellation.
+  Disable the submitted fields until reconciliation or preserve post-Save
+  edits independently. The local quiet-hours save finishes before the
+  request starts. Check keyboard focus and whether a further local change
+  remains visible as unsaved. [AccountPreferencesController.swift](Sources/NevermoreApp/AccountPreferencesController.swift#L311)
+
+**2026-11-23 pass.** Read in the current code; each entry says what to
+change and how to know it worked.
+
+- **`markUnread` has no demo path** `[V]`. `Session.markUnread` always calls
+  `client.rpc("raven.api.raven_channel_member.mark_channel_as_unread")` and
+  then `refresh()`. In `--demo` (origin `https://demo.invalid`) that is a
+  real network attempt that fails with a transport error and an alert,
+  breaking the demo's local-only contract. Add a demo branch that updates
+  `intentionallyUnread`, `lastSeen`, the transcript visit and the store,
+  then returns.
+- **Overlapping `refresh()` calls can resurrect a revoked channel** `[H]`.
+  Refresh A reads a channel list containing C, refresh B reads a later list
+  without C and adds it to `revokedChannels`, then A subtracts its own list
+  and restores C. Chain refreshes through one writer, as `writeHistory`
+  does, or publish only from the newest generation. A `readRPC` fixture can
+  hold the first response and assert the final `channels` and
+  `revokedChannels` after a second refresh.
+- **A rejected room join is remembered as joined** `[H]`.
+  `RavenRealtime.setChannels` updates `joined` when `doc_subscribe` is
+  emitted, with no acknowledgement. A silently rejected join leaves `added`
+  empty, so the open conversation is never re-subscribed until the socket
+  reconnects, even though `reconciliationTick` treats a silent live socket
+  as possible. Confirm with a Socket.IO ack, or re-emit the desired set on
+  the reconciliation tick.
+- **The 8 MB default RPC budget silently truncates large directory reads**
+  `[H]`. `Session.refresh` reads `raven.api.raven_users.get_list` with
+  `try?`; a larger reply throws and the directory stays empty, so DM titles
+  fall back to raw user IDs and avatars never load, with no visible failure.
+  Give `rpc` a per-call budget for the large directory and history reads and
+  surface the failure rather than swallowing it.
+- **`HomeFeed.refreshAfterInflight` returns the wrong task** `[V]`. It
+  returns the task captured before `refresh(force:)`, so a caller with no
+  in-flight refresh gets nil and reads Home before the new feed lands; with
+  one in flight it returns the old task rather than the replacement. Return
+  `self.task` after starting the refresh.
+- **A failed `get_unread_threads` clears every thread unread badge** `[V]`.
+  `snapshot.unreadThreads` is rebuilt from `results.3.value ?? []`, so a
+  failed module leaves an empty dictionary and Home shows no thread counts
+  until the next success. Assign only on `.loaded`, as the other modules do.
+- **`loadCachedLatest` never retries a conversation it found empty** `[V]`.
+  `latestKeys` is updated for every stale id even when no cached message was
+  found, so opening the conversation later does not fill in the preview.
+  Record the key only for ids present in `found`.
+- **A forced Home refresh is dropped while one is in flight** `[V]`. The
+  `task == nil` guard in `refresh` returns without recording the request, so
+  a mutation during a refresh can leave Home showing pre-mutation state for
+  up to the freshness window. Record a pending forced refresh and consume it
+  when the in-flight task finishes.
+- **A Files or Links search kind survives a switch to Conversations or
+  People** `[V]`. `tabChanged` only applied `criteria.on(next)` for the
+  server-backed tabs, so the leftover kind leaked into the Filters menu and
+  a saved search. Fixed in #153 by applying the mapping for every tab.
+- **Local search tabs keep filters, and the new check does not pin it**
+  `[H]`. `SearchCriteria.on(_:)` normalizes only the kind for Conversations
+  and People; author, date and attribute filters survive. That keeps a
+  filtered Messages search intact across a local-tab detour, but the Filters
+  menu and a saved search on a local tab still show them, and the self-check's
+  `!hasFilters` assertion is vacuous because no filter is set. Decide the
+  intended semantics, correct the "clean slate" comment, and apply a real
+  filter in the check so the assertion can fail.
+
+**2026-11-23 independent pass.** Each entry says where the issue lives and
+how to check the fix; entries with a PR name it.
+
+- **A withdrawn channel's queued read receipt is retried forever** `[V]`
+  (store half in #177). `removeRevokedChannels` and `withdrawHistory` delete
+  the channel's history but not its `visits` row, so every flush sends a
+  `track_visit` the server refuses. The visit loop shares the flush's outer
+  `do/catch`, so that refusal also skips receipts queued after it and calls
+  `fail` for a per-conversation problem. Session half: give each visit its
+  own `do/catch`; drop a receipt on a permanent refusal and keep a transient
+  one for the next flush.
+- **HTTP 409 is described as "the site is busy right now"** `[V]`.
+  `RavenError`'s description groups 409 with 429 (`Errors.swift`), although
+  409 is a conflict, not throttling, and `isPermanent` already treats it as
+  retryable. Give 409 its own "refresh and try again" wording and assert
+  both descriptions in `AuthTests`.
+- **Search result rows never pick up a photo or presence** `[V]`. The
+  `.sessionAvatarsChanged` observer runs the `.sessionChanged` body, whose
+  `feed.restrict()` gate returns false for an avatar arrival, so cells keep
+  the generated raven until the query reruns; `.sessionPresenceChanged` is
+  not observed at all (`SearchView.swift`, observer list). Reload on both
+  when visible and keep `restrict()` only for access changes. Check: post
+  the notification and assert a row's image changes without a new query.
+- **`SearchView.reset` keeps the previous account's `selectionKey`** `[H]`.
+  A same-key row in the new account is treated as unchanged, skipping the
+  attachment and preview reset. Clear it in `reset` and test the switch.
+- **`SearchFeed.restrict()` leaves the footer counters stale** `[H]`. Only
+  the three `.loaded` arrays are filtered; `serverHits`, `cacheOnly` and
+  `indexErrors` survive a revocation, so the footer can claim the best 100
+  matches for a smaller set. Recompute them with the filtered results and
+  check the footer after a revocation.
+- **Staging files orphaned by a crash are never reclaimed** `[V]`.
+  `stage(file:)` creates the file before inserting its `staging` row, so a
+  process death between the two leaves a file that `pruneStaging` never sees
+  and the budget never counts. At store open, delete files under `staging/`
+  whose path is absent from the table (match `path`; the file's own UUID
+  name is not the row id). Check: write an orphan, reopen, assert it is gone
+  and the budget is free.
+- **Home keeps the previous account's content after an account switch**
+  `[V]` (implemented in #180). Home's observers filter on the current
+  session and `use(_:)` posted nothing, so the pane showed the old account's
+  reminders and drafts until the next reconciliation.
+- **A token-endpoint `server_error` rejects a queued message** `[V]`
+  (implemented in #175). RFC 6749 defines it as a transient authorization
+  server condition; the outbox treated it as permanent and parked the send
+  as rejected.
+
+**2026-11-23 epic-chicken pass.** New findings from the 23 November sweep
+on `d86965c` (see §1 for its PRs); entries marked implemented have an open PR.
+
+- **`reauthenticate` leaves `realtimeLive` true** `[V]`. `Session.swift`
+  drops the socket with `realtime?.disconnect()`, which removes all
+  handlers so no "disconnect" event fires and `realtimeLive` stays true;
+  the status line shows Live with no socket and the 60 s live-refresh gate
+  is skipped. Set `realtimeLive = false` when dropping the socket.
+  Implemented in #186, which also clears it in `stop()`.
+- **`stop()`/`forgetAnimatedImages()` leave request sets populated** `[H]`.
+  `animatedRequests` and `thumbnailRequests` are not cleared
+  (Session.swift), so a stopped session still blocks retries for up to the
+  300 s timeout. Clear both sets in both paths.
+- **Loading older history can evict the live edge from memory** `[P]`.
+  `memoryMessages[channelID] = olderThan == nil ? suffix(1500) :
+  prefix(1500)` keeps the *oldest* 1,500 rows when paging deeper than
+  1,500 messages, so the newest rows vanish from the cache and the rendered
+  transcript until the next socket load. One eviction rule instead: keep
+  the reader's span plus the newest page. Check: seed 1,600 rows, load
+  older, assert the newest id is still cached.
+- **A sustained realtime burst can starve notification delivery** `[H]`.
+  The reconciliation worker drains `notificationChannels` only after the
+  `while reconcileRequested` loop exits, but every socket event re-arms the
+  loop; combined with the N5 cap, later conversations are dropped
+  permanently. Drain pending notifications before re-looping, or deliver
+  from a separate task with a deadline.
+- **Pending read watermarks answered `false` are replayed forever** `[P]`.
+  The pinned `track_visit` documents `False` as "queue and replay after
+  maintenance"; the client re-POSTs each row on every foreground pass with
+  no backoff while `readOnly`. Keep the row but rate-limit replay.
+- **A cancelled caller drops a freshly granted OAuth token** `[P]`
+  (RavenClient.swift). After the single-flight grant answers,
+  `!Task.isCancelled` discards the fresh token without persisting; if the
+  server rotated the refresh token, the next call fails `invalid_grant` and
+  the reader is signed out. Persist before the cancellation check.
+- **File panel / attachment window observe `.sessionChanged` with
+  `object: nil`** `[V]` (low). FileInspector.swift:141,
+  AttachmentWindow.swift:71. The handler only closes when the panel's own
+  `active()` is false, so another account's activity is a no-op; scoping
+  the observer would need the session plumbed into both inits.
+- **Thread replies never raised notifications** `[V]` — implemented in
+  #158 (merged): threads are synthesized locally and never listed in
+  `channels`, so the gate now resolves the parent via the tested
+  `ChannelPolicy.shouldNotify` (whole-ancestry revocation, top-most
+  ancestor row).
+- **Saved Searches menu reads only the key window** `[V]` — implemented in
+  #135 (merged, `vibe/saved-search-menu`): over a collection window the
+  menu shows "No Saved Searches" although the account has some
+  (SearchNavigation.swift:183-184). Fall back to
+  `AppDelegate.activeConversationWindow`'s session.
+- **Roster search filters run during IME marked text** `[V]` — open (another
+  agent's `fix/roster-ime-guard` covers it): MemberRosterWindow.swift:174-177
+  lacks the `hasMarkedText()` guard the newer pickers have.
+- **Retracting an already-gone vote reports "completed"** `[V]` — open
+  (another agent's `vibe/poll-retract-no-vote` covers it):
+  PollWindow.swift:601-603 returns silently, then `performMutation` says
+  "Retracting vote completed." Throw a dedicated error instead.
+- **`deliverNotification` bypasses the read seam** `[H]`
+  (2026-11-23 epic-chicken task pass). `Session.deliverNotification` calls
+  `client.rpc` directly instead of `read(_:)`, so a `readRPC` fixture cannot
+  drive the notification path. Route it through `read` before adding the
+  N4 fixture.
+- **`message_deleted` durability is fire-and-forget** `[V]`
+  (2026-11-23 epic-chicken task pass). `Session.event` spawns
+  `Task { try? await store.deleteMessages(ids:) }` without awaiting it;
+  quitting in that window loses the durable deletion and the next launch
+  shows the row until a refresh reconciles it. Record the deletion before
+  spawning the task, or await it during the stop drain.
 
 ### 3.6 NM-10 · Verify badge freshness through a partial outage and membership change
 
@@ -868,11 +1216,18 @@ The current macOS 26-targeted Release build on Swift 6.4.2 warns that the noniso
   (ConversationWindow.swift:1139-1157). Measured `[V]`: with 500 two-line
   messages the two scans (thumbnails, read receipt) cost 3.9 ms p50 and
   4.4 ms p95 per scroll event on an M4 Max, half a 120 Hz frame. The
-  binary search is implemented in #97 (0.11 ms p50). Still open: send
-  `markSeen` only when the bottom visible ID changes.
+  binary search is implemented in #97 (0.11 ms p50). Addressed in #184:
+  one band scan feeds both consumers and `markSeen` runs only when the
+  bottom visible message changes.
 - Hover lookup scans every message range per mouse move
   (ConversationShell.swift:966-1008). Use `characterIndexForInsertion(at:)`
-  once, then a binary search.
+  once, then a binary search. Addressed in #184 with a direct binary search
+  over layout order, also used by the caret highlight.
+- `visibleAnchor` computes `rect(for:)` for every loaded message on every
+  non-following render to find one anchor. Binary-search `messageRanges`
+  against the old bounds, as `messageEntries(intersecting:)` does, and
+  binary-search the nearest survivor for the no-intersection fallback.
+  (2026-11-23 pass) `[H]`
 - Raven gaze re-evaluates every visible sidebar row per mouse-moved
   (Unkindness.swift:111,156,332-343); throttle or coalesce. (2026-11-18 pass) `[H]`
 - The sidebar's unread count is a linear scan per row, done twice
@@ -907,9 +1262,48 @@ The current macOS 26-targeted Release build on Swift 6.4.2 warns that the noniso
   `NSColor` per access and `senderName` looks up its font per header
   (ThemeManager.swift:41, 100).
 
+- `JSONValue.nested` re-decodes the JSON string on every access
+  (`Models.swift`), and the transcript asks for `message_reactions` once per
+  message per render, plus per sticker hit-test. Cache the parsed value per
+  message, or precompute it beside the parsed document.
+  (2026-11-23 independent pass) `[V]`
+- `copyFullTranscript` and the context menu's code-reader item parse HTML
+  directly instead of using the session's parsed-document cache that the
+  render just filled (`ConversationWindow.swift` `plainBody(of:)`;
+  `ConversationShell.swift` `codeMenuItems`). Copying a 500-message
+  transcript therefore runs hundreds of SwiftSoup parses synchronously on
+  the main thread. Use `session.messageDocument(for:)` and move any miss off
+  the main actor. (2026-11-23 independent pass) `[V]`
+- The day pill runs two `enumerateAttribute` passes per scroll frame
+  (FloatingDayPill.swift:106,114). Cache the pill's paragraph range.
+  (2026-11-23 epic-chicken pass) `[H]`
+- Link-preview and image arrivals re-render every open window
+  (SentLinkPreviews.swift:69). Scope the invalidation to windows showing
+  the affected conversation. (2026-11-23 epic-chicken pass) `[H]`
+- `TranscriptReadPosition` parses `creation` for up to 5,000 cached rows per
+  render (TranscriptReadPosition.swift:46,70; `ServerTimestampParser.date`
+  does two Calendar conversions each). Memoize `(id, creation) -> Date` per
+  session. (2026-11-23 epic-chicken pass) `[H]`
+- Unsent outbox rows render in anchor/history windows: pending sends are
+  appended to every rendered slice, including an anchor window opened from
+  search, so a queued send appears after rows far older than the newest
+  cached one (ConversationWindow.swift:1208). Append only when the
+  projection reaches the canonical tail. (2026-11-23 epic-chicken pass)
+  `[H]`
+
 #### Measure independent costs in a busy transcript `[P]`
 
-Use this workload to attribute NM-08 and NM-P1. Populate the visible conversation with replies and the account's outbox with pending sends to unrelated conversations. Reply quotes perform a linear search through visible rows for every reply, and every render decodes the whole pending outbox before filtering by channel. Compare a per-render ID index and a channel-scoped SQL query using the same trace. For quotes, preserve the current first-match precedence, spoiler masking, and pending-send treatment. For the outbox, keep stable order and terminal-state exclusion. Measure CPU and decoded rows separately from missed compositor frames. [Render inputs and reply lookup](Sources/NevermoreApp/ConversationWindow.swift#L1044) · [Outbox query](Sources/NevermoreCore/Store.swift#L333)
+Use this workload to attribute NM-08 and NM-P1. Seed grouped quotes,
+spoilers, files, inline GIFs and an outbox with pending sends to unrelated
+channels. Reply quotes perform a linear search through visible rows for
+each reply. Compare a per-render ID index that preserves first-match
+precedence, spoiler masking and pending-send treatment. Use [#123](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/123)
+as the channel-scoped SQL variant. Exercise idle scroll, unrelated
+realtime updates and continuous resize at the same initial window size
+and position. Count text storage replacements, glyph layouts, animated
+image callbacks and decoded payloads separately from missed compositor
+frames. [Render inputs and reply lookup](Sources/NevermoreApp/ConversationWindow.swift#L1107) ·
+[Performance harness](docs/implementation/PERFORMANCE-HARNESS.md)
 
 ### 4.4 Composer `[H]`
 - Every keystroke encodes the whole draft to HTML and writes it to SQLite
@@ -930,6 +1324,14 @@ Use this workload to attribute NM-08 and NM-P1. Populate the visible conversatio
   `ConversationShell.swift:750-759` runs `boundingRect` over up to ~1 MB per
   key. Debounce or measure a bounded range. (2026-11-18 pass) `[H]`
 
+- The window that typed reloads its own draft after every keystroke: the
+  `.draftChanged` observer calls `restoreDraft()` for every window showing
+  the conversation, including the writer, which reads the draft back from
+  SQLite and re-serializes the live composer to compare HTML
+  (`ConversationWindow.swift`). Carry the saved HTML in the notification and
+  skip the reload when `displayedHTML` already matches. (2026-11-23
+  independent pass) `[V]`
+
 ### 4.5 Network and store `[H]`
 - `load()` upserts all 100 fetched rows (FTS delete and insert, a SwiftSoup
   parse each) even when one is new (Session.swift:478).
@@ -937,7 +1339,14 @@ Use this workload to attribute NM-08 and NM-P1. Populate the visible conversatio
   (Store.swift:527-532, 782-802); `stage(file:)` copies up to 64 MB inside a
   write (Store.swift:635-657); `trimMessages` sorts the whole table and
   sweeps every channel after every write (Store.swift:806-831). All of them
-  block every other store access, draft saves included.
+  block every other store access, draft saves included. `stage` also
+  fsyncs inside the write, so a large staging copy stalls history loads,
+  search and read receipts; copy to a temporary location and rename inside a
+  short write after re-checking the budget. (2026-11-23 pass)
+- The 8 MB default `perform` budget applies to every RPC, including the large
+  directory, channel and history reads. `get_list` is read with `try?`, so a
+  larger site silently keeps an empty directory. Give those calls their own
+  budget and surface the failure. (2026-11-23 pass) `[H]`
 - A `Raven User` doctype event clears names, directory, preferences and every
   profile photo, so all photos download again (Session.swift:401).
 - `HomeFeed.refresh()` makes six reads including a 5,000-row "sent" list
@@ -960,6 +1369,26 @@ Use this workload to attribute NM-08 and NM-P1. Populate the visible conversatio
   (SearchView.swift:675-690,1041,1072,1194-1197; SearchSideColumn.swift:67-68);
   memoize per reload. (2026-11-18 pass) `[V]`
 
+- `messages_fts.id` is declared `notIndexed()`, but every upsert, deletion,
+  trim and withdrawal deletes FTS rows by `id` (`Store.swift`). Each such
+  delete scans the whole index, so caching a page on a 20,000-row index
+  performs millions of row visits on the serial store queue. Use an
+  external-content FTS table keyed by `messages.rowid` (GRDB can synchronize
+  it) or an `id -> rowid` side table, and delete by rowid. (2026-11-23
+  independent pass) `[V]`
+- Re-caching an unchanged page re-indexes every row: JSON encode, FTS delete
+  and insert, a SwiftSoup parse for the index body, then two global sorts in
+  `trimMessages`. Make the upsert conditional (`ON CONFLICT ... DO UPDATE ...
+  WHERE raw IS NOT excluded.raw`), rebuild the FTS row only for changed
+  messages, and skip `trimMessages` when nothing changed. Implemented in #181, which
+  compares the stored payload in the upsert, encodes stored JSON with sorted
+  keys, and pins unchanged FTS rowids across a repeated cache.
+  (2026-11-23 independent pass) `[V]`
+- Home and Search file rows ask `NSWorkspace` for a file icon per row and
+  per reload (`HomeView.swift`), while `TranscriptStyle.fileIcon(for:)`
+  already caches the same lookup for the transcript. Route `HomeFileIcon`
+  through it. (2026-11-23 independent pass) `[V]`
+
 ### 4.6 Launch and memory `[H]`
 - Account stores are opened and migrated on the main actor before the first
   window (App.swift:123-128); restoring up to 12 windows builds each
@@ -970,8 +1399,6 @@ Use this workload to attribute NM-08 and NM-P1. Populate the visible conversatio
   `deletedIDs` and failure maps grow without bound.
 - The decoded-GIF budget is 160 MB; the media metadata beside it has no
   bound (NM-09, §4.8).
-- `SearchFeed.threadCache` never evicts (SearchFeed.swift:98,361,371); cap its
-  entries. (2026-11-18 pass) `[V]`
 - `AnimatedImageCache` clears ALL source sizes when it hits 4,096 keys
   (AnimatedImages.swift:57-61), so in-view GIFs can change aspect ratio; evict
   per key. (2026-11-18 pass) `[P]`
@@ -1026,6 +1453,10 @@ Time the synchronous ImageIO metadata read, workspace file-icon lookup and inlin
   Search already draws a themed `SearchRowView` (SearchView.swift:1044).
 - **Fix:** a themed sidebar row view for non-Classic themes, and
   `selectedSegmentBezelColor` and `contentTintColor` from the theme.
+- Partially implemented in #141 (merged): the Visual/Markdown segments
+  (composer bar and editor sheet), search tabs, theme-gallery ring/badge,
+  quick-reaction fill, GIF selection border and update notice now follow
+  `themeAccent`. Still open: the themed sidebar row view.
 
 ### 5.3 No design scale `[H]`
 About 15 spacing values, 8 corner radii (1.5 to 18), 13 font sizes
@@ -1041,7 +1472,9 @@ day-divider pill (`textBackgroundColor` on dark wallpapers); resting
 reaction chips (`tertiarySystemFill`); sent link preview titles
 (`linkColor`); the search error (`systemRed`); the "customized" badge on dark
 theme posters (ThemeSettingsView.swift:223). The visual sweeps in §8 cover all
-of these except the badge.
+of these except the badge. The search error and the collection status now
+use `themeAlert` (implemented in #157, merged); label truncation ellipsizes
+instead of clipping mid-glyph (implemented in #156, merged).
 
 ### 5.5 Smaller visual issues `[V]`
 - The empty composer is three lines tall and always shows the formatting bar
@@ -1091,6 +1524,29 @@ of these except the badge.
   them.
 - The title bar does not mark a private channel ("design / Acme"); the
   sidebar uses a lock tile. Show the same symbol in the title or subtitle.
+
+- Search file rows install two required sizes for one icon: `HomeFileIcon`
+  activates 28 x 28 and the hit cell activates 16 x 16 on the same anchors,
+  so Auto Layout breaks one and logs a conflict per row. Give the icon a
+  size parameter and pass 16 from Search. (2026-11-23 independent pass) `[V]`
+
+From the 2026-11-23 epic-chicken pass:
+- **Theme editor Wallpaper tab clips the ornament row** `[V]`:
+  ThemeEditor.swift:50,511,603-604 — the row's intrinsic width is ~761 pt
+  in a 640 pt pane with no horizontal scroller, so at six color wells the
+  Remove control is unreachable. Wrap the wells or enable
+  `hasHorizontalScroller`.
+- **Collection window bottom bar overflows at minimum width** —
+  implemented in #160 (merged): the two inbox-only actions hide below 720 pt
+  and both stay available from the Message menu.
+- **Onboarding and Account Preferences ignore the theme** `[P]`: system
+  colors/fonts only, no raven mark on the first-run window
+  (Onboarding.swift:44-104, AccountPreferencesController.swift:117,135-138).
+- **Attachment window is fixed 540x260** `[P]`: add `.resizable` or size to
+  content (AttachmentWindow.swift:47).
+- **Empty states are bare** `[V]`: collections show "No Items"/"No
+  Matches" (CollectionWindow.swift:367); reuse the SearchView empty-state
+  component (icon, title, detail, action).
 
 ### 5.6 NM-V1 · Check transcript line length without sacrificing code or tables
 
@@ -1171,6 +1627,19 @@ often arrive after their window closed or changed account". Proposal in §11.
   (ThemeSettingsView.swift:45-46). (2026-11-18 pass) `[P]`
 - The File panel's filename is no longer selectable or copyable
   (FileInspector.swift:92-94,161). (2026-11-18 pass) `[H]`
+- The Messages rotor falls back to "Attachment" for messages whose HTML is
+  empty, so every file announces the same words. Build the rotor body from
+  the displayed file name, image text or `content`.
+  (2026-11-23 pass) `[H]`
+
+- The member roster's count replaces the field's accessibility label, so
+  VoiceOver says "Member count" without the number
+  (`MemberRosterWindow.swift`). Let the count text be the label, or set the
+  accessibility value. (2026-11-23 independent pass) `[H]`
+- Reduce Transparency is honored nowhere (zero hits for
+  `accessibilityDisplayShouldReduceTransparency`), and Jump to Latest sits
+  outside the key-view loop (ConversationShell.swift:472-476).
+  (2026-11-23 epic-chicken pass) `[H]`
 
 ### 6.5 Convenience `[H]`
 - No Mark All Read command, only Home's button: add Message ▸ Mark All Read
@@ -1201,6 +1670,19 @@ often arrive after their window closed or changed account". Proposal in §11.
   `minDate = Date()` and re-clamp in `accept()`. Implemented in #114: the
   minimum is set at creation and refreshed on the timed toggle, and
   `accept()` still rejects a deadline that has passed. `[V]`
+- **Use the typed prefix in the Open Conversation empty message** `[V]`.
+  In [#124](https://forge.goodvantage.cloud/Goodvantage/Nevermore/pulls/124)
+  the generic chooser already filters `@` to people and `#` to channels,
+  and its empty message names both. Use the parsed prefix for the
+  generic picker. Check both prefixes, a bare query and the two
+  Search pickers. [ConversationChooser.swift](Sources/NevermoreApp/ConversationChooser.swift#L53)
+- **Expose the selected outbox error in the window** `[P]`. The table
+  only exposes operation errors as pointer tooltips. Give the selected
+  row a selectable explanation below the table with its state and any
+  delivery uncertainty. Verify paused, retryable and ambiguous cases
+  with VoiceOver and Full Keyboard Access. Check the existing Return
+  routing issue (§3.5) before adding another keyboard action.
+  [OutboxWindow.swift](Sources/NevermoreApp/OutboxWindow.swift#L188)
 - Outbox "Cancel Send" discards the text instead of taking it back into the
   composer (OutboxWindow.swift:279-292); the app already has take-back.
 - GIF settings cannot test a pasted key (GIFSettings.swift:83).
@@ -1222,6 +1704,21 @@ often arrive after their window closed or changed account". Proposal in §11.
   that a message was saved or pinned.
 
 - **Edit an existing date in context.** Change Time and Edit Reminder currently open at one hour from now. Read the row's `scheduled_time` or `remind_at` in the site timezone and prefill a future edit from it. Keep snooze as a distinct operation. Decide how to show an elapsed time and a repeated DST hour. Verify Cancel, an absent timestamp and differing device/site timezones. [Collection actions](Sources/NevermoreApp/CollectionWindow.swift) · [Date sheet](Sources/NevermoreApp/SheetPrompts.swift)
+
+- **Jump to First Unread** in the transcript (Option-Command-U) complements
+  Jump to Latest and opening at the first unread (§6.1): scroll the divider
+  into the top of the reading band and stop following, without changing the
+  selection. Disable the item when nothing is unread. Check a divider above
+  and below the loaded window. (2026-11-23 independent pass)
+- **Sort the sidebar by recent activity** (opt-in) instead of by name, using
+  `last_message_timestamp` with a name tiebreak, within each workspace and
+  for Direct Messages. Keep name order the default until the owner prefers
+  otherwise. Put the pure ordering in Core and test equal and missing
+  timestamps. (2026-11-23 independent pass)
+- **Mark a workspace section read** from its header's context menu: confirm
+  the unread count, then queue one read receipt per conversation in that
+  section. Leave muted and archived rows alone.
+  (2026-11-23 independent pass)
 
 ### 6.6 NM-06 · Test pane focus restoration before changing the Tab loop
 
@@ -1277,6 +1774,30 @@ Also: open Raven message links in the app (NM-14, §7.5); attach a Frappe
 document; copy a file's download link where permissions allow, and batch file export (NM-22, §7.6); who reacted; reminder presets;
 per-channel Links and Threads views; composer banners (mention not in
 channel, quiet hours); on-leave badges; meeting links.
+
+From the 2026-11-23 epic-chicken pass `[P]`:
+- **Channel Files paging ignores the server cursor.**
+  `ConversationActions.swift:280` hardcodes `limit: 100` and never sends
+  `cursor_creation`/`cursor_id`; files past the first 100 are unreachable.
+- **Per-channel mark-all-read RPC unused.** `raven_channel.
+  mark_all_messages_as_read` exists on the pinned server; Home marks
+  conversations one by one via `track_visit`.
+- **Privacy: received-message `og:image` previews fetch third-party hosts
+  even when link previews are disabled.** ConversationWindow.swift:1275-1277
+  requests previews regardless of `ComposerPreferences.showsLinkPreviews`,
+  which only gates the composer card. Honor the preference for
+  received-message images too, or document the scope.
+
+**Verify the offline attachment workflow** `[P]`. Stage a file and caption
+in a cache-backed, previously writable conversation, then restart with
+the attachment still in the draft. Accept the send while loopback uploads
+are held unavailable. Check that the user can tell the queued row from a
+completed upload, and that authorization still applies when the session
+reconnects. Include an expired grant, an archived conversation and a
+second account. Change the button or status copy if the fixture exposes
+a discovery problem. Scheduled sends use a separate text-only contract.
+[Composer send](Sources/NevermoreApp/ConversationWindow.swift#L1772) ·
+[Raven constraints](docs/RAVEN-RESEARCH.md#9-other-constraints-that-affect-the-design)
 
 ### 7.3 Mac-native expectations, ranked `[H]`
 Actionable notifications (§7.1); add message destinations to the existing
@@ -1354,7 +1875,13 @@ Build on the recorded contrast findings in NM-26. Capture matched screenshots at
   then migrate the transcript, composer, sidebar, Home and Search.
 - Search rows on the scale, with hover and focused and unfocused selection.
 - Code blocks as rounded, theme-colored cards.
-- The thread inspector in theme fonts and colors.
+- Give the thread inspector the parent transcript's reading scale and
+  color roles. Prototype a compact root card with one jump action and use
+  quiet separators between replies. Compare matched captures in Classic
+  and a light glass theme, with large type, Increase Contrast and a short
+  pane. Include a root with a long unbroken token and check that Close
+  and Open in Window remain reachable. Keep inline reply and attachment
+  actions independent. [ThreadInspector.swift](Sources/NevermoreApp/ThreadInspector.swift#L41)
 - One empty-state component.
 - Focus rings everywhere.
 - Extend the contrast audit to text over tinted glass, the accent over
@@ -1444,6 +1971,12 @@ Compare the automatic jump-back with the manual bookmark below. Both can use the
 
 **NM-D1 · Manual reading bookmark.** When comparing two messages far apart in one conversation, the reader can save a message to Raven or navigate back through intervening locations. Prototype “Hold My Place” in the message menu. A small stationary feather marks one message in this window and a keyboard command jumps back to it. Use the existing authorized message-anchor navigation. Store only the account, channel and message identifiers in window memory, clear it on access loss or closure, and announce the action in VoiceOver. Compare the number of actions needed to read a linked thread and return to a particular sentence against Back and Saved Messages. Keep it only if it improves that task without competing with the unread divider.
 
+If the window-local bookmark proves useful, test whether people need to
+resume from it after closing and reopening the app. Store one local message
+identifier per conversation and clear it on revocation or account removal.
+Test edited, deleted and evicted anchors before choosing a persistent
+representation.
+
 Related: §11, question 4, on where the unread boundary goes after Jump to Latest.
 
 #### Navigate cached dates `[P]`
@@ -1461,6 +1994,27 @@ The existing Wet Ink send and demo wire already distinguish queued local content
 **Acceptance.** Keep the hold account-scoped and durable across quit, with a clear exception for a POST already underway. Define what Retry and Take Back do during a hold, and resume in queue order after an intentional action. Keep reading and drafting active, with no focus change or motion on incoming events. Test across two windows and verify normal retries after resume.
 
 Today the outbox flushes only while Nevermore is frontmost (§3.4); settle that question first, since a hold changes the same flush.
+
+### 9.3 Product ideas beyond the current plan
+
+- **Quick switcher (⌘T):** one palette for conversations, messages and
+  people. Reuse `SearchCriteria` parsing and the conversation anchor route;
+  keep it keyboard-first and free of background requests or read receipts.
+- **Forward a message:** choose a destination and send the original text
+  with attribution through the durable outbox, like any other send.
+- **Drag a message onto a sidebar row** to forward it or quote it there,
+  reusing the existing drag/outgoing payload types.
+- **Per-channel notification level in the UI:** surface mute and
+  `allow_notifications` from Channel Details instead of leaving them as raw
+  channel fields.
+- **Quiet send mark:** a message accepted with Send Silently leaves a still,
+  low-contrast ink mark instead of the Wet Ink drop, matching the existing
+  pending-send status line. No new motion.
+- **A raven that explains itself:** the sidebar row's tooltip gains the
+  unread and mention state whose bird the perch already shows, so hovering a
+  bird says "3 unread, mentions you" without adding chrome to the row.
+- **Recent search terms as static buttons** in Search's empty state; no
+  query is sent until one is chosen.
 
 ---
 
@@ -1527,6 +2081,19 @@ Today the outbox flushes only while Nevermore is frontmost (§3.4); settle that 
   `SIGN_IDENTITY`, though `resolve-sign-identity.sh` exists for ambiguous
   names; the CI SDK check fails cryptically on a non-numeric version
   (ci.yml:71). `[H]`
+- `Endpoints.swift`'s "RPCs the app layer calls today" inventory omits nine
+  used methods (document_link.get_preview_data,
+  notifications.get_unread_notification_message_ids,
+  raven_channel_member.add/remove, raven_message.forward_message/
+  get_message_readers, search.search_links,
+  threads.get_other_threads/get_unread_threads). Add them, or generate the
+  list in CI and diff it against `"raven.api.…"` literals in Sources.
+  (2026-11-23 epic-chicken pass) `[P]`
+- `removeRevokedChannels`/`withdrawHistory` purge all projections, not just
+  the revoked channels' (Store.swift). Pairs naturally with the merged #131
+  contract. (2026-11-23 epic-chicken pass) `[V]`
+- Store permission hardening still uses `try?` where staging uses `try`
+  (Store.swift:159,181). (2026-11-23 epic-chicken pass) `[H]`
 
 ---
 
@@ -1675,7 +2242,31 @@ So these are not raised again.
   thread id is the document primary key, so the same id cannot name two
   different parents; the id tiebreak is the whole ordering guarantee.
 
+The grouped-reply timestamp audit was stale on `d86965c`. The renderer
+records `bodyStart` before appending the quote, so it equals the row start
+for a continued message. A native assertion at the first character of the
+grouped quote passed without changing production code.
+
+From the 2026-11-23 epic-chicken pass:
+- "`ChannelDetails.rows` passes `deleted` as a revoked set": pinned intent,
+  not a bug. `ChannelDetailsTests.revokedOrDeletedChannelsExposeNoStaleFields`
+  asserts a channel ID in `deleted` yields no rows, and the second
+  `isRevoked` call covers the real revoked set, so the two calls are a
+  union. No change.
+- "`RavenClient` leaks an ephemeral `URLSession`": already fixed —
+  `deinit`/`invalidate()`/`revoke()` now tear it down (#117).
+- "Menu bar 'Check for Updates…' never becomes 'Update Available…'": already
+  handled via `refreshUpdateMenuTitles()` (AppUpdateController.swift:163-167).
+- "'Schedule Message' accepts a marker-only draft": already guarded via
+  `hasText` (#109).
+
 ---
+
+- "One failed `writeHistory` permanently wedges later history writes" and
+  "`refreshAfterInflight` returns the shadowed old task": both were false
+  positives found on review of PRs #162 and #154 (closed). `Task.result`
+  returns a `Result` and never throws, and `if let task` shadows only inside
+  the if body, so `return task` already re-read the property.
 
 ## 13. Validation record
 
@@ -1790,9 +2381,89 @@ suite). All three PRs carry green Native Mac checks and a completed GLM
 review on the merged head. No live Raven connection, Instruments trace,
 signed Release run or GUI screenshot came from this worktree.
 
+### 13.9 Epic-chicken follow-up verification
+
+Built the macOS 26-targeted debug app with Xcode 27.2. The unpackaged
+native suite ran the grouped-reply probe and the nine new chooser
+assertions. Its packaged-resource check requires an app bundle, and
+focus-dependent press and formatting checks varied across bare runs.
+The review used local fixtures. The interactive screen and frame timing
+still need a dedicated pass.
+
+### 13.10 Nevermore sweep verification
+
+Baseline `swift test --triple "$(uname -m)-apple-macosx26.0"` passed 406
+tests in 34 suites on `d86965c`. A debug `--demo --self-check` run recorded
+1,448 PASS and two failures, both the focus-dependent flakes documented in
+§14 while another Nevermore instance drove the desktop; no failure was
+attributed to the product. Targeted suites passed for each change:
+`StoreTests` (25 tests) and `InkPlanTests` (8), and the emoji module passed
+its own assertions, including the new paged-failure case that fails without
+the fix. No live Raven connection, Instruments trace or GUI screenshot came
+from this worktree; Native Mac checks run in CI.
+
+### 13.11 Epic-chicken audit-pass verification
+
+`swift test --triple "$(uname -m)-apple-macosx26.0"` passed 407 tests in 34
+suites on the audit-pass branches. Each new AppKit expectation was observed
+failing against the unfixed source before it passed: the placement check on
+the base revision, the search check with `tabChanged` unchanged, and the
+`HomeDigestTests` actionable set before the digest change. A Debug
+`build-app.sh` build ran the full `--demo --self-check`; a first run showed
+six focus-dependent failures while other agents drove the shared desktop,
+and a clean rerun passed with zero failures. No live Raven connection,
+signed Release run or GUI screenshot came from this pass; CI carries those.
+The bounded LongCat audits of the session, store/Home and transcript shell
+independently re-derived the selection-restore defect that #145 fixes, and
+added the `visibleAnchor` scan, the rotor fallback and the HomeFeed entries
+recorded above.
+
+### 13.12 Independent pass verification
+
+Baseline `swift test --disable-keychain --triple "$(uname -m)-apple-macosx26.0"`
+passed 406 tests in 34 suites on `e9a2041`. Each new expectation was observed
+failing on the unfixed source before it passed: the transient OAuth code, the
+long-message snippet, the withdrawn receipt, Home's content after an account
+switch, and the repeated page cache's FTS rowids. The Home case ran in a Debug
+`build-app.sh` bundle through a temporary `--home-only` early exit that was
+removed before committing, and the Home module then passed with zero failures.
+The other four ran their targeted suites plus the full package suite (287
+XCTest, 89 protocol and 406 core tests, all passing). Four of seven bounded
+LongCat 2.5 audits produced no output within their limit; the three that
+completed were checked against the cited code before any entry was kept. No
+live Raven connection, signed Release run, Instruments trace or screenshot
+came from this worktree; CI carries the native checks.
+
+### 13.13 Epic-chicken task-pass verification
+
+`swift build --target NevermoreApp` passed on each branch, and
+`swift test --triple "$(uname -m)-apple-macosx26.0"` passed 406 tests in
+34 suites on `fix/thread-inspector-refresh`, including the new
+`testMessagesBeforeBoundaryReadsTheOlderPage`. Unpackaged Debug
+`--demo --self-check` runs recorded 1,441 to 1,442 passes: #184 and #178
+each failed only the expected packaged-resource check, and #170 added the
+two documented shared-desktop press flakes in an earlier run. The first
+#170 run exposed an observer token that was not retained and a demo
+early-return that skipped registration; both were fixed before the
+passing rerun. #186 adds no self-check because its mutation path needs a
+loopback server; the change is build-verified and CI carries the suite.
+No live Raven connection,
+signed Release run, Instruments trace or GUI screenshot came from this
+worktree. All four branches went through at least two GLM rounds; the
+confirmed findings (observer retention, cancellation, paging boundary,
+receipt band and dedupe, visit error visibility) were fixed, and the rest
+were declined with code evidence in the PR threads.
+
 ---
 
 ## 14. Working notes for whoever picks this up
+
+- **Concurrent worktrees:** this task ran several agents against the same
+  repository at once, and one worktree was shared by more than one agent.
+  Check `git worktree list` and `git branch -vv` before committing, and
+  prefer a separate worktree (`git worktree add --detach <path> origin/main`)
+  over checking out a branch another agent may be using. A copied `.build`
+  cache needs its `workspace-state.json` paths rewritten.
 
 - **Opus review verification (63194f6):** each branch ran `swift test` and
   the full `--demo --self-check`. More focus flakes seen while other agents
@@ -1864,3 +2535,166 @@ signed Release run or GUI screenshot came from this worktree.
 - **Performance driver:** `python3 scripts/check-performance.py
   --idle-seconds 300` produces the §13.1 table; the second and third runs
   there used a five-second idle.
+
+---
+
+## 15. Deep-model pass of 2026-11-23 (consolidated findings)
+
+Source: `tmp.md` from the `epic-chicken-mine` worktree, merged here. The pass
+combined one full self-review with five bounded LongCat 2.5 audits (A:
+transcript/window, B: composer, C: core/protocol, D: Home/Search/collections/
+panels, E: shell/theme/onboarding). Tags: `[V]` verified in code, `[H]` high
+confidence, `[P]` plausible. Items implemented by this pass carry their PR in
+§1 and are marked DONE; the §1 table is authoritative for each PR's merge
+status (final: all 29 implemented PRs merged; #132 closed as a duplicate of
+#155; #154 and #162 closed as false positives, §12). Two helper findings
+turned out to be false positives (§12). Everything else is open backlog.
+
+### 15.1 Transcript and window (audit A)
+
+- "Reply in Thread" offered inside a thread creates a nested thread
+  server-side — DONE, #169 (menu, hover bar, menu validation and VoiceOver
+  actions all gated; `openThread` in a thread replies in place).
+- Message actions were offered on System events — DONE, #169 (System rows get
+  only copy commands, matching Raven web).
+- Hover bar is not repositioned when a render reflows text without scrolling —
+  it can point at one message while its buttons act on another
+  (ConversationWindow.swift:1330,:1351, ConversationShell.swift:1092-1149). [H]
+- Thread inspector has no reply composer (Raven web's ThreadDrawer has one)
+  (ThreadInspector.swift:41-62). [V]
+- Anchored open never resumes auto-follow at the live edge; `requestedAnchor`
+  is cleared only by followLatest/loadEarlier/deletion
+  (ConversationWindow.swift:1407, UnreadAffordance.swift:10). [P]
+- Thread inspector restores its selection by raw character offset
+  (ThreadInspector.swift:113). [V]
+- Context menu's "Open Code Reader…" re-parsed the message HTML — DONE, #168
+  (uses `session.messageDocument(for:)`).
+- Reply chosen while editing another message is silently dropped by the edit
+  save, then reappears as a banner (ConversationWindow.swift:1912). [V]
+
+### 15.2 Composer (audit B)
+
+- Ordered-list renumber after leavingBlock / whole-line delete — DONE, #179.
+- `sendGIF` could post the same GIF twice — DONE, #133 (`acceptingGIFs` keyed
+  by channel + body, held through delivery and released in `release()`).
+- Menu-driven caret format left the toolbar stale — DONE, #138 (refresh only
+  when `sendAction` was handled).
+- Formatting commands act only on the first of multiple selections
+  (ConversationWindow.swift:142 etc.). [V]
+- `MarkdownSourceFormatting` does not escape the selection. [H]
+- Clear Formatting leaves inline-code background; list/quote commands only
+  add, never unwrap; dead in Markdown mode (ComposerFormatting.swift:22,:67). [V]
+- `pasteLinkingAddresses` multi-selection span bug (ComposerLinks.swift:261). [H]
+- Formatting buttons lack VoiceOver on/off state
+  (ComposerFormattingBar.swift:87) [H]; composer placeholder not AX-exposed
+  (ConversationWindow.swift:40) — DONE, #188.
+- `insertText` stale replacementRange after `prepareForTypedText`;
+  undo checkpoint on rejected edit (ComposerTyping.swift:280). [P]
+- Table cell editor has no mentions; inserted table rows/cols drop alignment
+  (EditableRichTable.swift:70,:95); table at draft end not clickable to edit
+  (ComposerTables.swift:34). [P]/[H]
+
+### 15.3 Core and protocol (audit C)
+
+- Buffered responses enforced the byte cap before status classification —
+  DONE, #159 (`readBounded`; oversized 401 now refreshes, oversized 403 maps
+  to its real status, padded error bodies still classify `exc_type`).
+- v2 FTS migration never backfills `messages_fts` (Store.swift:241) — latent. [V]
+- Download lease (512 MiB) covers streamed saves, not inline images/GIFs/
+  avatars (DownloadedAttachment.swift:91). [V]
+- `LinkPreviewLoader.imageData` lacks in-flight coalescing (:201). [V]
+- Global 8 MiB RPC cap. [P]
+- `MessageDocumentCache` parses before the cacheability check (:61) — parse
+  is needed for rendering, so only the cost walk could move; low value. [V/P]
+- `ReleaseCheck` drops manifest sha256/size from `ReleaseOffer` (dead API). [V]
+- Store recovery / v3 migration aborting on one bad payload — DONE, #185.
+- Real-time Task ordering, `SiteOrigin.normalize` loopback/port edges, PKCE
+  constant-time compare, JSONValue payload bound, close GRDB queue in deinit. [P]
+
+### 15.4 Home, search, collections, panels (audit D)
+
+- `refreshAfterInflight` "shadowing" — FALSE POSITIVE, see §12.
+- `CollectionWindow.restrictRevoked` does not drop `deletedIDs` rows. [V]
+- PollWindow transient refresh failure erases the poll. [H] (product call)
+- Empty poll retraction reported success — DONE, #151 (`PollError.noVote`).
+- Home Mark All Read skipped conversations with no reported latest — DONE,
+  #148 (falls back to the newest cached message; acted/skipped/unreadable
+  reported truthfully).
+- Attachment window showed saved-file actions before saving — DONE, #152.
+- Home People card on `.failed` — DONE, #172.
+- `SearchSideColumn.cancel` status clear — DONE, #173.
+- Scheduled "Edit Text…" is a no-op for attachment-only messages. [H]
+- SearchSideColumn silent when the parent thread is deleted. [V]
+- CodeReaderWindow closes on any validate error. [H]
+- MemberRoster per-keystroke refold — DONE, #183 (`SearchIndex`).
+- Search preview cache — DONE, #174 (LRU).
+- Home row date formatter per row + missing year — DONE, #171.
+
+### 15.5 Shell, theme, onboarding (audit E)
+
+- "writeHistory wedge" — FALSE POSITIVE, see §12.
+- Re-login invalidating before the Keychain save — DONE, #163.
+- Wrong-account "Mark All Notifications Read" — DONE, #164.
+- clearHistory leaving decoded GIFs/link previews — DONE, #167.
+- Window restoration saves only conversation windows, not collection
+  windows (Inbox/Threads/…) (App.swift:169). [V]
+- `lastConversation` is memory-only; Dock reopen after quit lands on Home
+  (App.swift:91). [V]
+- Account removal purges window restoration before knowing removal succeeded
+  (App.swift:334). [V]
+- Theme taglines in the gallery tooltip/AX help — DONE, #182.
+- Theme ornaments redraw on every live-resize frame
+  (ThemeBackdropView.swift:126). [H]
+- Keyboard Shortcuts window is hand-written and already drifts (missing ⌃⌘G)
+  (NativeShell.swift:106) — DONE, #190: generated from `NSApp.mainMenu`, HIG
+  modifier order (⌃⌥⇧⌘), correct function-key glyphs, F1–F35 labels.
+- `--demo` never activates the app (App.swift:123) — DONE, #189.
+- Theme-editor drags re-apply chrome to every window per step
+  (ThemeIntegration.swift:19). [H]
+
+### 15.6 Own-pass findings beyond the audits (from tmp.md §2)
+
+- `deliverNotification` bypassed the `read` seam — DONE, #132 (now reads via
+  `read`, page widened to 50).
+- `message_deleted` durability is fire-and-forget (Session.event spawns an
+  unawaited delete task). [P]
+- `Session.stop()` leaves `realtimeLive` true and does not clear
+  draft-related caches (`draftChannelIDs`, `composerModes`, `sharedTextStorage`,
+  `draftUndoManagers`, `draftRevisions`, `pendingVisitWrites`,
+  `approvedOldSends`, `mentionedChannels`). [P]
+- `App.add` switches `windows.last`, not the frontmost window (App.swift:248)
+  — related owner question in §11 item 8. [V]
+
+### 15.7 Novel ideas from this pass (additions to §9)
+
+- Restoration feather: fly one feather from the sidebar onto a restored
+  conversation row (reuse `UnkindnessController.fly`); static under Reduce
+  Motion.
+- Day-ink divider: deterministic subtle ink tint derived from the calendar
+  date for the day divider / floating day pill.
+- Account-switch flight: the old account's perched raven flies off and the new
+  account's arrives when a window switches accounts.
+- Ink-bleed theme cards: one-shot ink-bleed edge on gallery cards when first
+  shown/hovered.
+- Feather drag cursor while carrying a sticker/emoji.
+- Ink anchor for Jump to Latest: a feather in the gutter at the parked
+  position plus one-shot "Back to where you were" (extends NM-17, §9.2).
+- Inspector reply perch: a narrow glass-quill composer sliding up from the
+  thread inspector footer with the root message as reply context.
+- System events as quiet centered ink rules with a quill mark and no actions.
+- Day-pill shadow + feather left at the divider when crossing into a new day.
+- Hover-bar ink blot: a press leaves a brief wet-ink blot that dries into the
+  button highlight, tying into the Wet Ink send animation.
+
+### 15.8 Verification notes for this pass
+
+- Every PR branch was built and the full suite run locally
+  (`swift build` / `swift test --triple "$(uname -m)-apple-macosx26.0"`,
+  406 tests / 34 suites on the base, plus new tests where the target is
+  package-testable: RavenClient boundary tests, SerializedWriteChain tests,
+  SearchIndex equivalence, Store recovery/migration corruption tests).
+- GLM review findings were addressed per PR (page widened to 50 with a
+  boundary self-check, guard held through delivery, named error-body cap plus
+  lenient error decode, truthful mark-read summary, cache-key calendar
+  identifier, hoisted renumber anchors, sendAction-gated toolbar refresh).
+- Two helper findings were closed as false positives after review (§12).

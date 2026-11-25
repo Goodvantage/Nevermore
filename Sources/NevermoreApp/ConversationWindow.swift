@@ -37,16 +37,26 @@ import NevermoreCore
     static let clipboardImageLimit = 20 * 1024 * 1024
     static let editingAttachmentMessage = "Attachments cannot be added while editing. Send a new message with the file."
     /// Drawn while the composer is empty, like Messages' "iMessage" prompt.
-    var placeholder = "" { didSet { needsDisplay = true } }
+    var placeholder = "" {
+        didSet {
+            needsDisplay = true
+            // The drawn placeholder is invisible to VoiceOver otherwise.
+            setAccessibilityPlaceholderValue(placeholder.isEmpty ? nil : placeholder)
+        }
+    }
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard string.isEmpty, !hasMarkedText(), !placeholder.isEmpty else { return }
         let padding = textContainer?.lineFragmentPadding ?? 5
         let origin = NSPoint(x: textContainerOrigin.x + padding, y: textContainerOrigin.y)
-        let font = (typingAttributes[.font] as? NSFont) ?? self.font ?? .systemFont(ofSize: 14)
-        (placeholder as NSString).draw(at: origin, withAttributes: [.font: font, .foregroundColor: NSColor.placeholderTextColor])
+        (placeholder as NSString).draw(at: origin, withAttributes: [.font: ComposerMetrics.font, .foregroundColor: NSColor.placeholderTextColor])
     }
-    override func didChangeText() { correctAutomaticLinks(); super.didChangeText(); needsDisplay = true }
+    override func didChangeText() {
+        correctAutomaticLinks()
+        if string.isEmpty, !hasMarkedText() { typingAttributes = NativeRichText.plainTypingAttributes }
+        super.didChangeText()
+        needsDisplay = true
+    }
     override func shouldChangeText(inRanges affectedRanges: [NSValue], replacementStrings: [String]?) -> Bool {
         guard affectedRanges.allSatisfy({ NativeRichText.allowsTableChange(in: attributedString(), range: $0.rangeValue, replacingText: replacementStrings != nil) }) else { NSSound.beep(); return false }
         if replacementStrings != nil { adoptAddressLinks(near: affectedRanges.map(\.rangeValue)) }
@@ -208,11 +218,57 @@ import NevermoreCore
     override func paste(_ sender: Any?) {
         guard isEditable else { return }
         guard !pasteAttachments(from: .general) else { return }
-        // Native RTF is normalized by the codec before export; never import remote HTML resources.
         guard NSPasteboard.general.availableType(from: [.rtf, .string]) != nil, !pasteAsLink(NSPasteboard.general.string(forType: .string)) else { return }
+        // Bound the paste like the Markdown path: an oversized text paste is
+        // refused here instead of inserting and failing at the next draft save.
+        if let text = NSPasteboard.general.string(forType: .string),
+           string.utf8.count - selectedRange().length + text.utf8.count > RichTextCodec.maximumBytes {
+            onPasteError?(RichTextError.tooLarge.localizedDescription)
+            return
+        }
         // Only pasted text replaces the selection; files and pictures are staged.
         moveCaretOutOfMarker()
         pasteLinkingAddresses { super.paste(sender) }
+    }
+    // Paste only the text formats we handle here. Attachments use their own
+    // staging path, and the HTML importer can load remote resources.
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] { [.rtf, .string] }
+
+    override func readSelection(from pasteboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        if type == .string { return super.readSelection(from: pasteboard, type: type) }
+        let range = rangeForUserTextChange
+        guard type == .rtf, range.location != NSNotFound, let data = pasteboard.data(forType: .rtf),
+              let text = NSMutableAttributedString(rtf: data, documentAttributes: nil),
+              text.length > 0 else { return false }
+
+        // Keep the font traits that the Raven codec understands. The source
+        // family and size would otherwise carry over into subsequent typing.
+        let manager = NSFontManager.shared
+        let fullRange = NSRange(location: 0, length: text.length)
+        var changed = false
+        text.enumerateAttribute(.font, in: fullRange) { value, range, _ in
+            let traits = (value as? NSFont).map { manager.traits(of: $0) } ?? []
+            let base = traits.contains(.fixedPitchFontMask)
+                ? NSFont.monospacedSystemFont(ofSize: NativeRichText.composerFontSize - 1, weight: .regular)
+                : ComposerMetrics.font
+            let emphasis = traits.intersection([.boldFontMask, .italicFontMask])
+            let font = emphasis.isEmpty ? base : manager.convert(base, toHaveTrait: emphasis)
+            if font != value as? NSFont {
+                text.addAttribute(.font, value: font, range: range)
+                changed = true
+            }
+        }
+        guard changed else { return super.readSelection(from: pasteboard, type: .rtf) }
+
+        if selectedRanges.count == 1 { return performValidatedReplacement(in: range, with: text) }
+
+        // AppKit handles discontiguous selections as a single paste across
+        // ranges. Give it normalized RTF so it can keep its selection and undo behavior.
+        guard let normalized = text.rtf(from: fullRange, documentAttributes: [:]) else { return false }
+        let cleaned = NSPasteboard.withUniqueName()
+        defer { cleaned.releaseGlobally() }
+        guard cleaned.setData(normalized, forType: .rtf) else { return false }
+        return super.readSelection(from: cleaned, type: .rtf)
     }
     static func hasAttachments(_ pasteboard: NSPasteboard) -> Bool {
         PromisedFileReceiver.containsPromises(pasteboard) || pasteboard.availableType(from: [.fileURL, .png, .tiff]) != nil
@@ -353,7 +409,29 @@ import NevermoreCore
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if isOverHoverBar(point) { NSCursor.arrow.set() } else if replyTarget(at: point) != nil { NSCursor.pointingHand.set() } else { super.mouseMoved(with: event) }
+        hoveredCardLocation = isOverHoverBar(point) ? nil : cardLocation(at: point)
         onHover?(point)
+    }
+    /// The link preview or file card under the pointer, drawn with a
+    /// stronger edge so it reads as the one thing a click opens.
+    var hoveredCardLocation: Int? { didSet { if oldValue != hoveredCardLocation { invalidateCard(oldValue); invalidateCard(hoveredCardLocation) } } }
+    private func invalidateCard(_ location: Int?) {
+        guard let location, let storage = textStorage, location < storage.length, let layout = layoutManager,
+              let cell = (storage.attribute(.attachment, at: location, effectiveRange: nil) as? NSTextAttachment)?.attachmentCell as? TranscriptCardCell else { return }
+        cell.isHovered = location == hoveredCardLocation
+        guard let frame = AnimatedImageOverlay.attachmentFrame(at: location, layout: layout, origin: textContainerOrigin) else { return }
+        setNeedsDisplay(frame.insetBy(dx: -2, dy: -2))
+    }
+    /// The card whose drawn frame holds `point`, as a character location.
+    func cardLocation(at point: NSPoint) -> Int? {
+        guard let layout = layoutManager, let container = textContainer, let storage = textStorage, storage.length > 0 else { return nil }
+        let origin = textContainerOrigin
+        let glyph = layout.glyphIndex(for: NSPoint(x: point.x - origin.x, y: point.y - origin.y), in: container)
+        guard glyph < layout.numberOfGlyphs else { return nil }
+        let index = layout.characterIndexForGlyph(at: glyph)
+        guard index < storage.length, (storage.attribute(.attachment, at: index, effectiveRange: nil) as? NSTextAttachment)?.attachmentCell is TranscriptCardCell,
+              let frame = AnimatedImageOverlay.attachmentFrame(at: index, layout: layout, origin: origin), frame.contains(point) else { return nil }
+        return index
     }
     override func cursorUpdate(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -376,6 +454,7 @@ import NevermoreCore
     var onReplyQuotePress: ((String) -> Void)?
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
+        hoveredCardLocation = nil
         let point = convert(event.locationInWindow, from: nil)
         if !subviews.contains(where: { !$0.isHidden && $0.frame.contains(point) }) { onHover?(nil) }
     }
@@ -410,13 +489,24 @@ import NevermoreCore
     /// without reading controls, with full timestamps where headers show
     /// only the time, and without presentation commands or editor-only
     /// attributes reaching Mail, Services, drag destinations or paper.
-    static func prepareForExport(_ output: NSMutableAttributedString) {
+    /// What an export is for. A copy carries text, so a picture becomes its
+    /// file name; a printout keeps the picture.
+    enum ExportPurpose { case copy, print }
+    static func prepareForExport(_ output: NSMutableAttributedString, for purpose: ExportPurpose) {
         var controls: [NSRange] = []
         output.enumerateAttribute(.nevermoreReadingControl, in: NSRange(location: 0, length: output.length)) { value, range, _ in if value as? Bool == true { controls.append(range) } }
         for range in controls.reversed() { output.deleteCharacters(in: range) }
         var substitutions: [(NSRange, String)] = []
         output.enumerateAttribute(.nevermoreCopyText, in: NSRange(location: 0, length: output.length)) { value, range, _ in if let text = value as? String { substitutions.append((range, text)) } }
-        for (range, text) in substitutions.reversed() { output.replaceCharacters(in: range, with: text) }
+        if purpose == .copy {
+            output.enumerateAttribute(.nevermorePictureName, in: NSRange(location: 0, length: output.length)) { value, range, _ in if let name = value as? String { substitutions.append((range, name)) } }
+        }
+        for (range, text) in substitutions.sorted(by: { $0.0.location > $1.0.location }) {
+            output.replaceCharacters(in: range, with: text)
+            // A file card, or a copied picture, leaves as its file name:
+            // text, not the attachment the name stands in for.
+            output.removeAttribute(.attachment, range: NSRange(location: range.location, length: (text as NSString).length))
+        }
         // Centered lines are offset for the avatar column, which exports lack.
         var centered: [(NSRange, NSParagraphStyle)] = []
         output.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: output.length)) { value, range, _ in
@@ -445,7 +535,7 @@ import NevermoreCore
             if output.length > 0 { output.append(NSAttributedString(string: "\n")) }
             output.append(attributedString().attributedSubstring(from: range))
         }
-        Self.prepareForExport(output)
+        Self.prepareForExport(output, for: .copy)
         switch type {
         case .string: return pasteboard.setString(NativeTables.plainText(output), forType: .string)
         case .rtf:
@@ -585,6 +675,9 @@ import NevermoreCore
     var threadContextTask: Task<Void, Never>?
     var applyingDraft = false
     var isAcceptingSend = false
+    /// The last bottom-visible message sent to `markSeen`, so an unchanged
+    /// viewport does not start a task on every scroll step.
+    private var lastSeenReceipt: (channelID: String, creation: String)?
     var displayedHTML = ""
     var draftEncodingFailure: Error?
     private var draftErrorMessage: String?
@@ -810,8 +903,12 @@ import NevermoreCore
         self.session?.attach(window: windowID, channelID: nil)
         conversationChooser?.cancel(); conversationChooser = nil; memberRoster?.cancel(); memberRoster = nil; closeThreadInspector(); mentionPopover.reset(); clearPreview(); closeCodeReaders()
         for collection in Array(collectionWindows) { collection.records.removeAll(); collection.table.reloadData(); collection.close() }; collectionWindows.removeAll()
-        loadTask?.cancel(); renderTask?.cancel(); self.session = session; mentionPoolCache = nil; composer.sharedUndoManager = nil; composer.useTextStorage(NSTextStorage()); channel = nil; messages = []; messageRanges = []; transcript.clearText(); animatedImages.removeAll(); isUpdatingTranscript = false; composer.string = ""; attachments = []; replyTo = nil; editing = nil
+        loadTask?.cancel(); renderTask?.cancel(); self.session = session; mentionPoolCache = nil; composer.sharedUndoManager = nil; composer.useTextStorage(NSTextStorage()); channel = nil; messages = []; messageRanges = []; transcript.clearText(); animatedImages.removeAll(); isUpdatingTranscript = false; composer.string = ""; attachments = []; replyTo = nil; editing = nil; lastSeenReceipt = nil
         navigation = NavigationHistory(); threadContextTask?.cancel(); threadRoot = nil; pendingRestoration = nil; restoreInspectorTask?.cancel(); updateAccounts(); refreshSidebar(); updateWindowTitle(); updateContext()
+        // Home reads the window's session, and a switch posts no Home-shaped
+        // notification for the new account until its first reconciliation. Rebuild
+        // the visible pane and start the new account's modules now.
+        home.setNeedsReload(); home.refreshIfShown()
     }
     @objc func switchAccount(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? UUID, let target = app.sessions.first(where: { $0.account.id == id && !$0.stopped }) else { updateAccounts(); return }
@@ -1084,11 +1181,30 @@ import NevermoreCore
                 } else if let anchor = self?.requestedAnchor, let index = allMessages.firstIndex(where: { $0.id == anchor }) {
                     messages = Array(allMessages[max(0, index - 250)..<min(allMessages.count, index + 250)])
                 }
-                let operations = try await session.store.operations().filter { $0.channelID == channel.id }
+                let operations = try await session.store.operations(channelID: channel.id)
                 guard !Task.isCancelled, let self, self.isCurrent(session, channelID: channel.id),
                       !ChannelPolicy.isRevoked(channelID: channel.id, revoked: session.revokedChannels, threadParents: session.threadParents),
                       channel.raw["parent_channel_id"].string.map(session.revokedChannels.contains) != true,
                       !session.deletedIDs.contains(channel.id) else { return }
+                // Capture the caret against the ranges currently on screen,
+                // before the rebuild below replaces them. Prepending earlier
+                // history or deleting a row above it moves every character
+                // after it; restoring the raw offset would land in another
+                // message, and the Message menu would act on the wrong row.
+                let selection = self.transcript.selectedRange()
+                let caret: (id: String, offset: Int)? = selection.length == 0
+                    ? self.messageRanges.first(where: { NSLocationInRange(selection.location, $0.0) })
+                        .map { ($0.1.id, selection.location - $0.0.location) }
+                    : nil
+                // A caret at the very end of the text is past every
+                // half-open message range; it belongs to the last message.
+                let endCaret: (id: String, offset: Int)? = caret == nil
+                    && selection.length == 0
+                    && selection.location == self.transcript.textStorage?.length
+                    ? self.messageRanges.max(by: { NSMaxRange($0.0) < NSMaxRange($1.0) })
+                        .map { ($0.1.id, selection.location - $0.0.location) }
+                    : nil
+                let anchoredCaret = caret ?? endCaret
                 // Replacing the text under a press would free the link
                 // AppKit is about to deliver; render once the press ends.
                 if self.transcript.isTrackingPress { self.renderAfterPress = true; return }
@@ -1228,29 +1344,32 @@ import NevermoreCore
                     if pendingSend == nil, let marks = TranscriptStyle.stateMarks(pinned: pinnedIDs.contains(message.id), saved: MessageMarks.isSaved(message, by: session.account.user), afterLineBreak: output.length == inkStart || (output.string as NSString).character(at: output.length - 1) == 10, metrics: metrics) {
                         output.append(marks)
                     }
-                    if pendingSend == nil, !message.html.isEmpty, case .parsed(let document) = session.messageDocument(for: message) {
-                        for raw in SentLinkPreviewPresentation.links(in: document) {
-                            session.sentLinkPreviews.request(raw, session: session)
-                            if let preview = session.sentLinkPreviews.preview(for: raw) {
-                                output.append(SentLinkPreviewPresentation.card(preview, image: session.sentLinkPreviews.image(for: raw), size: size))
-                            }
+                    // One preview, for the message's first link, as Raven's web
+                    // client shows it; none when the sender hid it.
+                    if pendingSend == nil, !message.html.isEmpty, case .parsed(let document) = session.messageDocument(for: message),
+                       let raw = SentLinkPreviewPresentation.previewedLink(of: message, in: document) {
+                        session.sentLinkPreviews.request(raw, session: session)
+                        if let preview = session.sentLinkPreviews.preview(for: raw) {
+                            output.append(TranscriptMedia.linkCard(preview, image: session.sentLinkPreviews.image(for: raw), imageFailed: session.sentLinkPreviews.imageFailed(raw), metrics: metrics, afterText: output.length > bodyStart))
                         }
                     }
                     let attachmentLink = TranscriptStyle.attachmentLink(for: message.id)
-                    if let image = session.thumbnails[message.id] {
-                        let attachment = NSTextAttachment(); attachment.image = image
-                        let scale = min(1, 320 / max(image.size.width, image.size.height)); attachment.bounds = NSRect(origin: .zero, size: NSSize(width: image.size.width * scale, height: image.size.height * scale))
-                        // Below a caption; an image-only message starts at the body.
-                        if output.length > bodyStart, (output.string as NSString).character(at: output.length - 1) != 10 { output.append(NSAttributedString(string: "\n")) }
-                        var imageAttributes: [NSAttributedString.Key: Any] = attachmentLink.map { [.link: $0] } ?? [:]
-                        // A GIF plays over its first frame while it is in view.
-                        let animatedKey = AnimatedImageKey.message(message.id)
-                        if session.animatedSources[animatedKey] != nil || session.animatedImages.contains(animatedKey) { imageAttributes[.nevermoreAnimatedImage] = animatedKey }
-                        output.append(NSAttributedString(attachment: attachment, attributes: imageAttributes))
-                    }
-                    if let file = message.raw["file"].string {
-                        let filename = URL(string: file)?.lastPathComponent ?? "Attachment"
-                        output.append(TranscriptStyle.attachmentLine(filename: filename, size: size, link: attachmentLink))
+                    // Media takes a line of its own: below a caption, or at the
+                    // start of a message without one.
+                    func continuesLine() -> Bool { output.length > bodyStart && (output.string as NSString).character(at: output.length - 1) != 10 }
+                    if let filename = TranscriptMedia.filename(of: message) {
+                        if message.messageType == "Image" {
+                            // The picture, or until it loads a box of its size;
+                            // the file name is in its tooltip and copies.
+                            let image = session.thumbnails[message.id]
+                            // A GIF plays over its first frame while it is in view.
+                            let animatedKey = AnimatedImageKey.message(message.id)
+                            let animated = image != nil && (session.animatedSources[animatedKey] != nil || session.animatedImages.contains(animatedKey))
+                            output.append(TranscriptMedia.picture(image, size: session.pictureBox(for: message), filename: filename, link: attachmentLink, animatedKey: animated ? animatedKey : nil, newLine: continuesLine(), afterText: output.length > bodyStart))
+                        } else {
+                            let detail = AttachmentDetails.summary(filename: filename, byteCount: message.raw["file_size"].nonnegativeCount)
+                            output.append(TranscriptMedia.fileCard(filename: filename, detail: detail, link: attachmentLink, metrics: metrics, newLine: continuesLine(), afterText: output.length > bodyStart))
+                        }
                     }
                     if let doctype = message.raw["link_doctype"].string, !doctype.isEmpty {
                         let documentID = message.raw["link_document"].string ?? ""
@@ -1259,7 +1378,12 @@ import NevermoreCore
                             string: "\nLinked document: \(title)",
                             attributes: [.font: TranscriptStyle.secondaryFont(metrics), .foregroundColor: NSColor.themeSecondaryText]))
                     }
-                    for attachment in pendingSend?.attachments ?? [] { output.append(TranscriptStyle.pendingAttachmentLine(filename: attachment.filename, size: size, first: output.length == inkStart)) }
+                    // Staged files show as the cards they will be, without a link:
+                    // there is nothing on the server to open yet.
+                    for attachment in pendingSend?.attachments ?? [] {
+                        let detail = AttachmentDetails.summary(filename: attachment.filename, byteCount: TranscriptMedia.stagedByteCount(attachment))
+                        output.append(TranscriptMedia.fileCard(filename: attachment.filename, detail: detail, link: nil, metrics: metrics, newLine: continuesLine(), afterText: output.length > bodyStart))
+                    }
                     if metrics.bodyLineSpacing > 0, output.length > bodyStart { TranscriptStyle.addLineSpacing(metrics.bodyLineSpacing, to: output, in: NSRange(location: bodyStart, length: output.length - bodyStart)) }
                     let inkBody = NSRange(location: inkStart, length: output.length - inkStart)
                     inkBodies[message.id] = inkBody
@@ -1277,10 +1401,26 @@ import NevermoreCore
                 }
                 session.loadAvatars(authors)
                 self.codeCommands = commands; self.expandedCode.formIntersection(visibleCode)
-                let selection = self.transcript.selectedRange()
                 self.restoringTranscriptSelection = true
+                // Locations move with new text; the pointer marks a card again when it moves.
+                self.transcript.hoveredCardLocation = nil
                 self.transcript.textStorage?.setAttributedString(output)
-                if NSMaxRange(selection) <= output.length { self.transcript.setSelectedRange(selection) }
+                if let anchoredCaret, let range = self.messageRanges.first(where: { $0.1.id == anchoredCaret.id })?.0 {
+                    // Keep the caret strictly inside the message: a
+                    // location at NSMaxRange would attribute to the next
+                    // message when the caret's message shrank.
+                    let location = range.location + min(anchoredCaret.offset, max(range.length - 1, 0))
+                    self.transcript.setSelectedRange(NSRange(location: location, length: 0))
+                } else if anchoredCaret != nil {
+                    // The caret's own message is gone. Collapse to the
+                    // nearest surviving message rather than jump to the top.
+                    let probe = min(selection.location, max(output.length - 1, 0))
+                    let fallback = self.messageRanges.first(where: { NSLocationInRange(probe, $0.0) })
+                        ?? self.messageRanges.min(by: { abs($0.0.location - probe) < abs($1.0.location - probe) })
+                    if let fallback { self.transcript.setSelectedRange(NSRange(location: fallback.0.location, length: 0)) }
+                } else if NSMaxRange(selection) <= output.length {
+                    self.transcript.setSelectedRange(selection)
+                }
                 self.restoringTranscriptSelection = false
                 self.transcript.layoutManager?.ensureLayout(for: self.transcript.textContainer!)
                 // Character offsets moved; follow the messages, not the offsets.
@@ -1326,9 +1466,19 @@ import NevermoreCore
     var visibleMessageForReadReceipt: RavenMessage? {
         // Context and history navigation cannot acknowledge intervening rows,
         // and a pane that still shows other text has nothing to acknowledge.
-        guard !isUpdatingTranscript, requestedAnchor == nil, historyUpperID == nil else { return nil }
-        // Only the band between the toolbar and the floating composer counts.
-        return messageEntries(intersecting: readableTranscriptRect).last?.1
+        guard receiptWindowOpen else { return nil }
+        return receiptCandidate(entries: messageEntries(intersecting: readableTranscriptRect))
+    }
+    /// The receipt rule shared by the live path and the published property,
+    /// so a test probe and `seenVisible()` cannot drift apart.
+    private func receiptCandidate(entries: [(NSRange, RavenMessage)]) -> RavenMessage? {
+        guard receiptWindowOpen else { return nil }
+        return entries.last?.1
+    }
+    /// True when the visible band is live transcript content eligible for a
+    /// read receipt.
+    private var receiptWindowOpen: Bool {
+        !isUpdatingTranscript && requestedAnchor == nil && historyUpperID == nil
     }
     /// The messages whose text intersects `visible`, in order. Messages are
     /// laid out top to bottom in `messageRanges` order, so a binary search
@@ -1364,12 +1514,28 @@ import NevermoreCore
         isFollowing = includesLatest && historyUpperID == nil && requestedAnchor == nil && visible.maxY >= transcript.bounds.maxY - 30
         if isFollowing { readPosition.followedLatest() }
         updateReadPositionControl()
+        let inView = messageEntries(intersecting: visible)
+        // Preview pictures load in any window that shows them, as they did
+        // when every card fetched its own.
+        if let session { for entry in inView { session.sentLinkPreviews.loadImage(for: entry.1, session: session) } }
         guard NSApp.isActive, window?.isKeyWindow == true, let session, let channel else { return }
-        for entry in messageEntries(intersecting: visible) { session.loadThumbnail(entry.1) }
-        guard let message = visibleMessageForReadReceipt else { return }
+        // `visible` is `readableTranscriptRect`: only the band between the
+        // toolbar and the floating composer. The one scan above feeds preview
+        // pictures, thumbnails and the read receipt candidate, and
+        // `receiptCandidate` is the same rule `visibleMessageForReadReceipt`
+        // publishes.
+        for entry in inView { session.loadThumbnail(entry.1) }
+        guard let message = receiptCandidate(entries: inView) else { return }
+        // Server timestamps are fixed-width single-timezone text, which the
+        // store and `Session.markSeen` already order lexicographically; an
+        // older bottom row scrolled back into view needs no second request.
+        if let last = lastSeenReceipt, last.channelID == channel.id, last.creation >= message.creation { return }
+        // `markSeen` is best-effort and cannot throw; its local failures call
+        // `fail()`, so remembering the candidate here does not drop a retry.
+        lastSeenReceipt = (channel.id, message.creation)
         Task { await session.markSeen(channelID: channel.id, timestamp: message.creation) }
     }
-    func windowDidBecomeKey(_ notification: Notification) { seenVisible(); if channel != nil { session?.requestReconciliation() } else { home.refreshIfShown() } }
+    func windowDidBecomeKey(_ notification: Notification) { lastSeenReceipt = nil; seenVisible(); if channel != nil { session?.requestReconciliation() } else { home.refreshIfShown() } }
     /// Keep the toolbar (search, navigation, collections) in full screen, as
     /// Mail and Safari do by default; only the menu bar hides.
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
@@ -1661,6 +1827,7 @@ import NevermoreCore
                         self.composer.textStorage?.setAttributedString(NativeRichText.attributedString(document: value, revealSpoilers: true))
                         self.composer.setSelectedRange(NSRange(location: min(draft?.caret ?? 0, self.composer.string.utf16.count), length: 0))
                     }
+                    if self.composer.string.isEmpty { self.composer.typingAttributes = NativeRichText.plainTypingAttributes }
                     self.displayedHTML = html
                 }
                 self.draftEncodingFailure = session.invalidDraftChannels.contains(channel.id) ? RichTextError.unsafeEdit : nil
@@ -1688,7 +1855,11 @@ import NevermoreCore
         if editing != nil { context.stringValue = "Editing your message"; contextIcon.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil) }
         else if let replyTo { context.stringValue = "Replying to \(messageSummary(for: replyTo))"; contextIcon.image = NSImage(systemSymbolName: "arrowshape.turn.up.left", accessibilityDescription: nil) }
         else if let root = threadRoot {
-            let plain = (try? RichTextCodec.plainText(RichTextCodec.parse(root.html))) ?? ""
+            // Through the bounded document cache: updateContext runs on
+            // every session notification, and a direct parse would decode a
+            // large root again each time.
+            let plain: String
+            if let session, case .parsed(let document) = session.messageDocument(for: root) { plain = RichTextCodec.plainText(document) } else { plain = "" }
             let preview = plain.isEmpty ? "[\(root.messageType)]" : String(plain.prefix(240))
             context.stringValue = "Thread · \(session?.userNames[root.owner] ?? root.owner) · \(preview)"
             contextIcon.image = NSImage(systemSymbolName: "bubble.left.and.text.bubble.right", accessibilityDescription: nil)
@@ -1865,13 +2036,20 @@ import NevermoreCore
     @objc func clearAttachments() { guard composer.isEditable else { return }; cancelPromisedFiles(); let ids = Set(attachments.map(\.id)); attachments = []; updateContext(); textDidChange(Notification(name: NSText.didChangeNotification, object: composer)); Task { await saveTask?.value; try? await session?.store.pruneStaging(discarding: ids) } }
     func cancelContext() { guard composer.isEditable else { return }; if editing != nil { editing = nil; if let channel, let storage = session?.sharedTextStorage[channel.id] { composer.sharedUndoManager = session?.draftUndoManagers[channel.id]; composer.useTextStorage(storage) }; displayedHTML = ""; restoreDraft() } else { replyTo = nil; textDidChange(Notification(name: NSText.didChangeNotification, object: composer)) }; updateContext() }
     var selectedMessage: RavenMessage? { messageRanges.first { NSLocationInRange(transcript.selectedRange().location, $0.0) }?.1 }
-    @objc func reply(_ sender: Any?) { guard composer.isEditable, let message = selectedMessage else { return }; replyTo = message.id; updateContext(); focusComposer(); textDidChange(Notification(name: NSText.didChangeNotification, object: composer)) }
+    @objc func reply(_ sender: Any?) {
+        // While an edit is open the context row says "Editing" and the edit
+        // save ignores replyTo; refuse instead of dropping the reply silently.
+        guard composer.isEditable, editing == nil, let message = selectedMessage else { return }
+        replyTo = message.id; updateContext(); focusComposer(); textDidChange(Notification(name: NSText.didChangeNotification, object: composer))
+    }
     @objc func editMessage(_ sender: Any?) {
-        guard composer.isEditable, let message = selectedMessage, message.owner == session?.account.user else { return }
-        do { let doc = try RichTextCodec.parse(message.html); guard doc.canEdit else { throw AppError.message("This message contains formatting Nevermore cannot safely edit. Open Raven in the browser to preserve it.") }; inlineComposer.load(nil); editing = message; composer.sharedUndoManager = UndoManager(); composer.useTextStorage(NSTextStorage(attributedString: NativeRichText.attributedString(document: doc, revealSpoilers: true))); updateContext(); focusComposer() } catch { app.showError(error) }
+        // Starting a second edit would clobber the one already in progress.
+        guard composer.isEditable, editing == nil, let message = selectedMessage, message.owner == session?.account.user else { return }
+        do { let doc = try RichTextCodec.parse(message.html); guard doc.canEdit else { throw AppError.message("This message contains formatting Nevermore cannot safely edit. Open Raven in the browser to preserve it.") }; inlineComposer.load(nil); replyTo = nil; editing = message; composer.sharedUndoManager = UndoManager(); composer.useTextStorage(NSTextStorage(attributedString: NativeRichText.attributedString(document: doc, revealSpoilers: true))); updateContext(); textDidChange(Notification(name: NSText.didChangeNotification, object: composer)); focusComposer() } catch { app.showError(error) }
     }
     @objc func deleteMessage(_ sender: Any?) {
-        guard let message = selectedMessage, let session else { return }
+        // Deleting the message being edited would orphan the edit session.
+        guard let message = selectedMessage, message.id != editing?.id, let session else { return }
         action {
             guard await SheetPrompt.confirm("Delete this message?", message: "The server may delete its whole attachment batch. This cannot be undone.", confirm: "Delete", destructive: true, on: self.window) else { return }
             _ = try await session.mutate("raven.api.raven_message.delete_messages", ["message_ids": .array([.string(message.id)])]); try await session.load(channelID: message.channelID)
@@ -1879,6 +2057,11 @@ import NevermoreCore
     }
     @objc func openThread(_ sender: Any?) {
         guard let message = selectedMessage, let session else { return }
+        if channel?.raw["is_thread"].bool == true {
+            // Already inside a thread: reply in place instead of creating a
+            // nested thread server-side.
+            reply(sender); return
+        }
         action {
             _ = try await session.threadChannel(for: message)
             guard self.isCurrent(session, channelID: message.channelID), !session.deletedIDs.contains(message.id),
@@ -1888,7 +2071,9 @@ import NevermoreCore
         }
     }
     @objc func openThreadWindow(_ sender: Any?) {
-        guard let message = selectedMessage, let session else { return }
+        // Inside a thread there is no new thread to open; a reply would create
+        // a nested thread server-side.
+        guard let message = selectedMessage, let session, channel?.raw["is_thread"].bool != true else { return }
         action { let thread = try await session.threadChannel(for: message); guard self.session === session else { return }; self.app.open(session: session, channel: thread) }
     }
     @objc func openConversationWindow(_ sender: Any?) { if let session, let channel { app.open(session: session, channel: channel) } }
@@ -1987,7 +2172,7 @@ import NevermoreCore
         info.horizontalPagination = .fit; info.isVerticallyCentered = false
         let content = NSMutableAttributedString(attributedString: storage)
         // Day dividers are reading controls; printed headers carry the date.
-        TranscriptView.prepareForExport(content)
+        TranscriptView.prepareForExport(content, for: .print)
         let width = info.paperSize.width - info.leftMargin - info.rightMargin
         let page = NSTextView(frame: NSRect(x: 0, y: 0, width: width, height: 100))
         page.appearance = NSAppearance(named: .aqua)
@@ -2282,9 +2467,18 @@ import NevermoreCore
         // the session's parsed-document cache keeps that from parsing HTML.
         if menuItem.action == #selector(openCodeReader(_:)) { guard let message = selectedMessage, let session, case .parsed(let doc) = session.messageDocument(for: message) else { return false }; return !CodeBlocks.extract(from: doc).isEmpty }
         if menuItem.action == #selector(cancelPromisedFiles(_:)) { return !promisedReceives.isEmpty }
-        if [#selector(editMessage(_:)), #selector(deleteMessage(_:))].contains(menuItem.action) { return selectedMessage?.owner == session?.account.user && selectedMessage != nil }
+        if menuItem.action == #selector(editMessage(_:)) { return selectedMessage?.owner == session?.account.user && selectedMessage != nil && editing == nil }
+        if menuItem.action == #selector(deleteMessage(_:)) { return selectedMessage?.owner == session?.account.user && selectedMessage != nil && selectedMessage?.id != editing?.id }
         if menuItem.action == #selector(copyMessageText(_:)) { return messageForCopy != nil }
-        if [#selector(reply(_:)), #selector(openThread(_:)), #selector(openThreadWindow(_:)), #selector(react(_:)), #selector(saveForLater(_:)), #selector(pin(_:)), #selector(remind(_:)), #selector(vote(_:))].contains(menuItem.action) { return selectedMessage != nil }
+        if [#selector(reply(_:)), #selector(openThread(_:)), #selector(openThreadWindow(_:)), #selector(react(_:)), #selector(saveForLater(_:)), #selector(pin(_:)), #selector(remind(_:)), #selector(vote(_:))].contains(menuItem.action) {
+            // System events carry no message actions; thread commands are
+            // meaningless inside a thread, where a reply stays in place.
+            guard let message = selectedMessage, message.messageType != "System" else { return false }
+            if [#selector(openThread(_:)), #selector(openThreadWindow(_:))].contains(menuItem.action) { return channel?.raw["is_thread"].bool != true }
+            // Reply changes the draft, which an open edit would silently drop.
+            if menuItem.action == #selector(reply(_:)) { return editing == nil }
+            return true
+        }
         // Mark-all resolves through the app delegate from any window;
         // mark-selected needs an Inbox selection, so it is disabled here.
         if menuItem.action == #selector(AppDelegate.markAllNotificationsRead(_:)) { return session.map { !$0.readOnly && !$0.stopped && !$0.demo } ?? false }

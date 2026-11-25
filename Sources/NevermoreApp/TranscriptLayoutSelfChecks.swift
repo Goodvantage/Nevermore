@@ -72,6 +72,37 @@ import RavenProtocol
             return layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: location), effectiveRange: nil).offsetBy(dx: origin.x, dy: origin.y)
         }
 
+        // Hover lookup returns the same message a full scan would, so the
+        // binary search over layout order is checked against a visible row.
+        let readable = controller.readableTranscriptRect
+        if let entry = controller.messageRanges.first(where: { entry in
+            let rect = controller.highlightRect(for: entry.0)
+            return rect.midY >= readable.minY && rect.midY < readable.maxY
+        }) {
+            let target = controller.highlightRect(for: entry.0)
+            let point = NSPoint(x: target.midX, y: target.midY)
+            controller.updateHover(at: point)
+            check("hover lookup finds the message under the pointer", controller.hoveredMessageID == entry.1.id)
+            controller.hideHoverBar()
+        } else { check("layout fixture has a visible message to hover", false) }
+        // The bottom-most row pins the search direction; an inverted
+        // comparison would still resolve the first row by accident.
+        if let entry = controller.messageRanges.reversed().first(where: { entry in
+            let rect = controller.highlightRect(for: entry.0)
+            return rect.intersects(readable)
+        }) {
+            let target = controller.highlightRect(for: entry.0)
+            // A partially visible tall row has its center outside the band;
+            // probe a point that lies inside both the row and the band.
+            let y = (max(readable.minY, target.minY) + min(readable.maxY, target.maxY)) / 2
+            controller.updateHover(at: NSPoint(x: target.midX, y: y))
+            check("hover lookup finds the bottom-most visible message", controller.hoveredMessageID == entry.1.id)
+            controller.hideHoverBar()
+        } else { check("layout fixture has a bottom-most visible row", false) }
+        check("message ranges ascend without overlap",
+              zip(controller.messageRanges, controller.messageRanges.dropFirst())
+                  .allSatisfy { NSMaxRange($0.0) <= $1.0.location })
+
         do {
             let originalFontSize = defaults.object(forKey: "fontSize")
             defer {
@@ -182,7 +213,7 @@ import RavenProtocol
         } else { check("copy fixture ranges exist", false) }
 
         let printed = NSMutableAttributedString(attributedString: storage)
-        TranscriptView.prepareForExport(printed)
+        TranscriptView.prepareForExport(printed, for: .print)
         let printedEvent = (printed.string as NSString).range(of: "Alice Example created fixture.")
         let printedEventStyle = printedEvent.location == NSNotFound ? nil : printed.attribute(.paragraphStyle, at: printedEvent.location, effectiveRange: nil) as? NSParagraphStyle
         check("printing uses the copy text: dated headers, no divider labels, centered events on the page", printed.string.contains("Alice Example  \(firstFull)\n") && !printed.string.contains(days[0]) && !printed.string.contains(days[1]) && printedEventStyle?.alignment == .center && printedEventStyle?.tailIndent == 0)
@@ -222,7 +253,7 @@ import RavenProtocol
             check("a continued message shows its time in the column only while pointed at", idle == 0 && hovered > 10)
         } else { check("pixel fixture ranges exist", false) }
 
-        // Attachments open on click: the file line and an image's thumbnail
+        // Attachments open on click: a file's card and an image's picture
         // carry an internal link that dispatches to the message's download.
         session.thumbnails["photo"] = NSImage(size: NSSize(width: 48, height: 32))
         controller.render(); await controller.renderTask?.value
@@ -230,8 +261,8 @@ import RavenProtocol
         storage.enumerateAttribute(.link, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
             if let url = value as? URL, url.scheme == "nevermore-attachment" { previewLinks.append((range, url)) }
         }
-        check("file and image messages carry preview links on name and thumbnail", previewLinks.count == 3 && previewLinks.filter { $0.url.pathComponents.last == "upload" }.count == 1 && previewLinks.filter { $0.url.pathComponents.last == "photo" }.count == 2)
-        check("the file name and the image thumbnail are the click targets", previewLinks.contains { text.substring(with: $0.range).contains("report.pdf") } && previewLinks.contains { $0.range.length == 1 && $0.url.pathComponents.last == "photo" })
+        check("file and image messages carry one preview link each, on the card and the picture", previewLinks.count == 2 && previewLinks.filter { $0.url.pathComponents.last == "upload" }.count == 1 && previewLinks.filter { $0.url.pathComponents.last == "photo" }.count == 1)
+        check("the file card and the picture are the click targets", previewLinks.allSatisfy { $0.range.length == 1 && storage.attribute(.attachment, at: $0.range.location, effectiveRange: nil) != nil })
         if let target = previewLinks.first(where: { $0.url.pathComponents.last == "upload" }) {
             _ = controller.textView(transcript, clickedOnLink: target.url, at: target.range.location)
             let dispatched = controller.status.stringValue == "Downloading attachment…" && !controller.attachmentDownloads.isEmpty
@@ -279,15 +310,15 @@ import RavenProtocol
         check("stale attachment links cannot start a download", controller.status.stringValue == statusBefore && controller.attachmentDownloads.isEmpty)
         if let window = controller.window {
             window.orderFront(nil)
-            let nameIndex = text.range(of: "report.pdf").location
-            let glyphRect = layout.boundingRect(forGlyphRange: NSRange(location: layout.glyphIndexForCharacter(at: nameIndex), length: 1), in: container).offsetBy(dx: origin.x, dy: origin.y)
+            let cardIndex = previewLinks.first { $0.url.pathComponents.last == "upload" }?.range.location ?? 0
+            let glyphRect = AnimatedImageOverlay.attachmentFrame(at: cardIndex, layout: layout, origin: origin) ?? .zero
             let winPoint = transcript.convert(NSPoint(x: glyphRect.midX, y: glyphRect.midY), to: nil)
             if let up = NSEvent.mouseEvent(with: .leftMouseUp, location: winPoint, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0) { NSApp.postEvent(up, atStart: false) }
             if let down = NSEvent.mouseEvent(with: .leftMouseDown, location: winPoint, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0) { transcript.mouseDown(with: down) }
             let clicked = controller.status.stringValue == "Downloading attachment…" && !controller.attachmentDownloads.isEmpty
             let tasks = controller.attachmentDownloads; controller.clearPreview(); for task in tasks { await task.value }
             transcript.highlightRect = nil
-            check("a click on the file name in the transcript starts its preview", clicked)
+            check("a click on the file card in the transcript starts its preview", clicked)
         }
         // AppKit reads a clicked link at the press, then tracks it in a
         // nested event loop where main-actor work keeps running. A render
@@ -338,7 +369,7 @@ import RavenProtocol
             }
             controller.render(); await controller.renderTask?.value
             transcript.setSelectedRange(NSRange(location: 0, length: 0))
-            check("a clear under a press empties the transcript and keeps its links alive until the press ends", probe.tracked && clearedUnderPress && transcript.string.contains("report.pdf"))
+            check("a clear under a press empties the transcript and keeps its links alive until the press ends", probe.tracked && clearedUnderPress && transcript.string.contains("Answering Bob."))
         } else { check("plain text before the thumbnail exists", false) }
         if let upload = range("upload") {
             transcript.setSelectedRange(upload)
@@ -347,7 +378,7 @@ import RavenProtocol
             pasteboard.clearContents()
             let plain = transcript.writeSelection(to: pasteboard, type: .string) ? pasteboard.string(forType: .string) ?? "" : ""
             let rich = transcript.writeSelection(to: pasteboard, type: .rtf) ? String(decoding: pasteboard.data(forType: .rtf) ?? Data(), as: UTF8.self) : ""
-            check("copied attachment lines keep the name without the preview command", plain.contains("report.pdf") && !plain.contains("Quick Look") && !rich.contains("nevermore-attachment"))
+            check("copied file cards keep the name without the preview command", plain.contains("report.pdf") && !plain.contains("Quick Look") && !rich.contains("nevermore-attachment"))
             transcript.setSelectedRange(NSRange(location: 0, length: 0))
         } else { check("attachment copy fixture range exists", false) }
 

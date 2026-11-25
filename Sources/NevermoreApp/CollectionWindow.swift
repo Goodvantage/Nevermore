@@ -75,11 +75,9 @@ import NevermoreCore
         markReadButton.target = self; markReadButton.action = #selector(markSelectedRead)
         markReadButton.setAccessibilityLabel("Mark selected inbox notifications read")
         markReadButton.toolTip = "Select up to 100 inbox items to mark their notifications read."
-        markReadButton.isHidden = kind != .inbox
         markAllButton.target = self; markAllButton.action = #selector(markAllRead)
         markAllButton.setAccessibilityLabel("Mark all notifications for this account read")
         markAllButton.toolTip = "Marks every notification for this account as read, including rows hidden by the current filter or later pages."
-        markAllButton.isHidden = kind != .inbox
         search.placeholderString = "Filter"
         search.sendsSearchStringImmediately = true; search.sendsWholeSearchString = false
         search.target = self; search.action = #selector(applySearch); search.delegate = self
@@ -153,6 +151,23 @@ import NevermoreCore
         // Read-only initial fetch when wired with a source but no seed rows.
         if source != nil, records.isEmpty, !isLoading { refresh() }
     }
+    func windowDidResize(_ notification: Notification) { updateBarVisibility() }
+
+    /// The bottom bar's trailing buttons need ~700 pt side by side. Below
+    /// that the two inbox-only actions drop out, but both stay available
+    /// from the Message menu ("Mark Selected/All Notifications Read"), so
+    /// keyboard and VoiceOver users never lose them; the status label
+    /// truncates. Load More, Actions and Open always stay, so paging and
+    /// opening never depend on the window width.
+    private func updateBarVisibility() {
+        let narrow = (window?.frame.width ?? 760) < 720
+        // windowDidResize fires every frame of a live resize; skip writes
+        // that change nothing so the bar does not relayout on every tick.
+        let hideInboxActions = kind != .inbox || narrow
+        if markAllButton.isHidden != hideInboxActions { markAllButton.isHidden = hideInboxActions }
+        if markReadButton.isHidden != hideInboxActions { markReadButton.isHidden = hideInboxActions }
+    }
+
     func windowWillClose(_ notification: Notification) {
         // Delayed results must not repopulate a closed collection.
         batchGeneration = UUID(); batchTask?.cancel(); batchTask = nil; isBatchRunning = false; batchIsMarkAll = false
@@ -372,11 +387,11 @@ import NevermoreCore
         openButton.isEnabled = hasSelection
         manageButton.isEnabled = hasSelection
         markReadButton.isEnabled = canMarkSelectedRead
-        markAllButton.isHidden = kind != .inbox
         markAllButton.isEnabled = canMarkAllRead
+        updateBarVisibility()
         if isBatchRunning { status.stringValue = batchIsMarkAll ? "Marking all notifications read…" : "Marking selected notifications read…"; status.textColor = .secondaryLabelColor }
         else if isLoading { status.stringValue = "Loading…"; status.textColor = .secondaryLabelColor }
-        else if !statusMessage.isEmpty { status.stringValue = statusMessage; status.textColor = .systemRed }
+        else if !statusMessage.isEmpty { status.stringValue = statusMessage; status.textColor = .themeAlert }
         else if let source { status.stringValue = (records.count == total ? "\(total) items" : "\(records.count) of \(total) shown") + (source.supportsPaging && pager.hasMore ? " · more available" : ""); status.textColor = .secondaryLabelColor }
         else { status.stringValue = records.count == total ? "\(total) items" : "\(records.count) of \(total) shown"; status.textColor = .secondaryLabelColor }
     }

@@ -17,7 +17,7 @@ public struct RavenCustomEmojiPage: Sendable {
     public let nextOffset: Int?
 
     /// Rows requested per page; the site is asked for exactly this many.
-    fileprivate static let maximumRows = 50
+    public static let maximumRows = 50
     /// Maximum UTF-8 bytes accepted for a search query.
     fileprivate static let maximumQueryBytes = 256
 

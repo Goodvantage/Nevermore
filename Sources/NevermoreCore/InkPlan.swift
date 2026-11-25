@@ -77,8 +77,14 @@ public enum InkRules {
     /// can have reached the server: after a first attempt, a lost
     /// acknowledgement could mean it was delivered. The outbox's Cancel
     /// Send applies the same rule.
+    /// A `.retryable` send with zero attempts (failed target check or a
+    /// read-only site) never left the machine, so it can be taken back too.
     public static func canTakeBack(_ operation: SendOperation) -> Bool {
-        operation.state == .queued && operation.attempts == 0
+        // A retryable send with no attempt (a failed send-target check or a
+        // read-only site before the first attempt) never reached the server,
+        // so it is as recoverable as a queued one. Once an attempt exists,
+        // the outcome is uncertain and the row needs review instead.
+        operation.attempts == 0 && (operation.state == .queued || operation.state == .retryable)
     }
 
     /// A reply target, staged file or unreadable draft is work too, even

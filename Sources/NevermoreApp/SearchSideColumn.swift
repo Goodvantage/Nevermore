@@ -325,7 +325,10 @@ import RavenProtocol
     func cancel() {
         revision = UUID(); task?.cancel(); task = nil
         let panel = savePanel; savePanel = nil; panel?.cancel(nil)
-        if status == Self.downloading { status = "" }
+        // A cancelled read leaves no status behind, including a stale error
+        // from an earlier attempt. The task's own defer still only clears the
+        // transient downloading status, so a real failure stays visible.
+        if !status.isEmpty { status = "" }
         let open = windows; windows.removeAll()
         for window in open { window.close() }
     }

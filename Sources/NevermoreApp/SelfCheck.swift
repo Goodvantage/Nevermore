@@ -41,6 +41,12 @@ import NevermoreCore
         await first.loadTask?.value
         await first.renderTask?.value
         first.window?.contentView?.layoutSubtreeIfNeeded()
+        if ProcessInfo.processInfo.arguments.contains("--media-self-check") {
+            do { for (label, result) in try await TranscriptMediaSelfChecks.run(app: app) { check(result, label) } }
+            catch { check(false, "transcript media checks: \(error.localizedDescription)") }
+            print("Native media self-check: \(failures.isEmpty ? "PASS" : "FAIL") (\(failures.count) failures)")
+            return failures.isEmpty ? 0 : 1
+        }
         if ProcessInfo.processInfo.arguments.contains("--composer-self-check") {
             for (label, result) in ComposerSizingSelfChecks.run(app: app) { check(result, label) }
             for (label, result) in await composerFormattingChecks(in: first) { check(result, label) }
@@ -285,6 +291,8 @@ import NevermoreCore
         catch { check(false, "transcript layout checks: \(error.localizedDescription)") }
         do { for (label, result) in try await AnimatedImageSelfChecks.run(app: app) { check(result, label) } }
         catch { check(false, "animated image checks: \(error.localizedDescription)") }
+        do { for (label, result) in try await TranscriptMediaSelfChecks.run(app: app) { check(result, label) } }
+        catch { check(false, "transcript media checks: \(error.localizedDescription)") }
         do { for (label, result) in try await GIFPickerSelfChecks.run(app: app) { check(result, label) } }
         catch { check(false, "GIF picker checks: \(error.localizedDescription)") }
         do { for (label, result) in try await TranscriptViewportSelfChecks.run(app: app) { check(result, label) } }

@@ -51,6 +51,17 @@ final class InkPlanTests: XCTestCase {
         XCTAssertFalse(InkRules.canRestoreDraft(Draft(channelID: "general", attachments: [attachment])))
     }
 
+    func testTakeBackAcceptsOnlyUnattemptedSends() {
+        XCTAssertTrue(InkRules.canTakeBack(SendOperation(channelID: "general", html: "<p>x</p>", state: .queued, attempts: 0)))
+        XCTAssertTrue(InkRules.canTakeBack(SendOperation(channelID: "general", html: "<p>x</p>", state: .retryable, attempts: 0)))
+        XCTAssertFalse(InkRules.canTakeBack(SendOperation(channelID: "general", html: "<p>x</p>", state: .queued, attempts: 1)))
+        XCTAssertFalse(InkRules.canTakeBack(SendOperation(channelID: "general", html: "<p>x</p>", state: .retryable, attempts: 1)))
+        XCTAssertFalse(InkRules.canTakeBack(SendOperation(channelID: "general", html: "<p>x</p>", state: .needsReview, attempts: 0)))
+        XCTAssertFalse(InkRules.canTakeBack(SendOperation(channelID: "general", html: "<p>x</p>", state: .rejected, attempts: 0)))
+        XCTAssertFalse(InkRules.canTakeBack(SendOperation(channelID: "general", html: "<p>x</p>", state: .uploading, attempts: 0)))
+        XCTAssertFalse(InkRules.canTakeBack(SendOperation(channelID: "general", html: "<p>x</p>", state: .sending, attempts: 0)))
+    }
+
     func testWetnessFollowsTheOutboxState() {
         XCTAssertEqual(InkWetness(.queued), .flowing)
         XCTAssertEqual(InkWetness(.uploading), .flowing)

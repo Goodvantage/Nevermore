@@ -4,6 +4,24 @@ import Testing
 @testable import RavenProtocol
 
 extension TransportSuite {
+    @Test func oversizedTokenGrantIsRejected() async throws {
+        let session = StubURLProtocol.install { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/2", headerFields: ["Content-Length": "1000000000"])!, Data("{}".utf8))
+        }
+        await #expect(throws: RavenError.resourceLimit(1024 * 1024)) {
+            try await RavenClient.exchange(origin: URL(string: "https://site.test")!, clientID: "client", redirectURI: URL(string: "ch.goodvantage.Nevermore://oauth")!, code: "code", verifier: "verifier", session: session)
+        }
+    }
+
+    @Test func streamedOversizedTokenGrantIsRejected() async throws {
+        let session = StubURLProtocol.install { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/2", headerFields: nil)!, Data(repeating: 65, count: 1024 * 1024 + 1))
+        }
+        await #expect(throws: RavenError.resourceLimit(1024 * 1024)) {
+            try await RavenClient.exchange(origin: URL(string: "https://site.test")!, clientID: "client", redirectURI: URL(string: "ch.goodvantage.Nevermore://oauth")!, code: "code", verifier: "verifier", session: session)
+        }
+    }
+
     @Test func stagedUploadPreservesOriginalFilenameAndRejectsHeaderControls() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: file) }
@@ -20,6 +38,56 @@ extension TransportSuite {
             (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/2", headerFields: ["Content-Length":"1000000000"])!, Data("{}".utf8))
         }
         await #expect(throws: RavenError.resourceLimit(8 * 1024 * 1024)) { try await client(session).rpc("raven.api.native.boot") }
+    }
+    @Test func declaredOversizedForbiddenResponseReportsHTTPStatus() async throws {
+        let session = StubURLProtocol.install { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: "HTTP/2", headerFields: ["Content-Length":"1000000000"])!, Data(#"{"exc_type":"PermissionError"}"#.utf8))
+        }
+        await #expect(throws: RavenError.http(403, "PermissionError")) { try await client(session, tokens: validTokens).rpc("raven.api.native.boot") }
+    }
+    @Test func streamedOversizedErrorBodyKeepsHTTPStatusWithoutResourceLimit() async throws {
+        let session = StubURLProtocol.install { request in
+            let body = Data(#"{"exc_type":"PermissionError"}"#.utf8) + Data(repeating: 65, count: 1024 * 1024)
+            return (HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: "HTTP/2", headerFields: nil)!, body)
+        }
+        // The body is truncated at the classification cap, but the valid JSON
+        // prefix still classifies — and never becomes a resource limit.
+        await #expect(throws: RavenError.http(403, "PermissionError")) { try await client(session, tokens: validTokens).rpc("raven.api.native.boot") }
+    }
+    @Test func errorBodyTruncatedMidObjectYieldsNilKindButKeepsStatus() async throws {
+        let session = StubURLProtocol.install { request in
+            let large = Data(#"{"exc_type":"PermissionError","message":""#.utf8) + Data(repeating: 65, count: 1024 * 1024)
+            let truncated = large.prefix(64 * 1024)
+            return (HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: "HTTP/2", headerFields: nil)!, Data(truncated))
+        }
+        await #expect(throws: RavenError.http(403, nil)) { try await client(session, tokens: validTokens).rpc("raven.api.native.boot") }
+    }
+    @Test func oversizedTokenGrantErrorReportsOAuthCode() async throws {
+        let session = StubURLProtocol.install { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: "HTTP/2", headerFields: ["Content-Length": "1000000000"])!, Data(#"{"error":"invalid_grant"}"#.utf8))
+        }
+        await #expect(throws: RavenError.oauth("invalid_grant")) {
+            try await RavenClient.exchange(origin: URL(string: "https://site.test")!, clientID: "client", redirectURI: URL(string: "ch.goodvantage.Nevermore://oauth")!, code: "code", verifier: "verifier", session: session)
+        }
+    }
+    @Test(.enabled(if: TestKeychain.isWritable, TestKeychain.unavailableReason)) func declaredOversizedUnauthorizedResponseTriggersRefreshAndRetry() async throws {
+        let calls = Mutex<[String]>([])
+        let session = StubURLProtocol.install { request in
+            let path = request.url?.path ?? ""
+            calls.withLock { $0.append(path) }
+            if path.contains("get_token") {
+                return stubResponse(request, 200, #"{"access_token":"access-2","refresh_token":"refresh-2","expires_in":3600,"token_type":"Bearer"}"#)
+            }
+            if request.value(forHTTPHeaderField: "Authorization") == "Bearer access-1" {
+                return (HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: "HTTP/2", headerFields: ["Content-Length": "1000000000"])!, Data(#"{"exc_type":"AuthenticationError"}"#.utf8))
+            }
+            return stubResponse(request, 200, #"{"message":{"ok":true}}"#)
+        }
+        let result = try await client(session, tokens: validTokens).rpc("raven.api.native.boot")
+        #expect(result["ok"] == .bool(true))
+        let paths = calls.withLock { $0 }
+        #expect(paths.filter { $0.contains("get_token") }.count == 1)
+        #expect(paths.filter { !$0.contains("get_token") }.count == 2)
     }
     @Test(.enabled(if: TestKeychain.isWritable, TestKeychain.unavailableReason)) func refreshCompletionAfterLogoutCannotRestoreKeychainCredentials() async throws {
         let id = UUID()

@@ -32,6 +32,37 @@ public enum ChannelPolicy {
         // transmission.
         return true
     }
+    /// The notification gate for a channel or thread, as a pure function of
+    /// the cached rows. Revocation is checked on the channel itself and its
+    /// whole ancestry. Threads are synthesized locally and never listed in
+    /// `channels` (the server's channel list filters `is_thread`), so a
+    /// thread is gated on its top-most ancestor's row — mute, archive and
+    /// allow_notifications are intentionally inherited from the parent
+    /// conversation, the only row that exists. An unknown ID never notifies.
+    /// The top-most ancestor of `channelID` in the thread map, with a cycle
+    /// guard: a walk that revisits a node stops at that node and reports the
+    /// cycle via `cyclic == true`.
+    public static func rootAncestor(of channelID: String, threadParents: [String: String]) -> (id: String, cyclic: Bool) {
+        var id = channelID, visited = Set([channelID])
+        while let parent = threadParents[id], !visited.contains(parent) {
+            visited.insert(parent)
+            id = parent
+        }
+        return (id, threadParents[id] != nil)
+    }
+
+    public static func shouldNotify(channelID: String, channels: [RavenChannel], revoked: Set<String>, threadParents: [String: String]) -> Bool {
+        if revoked.contains(channelID) || isRevoked(channelID: channelID, revoked: revoked, threadParents: threadParents) { return false }
+        let (gateID, cyclic) = rootAncestor(of: channelID, threadParents: threadParents)
+        // A cycle in the ancestry map is corrupt state; fail closed rather
+        // than gating on whichever node happened to close the loop.
+        if cyclic { return false }
+        guard let channel = channels.first(where: { $0.id == gateID }),
+              !isArchived(channelID: gateID, channels: channels, threadParents: threadParents),
+              !channel.raw["muted"].bool,
+              channel.raw["allow_notifications"] == .null || channel.raw["allow_notifications"].bool else { return false }
+        return true
+    }
     public static func canManage(_ channel: RavenChannel, user: String, roles: Set<String>) -> Bool {
         guard !channel.isDM, !channel.raw["is_thread"].bool else { return false }
         return user == "Administrator" || channel.raw["is_admin"].bool ||

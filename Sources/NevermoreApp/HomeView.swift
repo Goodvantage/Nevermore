@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import UniformTypeIdentifiers
 import NevermoreCore
 import RavenProtocol
@@ -426,6 +427,7 @@ private extension NSView {
         let ranked = HomePeople.rank(sent: feed.sent.value ?? [], channels: session.channels, me: session.account.user, now: Date())
         if ranked.isEmpty {
             if case .loading = feed.sent { card.add(HomeText.note("Loading…")) }
+            else if case .failed = feed.sent { card.add(HomeText.note("Your sent messages could not be loaded.")) }
             else { card.add(HomeText.note("Write to someone directly and they appear here.")) }
             return card
         }
@@ -622,17 +624,36 @@ private extension NSView {
         return line.isEmpty ? "Message" : String(line.prefix(200))
     }
 
-    /// "13:32" today, "Fri" this week, "12 Nov" before.
+    /// Row-date formatter cache key: template, time zone and calendar system,
+    /// so a calendar preference change does not reuse a stale formatter.
+    private struct FormatterKey: Hashable {
+        let template: String
+        let timeZone: String
+        let calendar: Calendar.Identifier
+    }
+    /// Row-date formatters cached per key, so a long Home list does not build a
+    /// DateFormatter per row. Static because the builder is a struct;
+    /// @MainActor-isolated, so access stays on the main thread.
+    private static var rowDateFormatters: [FormatterKey: DateFormatter] = [:]
+    private func rowDate(_ template: String, calendar: Calendar, date: Date) -> String {
+        let key = FormatterKey(template: template, timeZone: calendar.timeZone.identifier, calendar: calendar.identifier)
+        if let cached = Self.rowDateFormatters[key] { return cached.string(from: date) }
+        let new = DateFormatter()
+        new.calendar = calendar
+        new.timeZone = calendar.timeZone
+        new.setLocalizedDateFormatFromTemplate(template)
+        Self.rowDateFormatters[key] = new
+        return new.string(from: date)
+    }
+
+    /// "13:32" today, "Fri" this week, "12 Nov 2025" before — older dates keep
+    /// the year so rows from a previous year are not ambiguous.
     private func time(_ raw: String?) -> String? {
         guard let raw, let date = session.messageDate(raw) else { return nil }
         let calendar = session.displayCalendar
         if calendar.isDateInToday(date) { return session.displayTime(raw) }
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
         let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: calendar.startOfDay(for: Date())).day ?? 0
-        formatter.setLocalizedDateFormatFromTemplate(days < 7 && days > 0 ? "EEE" : "d MMM")
-        return formatter.string(from: date)
+        return rowDate(days < 7 && days > 0 ? "EEE" : "d MMM y", calendar: calendar, date: date)
     }
 
     /// "Today 15:00", "Thursday 09:30".
@@ -667,6 +688,7 @@ private extension NSView {
 // MARK: - Actions
 
 extension ConversationWindow {
+    fileprivate static let logger = Logger(subsystem: "ch.goodvantage.Nevermore", category: "Home")
     /// Opens the draft row in Home's Later card. One destination opens
     /// directly; several offer the native choice sheet.
     fileprivate func openHomeDrafts() {
@@ -719,12 +741,41 @@ extension ConversationWindow {
         Task { [weak self] in
             let confirmed = await SheetPrompt.confirm("Mark \(count) conversation\(count == 1 ? "" : "s") as read?", message: "Muted conversations stay as they are.", confirm: "Mark as Read", on: self?.window)
             guard confirmed, let self, self.isCurrent(session) else { return }
+            var acted = 0
+            var unreadable = 0
             for entry in digest.entries {
-                guard let timestamp = entry.latest?.timestamp else { continue }
+                let timestamp: String
+                if let reported = entry.latest?.timestamp {
+                    timestamp = reported
+                } else {
+                    // The channel list reported no latest message; fall back
+                    // to the newest cached one so the conversation is still
+                    // marked instead of silently skipped. cachedMessages
+                    // returns the newest `limit` rows in ascending order, so
+                    // `.last` is the newest cached message; `creation` and
+                    // `last_message_timestamp` are both Frappe datetime
+                    // strings in the format markSeen validates.
+                    do {
+                        guard let newest = try await session.cachedMessages(channelID: entry.channel.id, limit: 1).last?.creation else { continue }
+                        timestamp = newest
+                    } catch {
+                        Self.logger.error("markAllRead could not read the cached messages of \(entry.channel.id, privacy: .private): \(error.localizedDescription, privacy: .public)")
+                        unreadable += 1; continue
+                    }
+                }
                 session.intentionallyUnread.remove(entry.channel.id)
                 await session.markSeen(channelID: entry.channel.id, timestamp: timestamp)
+                acted += 1
             }
             session.requestReconciliation()
+            if acted != count, self.isCurrent(session) {
+                let skipped = count - acted - unreadable
+                let noun = count == 1 ? "conversation" : "conversations"
+                var parts = [acted == 1 ? "Marked 1 conversation read" : "Marked \(acted) of \(count) \(noun) read"]
+                if skipped > 0 { parts.append(skipped == 1 ? "1 had no message to mark" : "\(skipped) had no message to mark") }
+                if unreadable > 0 { parts.append(unreadable == 1 ? "1 could not be checked" : "\(unreadable) could not be checked") }
+                self.status.stringValue = parts.joined(separator: "; ") + "."
+            }
         }
     }
 

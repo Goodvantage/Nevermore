@@ -293,8 +293,17 @@ private func resultsHit(id: String, channel: String, creation: String = "2026-11
     #expect((snippet.text as NSString).substring(with: NSRange(location: highlight.lowerBound, length: highlight.count)) == "target")
 }
 
-@Test func localSnippetKeepsAMatchAfterALongUnbrokenToken() throws {
-    // A pasted link longer than the window has no space to start at.
+@Test func localSnippetFindsAMatchPastTheWordWindow() throws {
+    // The cache indexes up to 20,000 characters, so a match late in a long
+    // pasted log must still produce a highlight and a window of its own.
+    let plain = String(repeating: "lorem ", count: 450) + "target end"
+    let snippet = SearchSnippet.local(plain, query: "target")
+    #expect(snippet.text.hasPrefix("…"))
+    let highlight = try #require(snippet.highlights.first)
+    #expect((snippet.text as NSString).substring(with: NSRange(location: highlight.lowerBound, length: highlight.count)) == "target")
+}
+
+@Test func localSnippetKeepsAMatchAfterALongUnbrokenToken() throws {    // A pasted link longer than the window has no space to start at.
     for lead in ["", "See "] {
         let plain = lead + "https://example.invalid/" + String(repeating: "a", count: 600) + " target end"
         let snippet = SearchSnippet.local(plain, query: "target")

@@ -61,7 +61,10 @@ public enum RavenError: Error, Sendable, Equatable {
     public var isPermanent: Bool {
         switch self {
         case .invalidSite, .unauthorized, .resourceLimit, .crossOrigin: return true
-        case .oauth(let code): return code != "temporarily_unavailable"
+        // RFC 6749 OAuth codes describing a server-side condition are
+        // transient: the grant may succeed on the next attempt. `server_error`
+        // is the token endpoint's 5xx equivalent.
+        case .oauth(let code): return !["temporarily_unavailable", "server_error"].contains(code)
         case .transport, .invalidResponse, .keychain: return false
         case .http(let status, _):
             switch status {

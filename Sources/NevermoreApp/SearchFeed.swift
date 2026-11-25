@@ -14,8 +14,18 @@ struct SavedSearch: Codable, Equatable, Identifiable {
     private static func key(_ account: UUID) -> String { "savedSearches.\(account.uuidString)" }
     static func load(_ account: UUID) -> [SavedSearch] {
         guard let data = UserDefaults.standard.data(forKey: key(account)), data.count <= 256 * 1024,
-              let items = try? JSONDecoder().decode([SavedSearch].self, from: data), items.count <= limit else { return [] }
-        return items
+              let raw = (try? JSONSerialization.jsonObject(with: data)) as? [Any] else { return [] }
+        // Decode entry by entry: one search with an unknown kind or scope (for
+        // example written by a newer version) must not discard every saved
+        // search for the account.
+        let items = raw.compactMap { entry -> SavedSearch? in
+            guard let object = entry as? [String: Any], let entryData = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+            return try? JSONDecoder().decode(SavedSearch.self, from: entryData)
+        }
+        // A list written by a newer version with a larger limit must not
+        // read as empty: keep the first `limit` valid entries. The tail
+        // beyond `limit` is dropped once this version saves again.
+        return Array(items.prefix(limit))
     }
     static func save(_ items: [SavedSearch], account: UUID) throws {
         guard items.count <= limit else { throw AppError.message("You can save up to \(limit) searches per account. Remove an old search first.") }
@@ -95,6 +105,9 @@ extension Notification.Name {
     /// Tabs the running load has not finished. A newer run cancels that
     /// load, so these load again rather than wait forever.
     private var unfinished: Set<SearchTab> = []
+    /// Thread lists are small, but a reader who browses many conversations
+    /// would otherwise retain every list they opened. Evict the stalest.
+    private static let threadCacheLimit = 24
     private var threadCache: [String: (rows: [JSONValue], note: String?, at: Date)] = [:]
 
     init(session: AccountSession?) { self.session = session }
@@ -374,7 +387,12 @@ extension Notification.Name {
         else if (followed?.count ?? 0) >= Self.threadLimit || (visible?.count ?? 0) >= Self.threadLimit { note = "Thread replies come from the most recently active threads." }
         let rows = (followed ?? []) + (visible ?? [])
         // A failed list is not kept, so the next search asks again.
-        if followed != nil, visible != nil { threadCache[key] = (rows, note, Date()) }
+        if followed != nil, visible != nil {
+            threadCache[key] = (rows, note, Date())
+            while threadCache.count > Self.threadCacheLimit, let oldest = threadCache.min(by: { $0.value.at < $1.value.at })?.key {
+                threadCache.removeValue(forKey: oldest)
+            }
+        }
         return (rows, note)
     }
 

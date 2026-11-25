@@ -17,12 +17,18 @@ public struct LinkPreview: Sendable, Equatable {
     public var siteName: String
     /// An https image that passed `LinkPreviewPolicy.isEligible`.
     public var imageURL: URL?
-    public init(url: URL, title: String, summary: String, siteName: String, imageURL: URL?) {
+    /// The image's size in pixels as the server measured it, when it did.
+    /// It places the picture before the image arrives.
+    public var imagePixelWidth: Int?
+    public var imagePixelHeight: Int?
+    public init(url: URL, title: String, summary: String, siteName: String, imageURL: URL?, imagePixelWidth: Int? = nil, imagePixelHeight: Int? = nil) {
         self.url = url
         self.title = title
         self.summary = summary
         self.siteName = siteName
         self.imageURL = imageURL
+        self.imagePixelWidth = imagePixelWidth
+        self.imagePixelHeight = imagePixelHeight
     }
 }
 

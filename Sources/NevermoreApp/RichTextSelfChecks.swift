@@ -69,6 +69,30 @@ import RavenProtocol
             }
             return ids[0] != nil && Set(ids).count == 1 && indents[0] > 0 && Set(indents).count == 1 && privateKeys == [.nevermoreBodyQuote]
         }
+        // Each quote pairs with the answer below it: a small gap above the
+        // answer, a larger one above the next quote, none above an opening quote.
+        check("reading quotes sit close to their answers and apart from the previous answer") {
+            let doc = try RichTextCodec.parse("<blockquote><p>Q1 first</p><p>Q1 second</p></blockquote><p>A1 first</p><p>A1 second</p><blockquote><p>Q2</p></blockquote><blockquote><p>Q3</p></blockquote><p>A3</p>")
+            let text = NativeRichText.readingString(document: doc, fontSize: 14)
+            let string = text.string as NSString
+            let before = try ["Q1 first", "Q1 second", "A1 first", "A1 second", "Q2", "Q3", "A3"].map { needle -> CGFloat in
+                let range = string.range(of: needle)
+                guard range.location != NSNotFound else { throw RichTextError.unsafeEdit }
+                return (text.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0
+            }
+            let answerGap = before[2], quoteGap = before[4]
+            return before[0] == 0 && before[1] == 0 && answerGap > 0 && before[3] == 0 && quoteGap > answerGap && before[5] == quoteGap && before[6] == answerGap
+        }
+        check("a code block answering a quote is spaced on its control line only") {
+            let doc = try RichTextCodec.parse("<blockquote><p>Question</p></blockquote><pre><code>first line\nsecond line</code></pre>")
+            let message = RavenMessage(raw: .object(["name": .string("quote-code-fixture"), "channel_id": .string("fixture"), "text": .string("")]))
+            let rendered = CodePresentation.render(doc, message: message, fontSize: 14, expanded: []).text
+            let string = rendered.string as NSString
+            let control = string.range(of: "Code"), code = string.range(of: "first line"), second = string.range(of: "second line")
+            guard [control, code, second].allSatisfy({ $0.location != NSNotFound }) else { return false }
+            func before(_ range: NSRange) -> CGFloat { (rendered.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0 }
+            return before(control) > 0 && before(code) == 0 && before(second) == 0
+        }
         check("quoted lists and code retain indentation and export without markers") {
             let doc = try RichTextCodec.parse("<blockquote><ul><li>list item</li></ul><pre><code>code line</code></pre></blockquote><p>after</p>")
             let message = RavenMessage(raw: .object(["name": .string("quote-fixture"), "channel_id": .string("fixture"), "text": .string("")]))
@@ -79,7 +103,7 @@ import RavenProtocol
             let id = rendered.attribute(.nevermoreBodyQuote, at: list.location, effectiveRange: nil) as? String
             let codeStyle = rendered.attribute(.paragraphStyle, at: code.location, effectiveRange: nil) as? NSParagraphStyle
             let exported = NSMutableAttributedString(attributedString: rendered)
-            TranscriptView.prepareForExport(exported)
+            TranscriptView.prepareForExport(exported, for: .copy)
             return id != nil && rendered.attribute(.nevermoreBodyQuote, at: code.location, effectiveRange: nil) as? String == id && rendered.attribute(.nevermoreBodyQuote, at: after.location, effectiveRange: nil) == nil && (codeStyle?.headIndent ?? 0) > 0 && !exported.string.contains("│") && exported.string.contains("code line")
         }
         check("unedited nested list round-trips exactly") {

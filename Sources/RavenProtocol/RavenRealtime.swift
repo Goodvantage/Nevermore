@@ -105,7 +105,7 @@ public final class RavenRealtime {
         countedHost = nil
         // A missing count means the slot was never taken or already released;
         // treat it as a no-op rather than purging under live siblings.
-        guard let count = Self.socketCountByHost[host] else { assertionFailure("Released a host slot that was never counted"); return }
+        guard let count = Self.socketCountByHost[host] else { return }
         let remaining = count - 1
         if remaining > 0 {
             Self.socketCountByHost[host] = remaining

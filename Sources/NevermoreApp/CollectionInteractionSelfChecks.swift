@@ -272,6 +272,56 @@ import NevermoreCore
             await owner.loadTask?.value
             await owner.renderTask?.value
             check("revealing another conversation shows it in place") { owner.app.windows.count == windowsBeforeReveal && owner.channel?.id == other.id }
+            // A notification response can arrive before Session.start has read
+            // the channel list. It must be retained, then replayed once the
+            // channel appears, instead of being dropped at the cold-launch gap.
+            let windowsBeforeColdRoute = owner.app.windows.count
+            let coldChannel = RavenChannel(raw: .object(["name": .string("cold-notification-fixture"), "channel_name": .string("Cold notification")]))
+            owner.app.handleNotificationRoute(accountID: session.account.id.uuidString, channelID: coldChannel.id, anchor: "cold-route-anchor")
+            check("a notification for an unloaded conversation is retained without opening anything") {
+                owner.app.pendingNotificationRoute?.channelID == coldChannel.id && owner.app.pendingNotificationRoute?.anchor == "cold-route-anchor"
+                    && owner.app.windows.count == windowsBeforeColdRoute && owner.channel?.id != coldChannel.id
+            }
+            session.channels.append(coldChannel)
+            owner.window?.makeKeyAndOrderFront(nil)
+            session.notify()
+            // The replay runs on the main queue after the post.
+            var replayAttempts = 0
+            while owner.app.pendingNotificationRoute != nil || owner.channel?.id != coldChannel.id {
+                try await Task.sleep(for: .milliseconds(10))
+                replayAttempts += 1
+                if replayAttempts >= 200 { break }
+            }
+            await owner.loadTask?.value
+            await owner.renderTask?.value
+            let replayTimedOut = replayAttempts >= 200
+            check("the retained notification opens once its conversation loads (attempts: \(replayAttempts)\(replayTimedOut ? ", timed out" : ""))") {
+                owner.app.pendingNotificationRoute == nil && owner.channel?.id == coldChannel.id
+            }
+            // Restore the conversation the surrounding checks expect.
+            owner.select(other)
+            await owner.loadTask?.value
+            await owner.renderTask?.value
+            session.channels.removeAll { $0.id == coldChannel.id }
+            session.notify()
+            // A route retained while the channel was absent must still honor
+            // revocation once the channel appears.
+            let revokedChannel = RavenChannel(raw: .object(["name": .string("cold-revoked-fixture"), "channel_name": .string("Cold revoked")]))
+            owner.app.handleNotificationRoute(accountID: session.account.id.uuidString, channelID: revokedChannel.id, anchor: nil)
+            session.channels.append(revokedChannel)
+            session.revokedChannels.insert(revokedChannel.id)
+            session.notify()
+            var revokedAttempts = 0
+            while owner.app.pendingNotificationRoute != nil, revokedAttempts < 100 {
+                try await Task.sleep(for: .milliseconds(10))
+                revokedAttempts += 1
+            }
+            check("a retained notification for a revoked conversation is dropped without opening it (attempts: \(revokedAttempts))") {
+                owner.app.pendingNotificationRoute == nil && owner.channel?.id != revokedChannel.id
+            }
+            session.revokedChannels.remove(revokedChannel.id)
+            session.channels.removeAll { $0.id == revokedChannel.id }
+            session.notify()
             // A window busy with an edit is passed over for another window
             // of the account before a new one opens. Every window but a
             // spare is made busy, so the spare is the one that can take it.

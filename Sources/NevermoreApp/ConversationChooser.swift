@@ -14,6 +14,9 @@ import NevermoreCore
 @MainActor final class ConversationChooser: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSWindowDelegate {
     let search = NSSearchField()
     private let table = ChooserTable()
+    private let emptyLabel = NSTextField(labelWithString: "")
+    private lazy var open = NSButton(title: "", target: self, action: #selector(chooseSelected))
+    private let scope: MentionCandidate.Kind?
     let candidates: [MentionCandidate]
     private(set) var matches: [MentionCandidate] = []
     weak var parent: NSWindow?
@@ -23,6 +26,7 @@ import NevermoreCore
     /// `only` limits the list to conversations or to people, for picking
     /// a search filter rather than opening something.
     init(session: AccountSession, only: MentionCandidate.Kind? = nil) {
+        scope = only
         // Opening a conversation never lists the account user as a person:
         // picking yourself would ask the server for a self-DM, which the
         // member roster refuses. Search filters ("from me") keep you.
@@ -35,18 +39,43 @@ import NevermoreCore
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("destination")); table.addTableColumn(column); table.headerView = nil; table.rowHeight = 42; table.delegate = self; table.dataSource = self; table.target = self; table.doubleAction = #selector(chooseSelected)
         table.onPick = { [weak self] in self?.chooseSelected() }; table.onCancel = { [weak self] in self?.cancel() }; table.setAccessibilityLabel(only == .person ? "Matching people" : only == .channel ? "Matching conversations" : "Matching conversations and people")
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
+        let results = NSView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        emptyLabel.font = .preferredFont(forTextStyle: .callout)
+        emptyLabel.textColor = .secondaryLabelColor
+        results.addSubview(scroll)
+        results.addSubview(emptyLabel)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: results.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: results.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: results.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: results.bottomAnchor),
+            emptyLabel.centerXAnchor.constraint(equalTo: results.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: results.centerYAnchor),
+        ])
         search.placeholderString = only == .person ? "Search people" : only == .channel ? "Search conversations" : "Search conversations or people · # channels · @ people"; search.delegate = self; search.setAccessibilityLabel(only == .person ? "Find a person" : only == .channel ? "Find a conversation" : "Find a conversation or person")
         let note = NSTextField(labelWithString: only == nil ? "Return opens · Option-Return opens a new window · Escape cancels" : "Return chooses · Escape cancels"); note.textColor = .secondaryLabelColor; note.font = .systemFont(ofSize: 11)
-        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
-        let open = NSButton(title: only == nil ? "Open" : "Choose", target: self, action: #selector(chooseSelected)); open.keyEquivalent = "\r"
+        // The note promises "Escape cancels"; the table's own handler only
+        // covers the table's focus, so the button takes the key equivalent
+        // for the search field and anything else in the panel.
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel)); cancel.keyEquivalent = "\u{1b}"
+        open.title = only == nil ? "Open" : "Choose"
+        open.keyEquivalent = "\r"
         let buttons = NSStackView(views: [note, NSView(), cancel, open]); buttons.orientation = .horizontal; buttons.spacing = 8
-        let stack = NSStackView(views: [search, scroll, buttons]); stack.orientation = .vertical; stack.spacing = 10; stack.translatesAutoresizingMaskIntoConstraints = false; window.contentView?.addSubview(stack)
-        if let view = window.contentView { NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14), stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14), stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 14), stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14), search.widthAnchor.constraint(equalTo: stack.widthAnchor), scroll.widthAnchor.constraint(equalTo: stack.widthAnchor), buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)]) }
+        let stack = NSStackView(views: [search, results, buttons]); stack.orientation = .vertical; stack.spacing = 10; stack.translatesAutoresizingMaskIntoConstraints = false; window.contentView?.addSubview(stack)
+        if let view = window.contentView { NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14), stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14), stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 14), stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14), search.widthAnchor.constraint(equalTo: stack.widthAnchor), results.widthAnchor.constraint(equalTo: stack.widthAnchor), buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)]) }
         window.initialFirstResponder = search; updateMatches()
     }
     required init?(coder: NSCoder) { fatalError() }
     func present(on parent: NSWindow) { self.parent = parent; guard let window else { return }; parent.beginSheet(window) { [weak self] _ in self?.finish() }; window.makeFirstResponder(search) }
-    func controlTextDidChange(_ notification: Notification) { updateMatches() }
+    func controlTextDidChange(_ notification: Notification) {
+        guard (notification.object as? NSSearchField) === search else { return }
+        // Marked input-method text is still being composed; filtering now
+        // would discard matches on every intermediate character.
+        guard (search.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
+        updateMatches()
+    }
     func updateMatches() {
         var text = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let kind: MentionCandidate.Kind? = text.hasPrefix("#") ? .channel : text.hasPrefix("@") ? .person : nil
@@ -55,7 +84,22 @@ import NevermoreCore
         matches = MentionCompletion.matches(candidates, text: text, kind: kind)
         table.reloadData()
         if !matches.isEmpty { table.selectRowIndexes(IndexSet(integer: matches.firstIndex { $0.id == before } ?? 0), byExtendingSelection: false) }
+        let empty = matches.isEmpty
+        table.enclosingScrollView?.isHidden = empty
+        emptyLabel.isHidden = !empty
+        if empty {
+            // A # or @ prefix narrows an unscoped chooser to one kind, so the
+            // message names the kind that was searched.
+            switch scope ?? kind {
+            case .channel: emptyLabel.stringValue = candidates.isEmpty ? "No conversations available" : "No matching conversations"
+            case .person: emptyLabel.stringValue = candidates.isEmpty ? "No people available" : "No matching people"
+            case nil: emptyLabel.stringValue = candidates.isEmpty ? "No conversations or people available" : "No matching conversations or people"
+            }
+        }
+        updateAction()
     }
+    private func updateAction() { open.isEnabled = matches.indices.contains(table.selectedRow) }
+    func tableViewSelectionDidChange(_ notification: Notification) { updateAction() }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard !textView.hasMarkedText() else { return false }
         switch NSStringFromSelector(commandSelector) {

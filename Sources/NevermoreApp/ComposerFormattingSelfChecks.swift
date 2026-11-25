@@ -73,8 +73,9 @@ import RavenProtocol
             let linkedDocument = try RichTextCodec.parse(#"<p><a href="https://example.com/">Example</a> <span data-spoiler="true"><a href="https://hidden.example/">hidden</a></span></p>"#)
             check("sent preview extraction skips links concealed by spoilers", SentLinkPreviewPresentation.links(in: linkedDocument) == ["https://example.com/"])
             if let preview {
-                let card = SentLinkPreviewPresentation.card(preview, image: nil, size: 14)
-                check("sent preview card presents its title, summary and site", card.string.contains("Example") && card.string.contains("Summary") && card.string.contains("example.com"))
+                let card = TranscriptMedia.linkCard(preview, image: nil, imageFailed: false, metrics: TranscriptMetrics(size: 14, compact: false), afterText: true)
+                let cell = (card.attribute(.attachment, at: card.length - 1, effectiveRange: nil) as? NSTextAttachment)?.attachmentCell as? LinkPreviewCardCell
+                check("sent preview card presents its title, summary and site", cell?.titleText.text.string == "Example" && cell?.summaryText.text.string == "Summary" && cell?.siteText.text.string == "Example · example.com")
             }
             let original = try RichTextCodec.parse("<p>before</p><table><tr><td>cell</td></tr></table><p>after</p>")
             let value = NSMutableAttributedString(attributedString: NativeRichText.attributedString(document: original, revealSpoilers: true))
@@ -415,6 +416,44 @@ import RavenProtocol
             ComposerEditorLifetime.cancel(attachedTo: parent)
             try await Task.sleep(for: .milliseconds(20))
             pendingTable.removeFromSuperview()
+
+            let fontEditor = ComposerView(frame: NSRect(x: 0, y: 0, width: 500, height: 140))
+            fontEditor.font = ComposerMetrics.font; fontEditor.allowsUndo = true; fontEditor.sharedUndoManager = UndoManager()
+            parent.contentView?.addSubview(fontEditor); parent.makeFirstResponder(fontEditor)
+            let pasteboard = NSPasteboard.withUniqueName()
+            defer { pasteboard.releaseGlobally() }
+            let serif = try require(NSFont(name: "TimesNewRomanPSMT", size: 12))
+            let italic = NSFontManager.shared.convert(serif, toHaveTrait: .italicFontMask)
+            let pasted = NSMutableAttributedString(string: "Plain ", attributes: [.font: serif])
+            pasted.append(NSAttributedString(string: "italic", attributes: [.font: italic]))
+            let full = NSRange(location: 0, length: pasted.length)
+            pasteboard.setData(try pasted.data(from: full, documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]), forType: .rtf)
+            func normalizedPaste() -> Bool {
+                fontEditor.string == pasted.string &&
+                    fontEditor.attributedString().attribute(.font, at: 0, effectiveRange: nil) as? NSFont == ComposerMetrics.font &&
+                    fontEditor.attributedString().attribute(.font, at: 6, effectiveRange: nil) as? NSFont == NSFontManager.shared.convert(ComposerMetrics.font, toHaveTrait: .italicFontMask)
+            }
+            check("rich paste uses the composer font and keeps emphasis", fontEditor.readSelection(from: pasteboard) && normalizedPaste())
+            try await finishInputEvent(fontEditor)
+            fontEditor.undo(nil)
+            let undidPaste = fontEditor.string.isEmpty
+            fontEditor.redo(nil)
+            check("normalized rich paste supports native undo and redo", undidPaste && normalizedPaste())
+            fontEditor.string = "First middle last"
+            fontEditor.selectedRanges = [NSValue(range: NSRange(location: 0, length: 5)), NSValue(range: NSRange(location: 13, length: 4))]
+            check("normalized rich paste replaces multiple selections", fontEditor.readSelection(from: pasteboard) && fontEditor.string == pasted.string + " middle ")
+            fontEditor.textStorage?.setAttributedString(NSAttributedString(string: "Italic draft", attributes: [.font: italic]))
+            fontEditor.selectAll(nil); fontEditor.deleteBackward(nil)
+            fontEditor.insertText("Test", replacementRange: NSRange(location: NSNotFound, length: 0))
+            check("fresh typing after clearing the composer uses the regular system font", fontEditor.string == "Test" &&
+                  fontEditor.attributedString().attribute(.font, at: 0, effectiveRange: nil) as? NSFont == ComposerMetrics.font)
+            pasteboard.clearContents()
+            pasteboard.setString("<span style='font-family: Times'>HTML</span>", forType: .html)
+            pasteboard.setString("Plain text", forType: .string)
+            fontEditor.selectAll(nil)
+            check("HTML clipboard items use the plain text representation", fontEditor.readSelection(from: pasteboard) && fontEditor.string == "Plain text" &&
+                  fontEditor.attributedString().attribute(.font, at: 0, effectiveRange: nil) as? NSFont == ComposerMetrics.font)
+            fontEditor.removeFromSuperview()
         } catch {
             checks.append(("formatting fixture: \(error.localizedDescription)", false))
             // Unblock any suspended sheet task before closing the fixture.

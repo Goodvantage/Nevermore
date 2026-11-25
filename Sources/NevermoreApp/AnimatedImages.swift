@@ -110,6 +110,22 @@ enum AnimatedImageKey {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    /// Gives the view the rounded corners and hairline of the transcript
+    /// picture it plays over.
+    func frameAsPicture() {
+        framedAsPicture = true
+        layer?.cornerRadius = TranscriptMedia.cornerRadius(for: bounds.size)
+        layer?.borderWidth = 1
+        updateBorderColor()
+    }
+    private var framedAsPicture = false
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if framedAsPicture { layer?.cornerRadius = TranscriptMedia.cornerRadius(for: newSize) }
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); if (layer?.borderWidth ?? 0) > 0 { updateBorderColor() } }
+    private func updateBorderColor() { effectiveAppearance.performAsCurrentDrawingAppearance { layer?.borderColor = NSColor.separatorColor.cgColor } }
+
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -240,6 +256,7 @@ enum AnimatedImageKey {
                 existing?.removeFromSuperview()
                 guard let image = images(key) else { return }
                 view = AnimatedImageView(key: key, image: image, frame: frame)
+                view.frameAsPicture()
                 textView.addSubview(view)
             }
             view.setPlaying(playing)
@@ -294,7 +311,7 @@ enum AnimatedImageKey {
 /// the text.
 @MainActor enum InlineImagePresentation {
     /// The same bound as image messages.
-    static let maxSide: CGFloat = 320
+    static let maxSide = TranscriptMedia.pictureMaximumSide
     /// Shown until the GIF arrives; most GIFs are about 4:3.
     static let placeholderSize = NSSize(width: 200, height: 150)
     /// GIFs shown per message; any more keep their text, so one message
@@ -321,7 +338,7 @@ enum AnimatedImageKey {
             attributes[.toolTip] = output.attributedSubstring(from: range).string
             let attachment = NSTextAttachment()
             if let image = session.animatedImages[key], let still = AnimatedImageCache.still(image, maxSide: maxSide) {
-                attachment.image = still
+                attachment.image = TranscriptMedia.pictureImage(still, size: still.size, name: output.attributedSubstring(from: range).string)
                 attachment.bounds = NSRect(origin: .zero, size: still.size)
                 if image.isAnimated { attributes[.nevermoreAnimatedImage] = key }
             } else {

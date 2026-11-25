@@ -27,6 +27,28 @@ import RavenProtocol
         else { results.append(("custom emoji search returns stable identity and image path", false)) }
         _ = try await wait { parent.attachedSheet == nil }
 
+        // A failed page keeps the pages already loaded and stays retryable.
+        func sheetButton(_ title: String) -> NSButton? { parent.attachedSheet?.contentView.flatMap { InteractionSelfChecks.descendants($0, of: NSButton.self).first { $0.title == title } } }
+        let paged = Task { try await EmojiPickerSheet.pick(on: parent, session: session, purpose: .compose, active: { true }) }
+        _ = try await wait { parent.attachedSheet != nil }
+        if let search = parent.attachedSheet?.contentView.flatMap({ InteractionSelfChecks.descendants($0, of: NSSearchField.self).first }) {
+            search.stringValue = "demo-page-failure"
+            (search.delegate as? EmojiPickerSheet)?.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
+        }
+        let firstPageLoaded = try await wait { table(in: parent)?.numberOfRows == RavenCustomEmojiPage.maximumRows }
+        // Wait until the first page's task finished and Load More is armed.
+        let moreArmed = try await wait { sheetButton("Load More")?.isEnabled == true }
+        sheetButton("Load More")?.performClick(nil)
+        let failureShown = try await wait {
+            parent.attachedSheet?.contentView.flatMap { InteractionSelfChecks.descendants($0, of: NSTextField.self).contains { $0.stringValue.contains("could not be loaded") } } == true
+        }
+        let keptRows = table(in: parent)?.numberOfRows == RavenCustomEmojiPage.maximumRows
+        let retryable = sheetButton("Load More")?.isEnabled == true
+        results.append(("a failed emoji page keeps loaded rows and stays retryable", firstPageLoaded && moreArmed && failureShown && keptRows && retryable))
+        sheetButton("Cancel")?.performClick(nil)
+        _ = try? await paged.value
+        _ = try await wait { parent.attachedSheet == nil }
+
         let reaction = Task { try await EmojiPickerSheet.pick(on: parent, session: session, purpose: .reaction, active: { true }) }
         _ = try await wait { parent.attachedSheet != nil }
         let family = "👩🏽‍💻"

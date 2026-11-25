@@ -41,6 +41,9 @@ struct ParaMeta: Codable {
 private final class RenderState {
     var lists: [(tag: String, n: Int, item: String)] = []
     var quote: String?
+    /// Reading mode: the characters of each rendered quote, its trailing
+    /// newline included, for spacing quotes apart from their answers.
+    var quoteSpans: [NSRange] = []
     var container = ""
     var pre = false
     var unsupported = false
@@ -304,6 +307,7 @@ private struct SemanticMark: Codable {
                     quoted[.paraContext] = paragraphContext(ParaMeta(b: "p", q: qid))
                     quoted[.blockKind] = "p"
                     lineStart(quoted)
+                    let quoteStart = output.length
                     for child in children {
                         if case .element(let childTag, _, _) = child, ["p", "ul", "ol", "pre", "blockquote"].contains(childTag) {
                             render(child, attributes: quoted, depth: depth + 1)
@@ -322,6 +326,7 @@ private struct SemanticMark: Codable {
                     }
                     if !output.string.hasSuffix("\n") { append("\n", quoted) }
                     state.quote = parent
+                    if reading { state.quoteSpans.append(NSRange(location: quoteStart, length: output.length - quoteStart)) }
                 case "p":
                     let para = beginPara(attrs, meta: ParaMeta(b: "p", q: state.quote))
                     for child in children { render(child, attributes: para, depth: depth + 1) }
@@ -387,6 +392,7 @@ private struct SemanticMark: Codable {
             }
         }
         for node in document.nodes { render(node, attributes: [.font: font, .foregroundColor: textColor]) }
+        if reading { spaceQuotes(state.quoteSpans, in: output, fontSize: fontSize) }
         if (state.unsupported || !document.canEdit) && output.length > 0 { output.addAttribute(.unsupported, value: true, range: NSRange(location: 0, length: output.length)) }
         // Transcript renders discard edit metadata. Avoid computing paragraph
         // round trips and full attributed signatures that only editors consume.
@@ -404,6 +410,34 @@ private struct SemanticMark: Codable {
             }
         }
         return output
+    }
+    /// Reading quotes pair with the text that answers them: a small gap
+    /// separates a quote from its answer and a larger one separates an
+    /// answer from the next quote. A quote that opens the message adds
+    /// nothing above it, so it sits under the sender line like any first
+    /// paragraph. The gaps are paragraph spacing, which stays outside the
+    /// used line rects the quote bar is drawn from.
+    private static func spaceQuotes(_ quotes: [NSRange], in output: NSMutableAttributedString, fontSize: CGFloat) {
+        let answerGap = (fontSize * 0.3).rounded(), nextQuoteGap = (fontSize * 0.75).rounded()
+        let string = output.string as NSString
+        func space(paragraphAt location: Int, by gap: CGFloat) {
+            guard location < output.length else { return }
+            let paragraph = string.paragraphRange(for: NSRange(location: location, length: 0))
+            var updates: [(NSRange, NSParagraphStyle)] = []
+            output.enumerateAttribute(.paragraphStyle, in: paragraph) { value, run, _ in
+                let current = value as? NSParagraphStyle ?? .default
+                // Table cells lay out in their own blocks.
+                guard current.textBlocks.isEmpty, current.paragraphSpacingBefore < gap else { return }
+                let style = current.mutableCopy() as! NSMutableParagraphStyle
+                style.paragraphSpacingBefore = gap
+                updates.append((run, style))
+            }
+            for (run, style) in updates { output.addAttribute(.paragraphStyle, value: style, range: run) }
+        }
+        for quote in quotes where quote.length > 0 {
+            space(paragraphAt: NSMaxRange(quote), by: answerGap)
+            if quote.location > 0 { space(paragraphAt: quote.location, by: nextQuoteGap) }
+        }
     }
     static func document(from value: NSAttributedString) throws -> RichDocument {
         guard value.string.utf8.count <= RichTextCodec.maximumBytes else { throw RichTextError.tooLarge }

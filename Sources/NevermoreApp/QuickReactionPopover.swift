@@ -32,7 +32,7 @@ import NevermoreCore
     override func draw(_ dirtyRect: NSRect) {
         let fill: NSColor?
         if isHighlighted { fill = NSColor.labelColor.withAlphaComponent(0.2) }
-        else if isChosen { fill = NSColor.controlAccentColor.withAlphaComponent(isHovered || isKeyboardFocused ? 0.35 : 0.22) }
+        else if isChosen { fill = NSColor.themeAccent.withAlphaComponent(isHovered || isKeyboardFocused ? 0.35 : 0.22) }
         else if isHovered || isKeyboardFocused { fill = NSColor.labelColor.withAlphaComponent(0.1) }
         else { fill = nil }
         if let fill {

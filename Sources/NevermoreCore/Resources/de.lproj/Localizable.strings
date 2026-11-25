@@ -20,4 +20,4 @@
 "error.protocol.unauthorized" = "Die Zugangsdaten dieses Kontos werden nicht mehr akzeptiert. Melde dich erneut an, um die Verbindung wiederherzustellen.";
 "error.protocol.invalid_response" = "Die Website hat eine Antwort zurückgegeben, die Nevermore nicht verarbeiten konnte.";
 "error.protocol.keychain" = "Sicheres Speichern der Zugangsdaten fehlgeschlagen (Schlüsselbundfehler %@).";
-"error.store.staging_budget" = "Das Limit von %lld Bytes für vorgemerkte Anhänge wurde überschritten. Entferne Anhänge, bevor du weitere hinzufügst.";
+"error.store.staging_budget" = "Es sind nur noch %lld Bytes für vorgemerkte Anhänge übrig. Entferne Anhänge, bevor du weitere hinzufügst.";

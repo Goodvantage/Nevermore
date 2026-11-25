@@ -34,7 +34,9 @@ extension AppDelegate {
     /// Marks every notification of one account read from any window. The
     /// mutation is account-wide and needs no collection window, so the
     /// Message menu item resolves through the app delegate in every window
-    /// type; the Inbox window's own toolbar keeps its richer feedback.
+    /// type; with several accounts and no conversation window key the item
+    /// stays disabled instead of guessing an account. The Inbox window's own
+    /// toolbar keeps its richer feedback.
     @objc func markAllNotificationsRead(_ sender: Any?) {
         let controller = NSApp.keyWindow?.windowController
         guard let session = notificationReadSession else { NSSound.beep(); return }
@@ -63,7 +65,11 @@ extension AppDelegate {
         let focused = (controller as? CollectionWindow)?.session ?? (controller as? ConversationWindow)?.session ?? activeConversationWindow?.session
         func eligible(_ session: AccountSession) -> Bool { !session.stopped && !session.readOnly && !session.demo }
         if let focused { return eligible(focused) ? focused : nil }
-        return sessions.first(where: { eligible($0) })
+        // No conversation or collection window is key, so the target account
+        // is ambiguous: act only when exactly one account is eligible rather
+        // than silently marking an arbitrary account's notifications read.
+        let candidates = sessions.filter(eligible)
+        return candidates.count == 1 ? candidates.first : nil
     }
 
     @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -98,17 +104,76 @@ extension AppDelegate {
         menu.addItem(withTitle: "Quit Nevermore", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "").target = NSApp
         item.menu = menu; menuBarItem = item
     }
+    /// Formats a menu item's key equivalent as symbols, e.g. "⇧⌘T".
+    private static func shortcutSymbol(_ item: NSMenuItem) -> String? {
+        let key = item.keyEquivalent
+        guard !key.isEmpty else { return nil }
+        var parts: [String] = []
+        // HIG order: control, option, shift, command.
+        let flags = item.keyEquivalentModifierMask
+        if flags.contains(.control) { parts.append("⌃") }
+        if flags.contains(.option) { parts.append("⌥") }
+        if flags.contains(.shift) { parts.append("⇧") }
+        if flags.contains(.command) { parts.append("⌘") }
+        switch key {
+        case "\r", "\u{3}": parts.append("Return")
+        case "\u{1B}": parts.append("Escape")
+        case "\t": parts.append("Tab")
+        case " ": parts.append("Space")
+        case "\u{F700}": parts.append("↑")
+        case "\u{F701}": parts.append("↓")
+        case "\u{F702}": parts.append("←")
+        case "\u{F703}": parts.append("→")
+        case "\u{F728}": parts.append("⌦")
+        case "\u{F729}": parts.append("Home")
+        case "\u{F72A}": parts.append("Begin")
+        case "\u{F72B}": parts.append("End")
+        case "\u{F72C}": parts.append("Page Up")
+        case "\u{F72D}": parts.append("Page Down")
+        case "\u{F727}": parts.append("Help")
+        case "\u{7F}": parts.append("Delete")
+        default:
+            // Private-use function-key scalars 0xF704-0xF726 (AppKit's
+            // NSF1...NSF35 range) label as F1-F35; the navigation scalars
+            // above 0xF727 are already handled by the switch cases above.
+            if let scalar = key.unicodeScalars.first, (0xF704...0xF726).contains(scalar.value) {
+                parts.append("F\(scalar.value - 0xF704 + 1)")
+            } else {
+                parts.append(key.uppercased())
+            }
+        }
+        return parts.joined()
+    }
     @objc func keyboardShortcuts(_ sender: Any?) {
         if shortcutsWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 620), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
             window.title = "Keyboard Shortcuts"; window.isReleasedWhenClosed = false; window.center(); window.setFrameAutosaveName("NevermoreKeyboardShortcuts")
             let text = NSTextView(); text.isEditable = false; text.isSelectable = true; text.font = .systemFont(ofSize: 14); text.textContainerInset = NSSize(width: 20, height: 20)
-            let sections: [(String, [(String, String)])] = [
-                ("Windows and conversations", [("New message", "⌘N"), ("New window", "⇧⌘N"), ("New tab", "⌘T"), ("Open conversation", "⌘O"), ("Back / forward", "⌘[ / ⌘]"), ("Next / previous conversation", "⌥⌘↓ / ⌥⌘↑"), ("Next / previous unread conversation", "⇧⌥⌘↓ / ⇧⌥⌘↑"), ("Inbox … Outbox (Go menu)", "⌘1 – ⌘6"), ("Show or hide the sidebar", "⌃⌘S"), ("Show or hide the thread inspector", "⌥⌘I"), ("Settings", "⌘,")]),
-                ("Reading", [("Find in the transcript", "⌘F"), ("Next / previous match", "⌘G / ⇧⌘G"), ("Search messages", "⌥⌘F"), ("Search this account", "⇧⌘F"), ("Next / previous message", "⌃⌘] / ⌃⌘["), ("Quick Look attachment", "Space or ⌘Y"), ("Read on: page down, then the next unread conversation", "Space"), ("Start typing a message", "Type while reading"), ("Make text bigger / smaller / normal", "⌘+ / ⌘- / ⌘0"), ("Print the conversation", "⌘P")]),
-                ("Messages", [("Reply", "⌘R"), ("Reply in thread", "⇧⌘T"), ("Edit your last message", "↑ in an empty composer"), ("Mark conversation as unread", "⇧⌘U"), ("Attach files", "⇧⌘A")]),
-                ("Writing", [("Send", "Return, or ⌘Return by preference"), ("Insert a line break", "⇧Return or ⌥Return"), ("Move focus out of the composer", "Tab / ⇧Tab"), ("Bold / italic / underline", "⌘B / ⌘I / ⌘U"), ("Strikethrough", "⇧⌘X"), ("Code", "⇧⌘K"), ("Insert link", "⌘K"), ("Bulleted / numbered list", "⇧⌘7 / ⇧⌘9"), ("Block quote", "⌘'"), ("Mention a person", "⇧⌘2 or @"), ("Mention a channel", "#"), ("Emoji & Symbols", "⌃⌘Space"), ("Cancel a reply or edit", "Escape")])
-            ]
+            // Menu-backed shortcuts are generated from the main menu itself,
+            // so this window cannot drift from the actual key equivalents.
+            var sections: [(String, [(String, String)])] = []
+            if let main = NSApp.mainMenu {
+                for menu in main.items {
+                    let title = menu.title
+                    // Skip the system Apple menu (empty title) and the Services
+                    // menu, identified by identity so localization cannot
+                    // defeat the check. The app menu is included: Settings… ⌘,
+                    // lives there.
+                    guard !title.isEmpty, menu.submenu !== NSApp.servicesMenu else { continue }
+                    let rows: [(String, String)] = menu.submenu?.items.compactMap { (item: NSMenuItem) -> (String, String)? in
+                        guard !item.isSeparatorItem, !item.isHidden, !item.isAlternate, !item.title.isEmpty, item.action != nil, let keys = Self.shortcutSymbol(item) else { return nil }
+                        return (item.title, keys)
+                    } ?? []
+                    if !rows.isEmpty { sections.append((title, rows)) }
+                }
+            }
+            // Only behaviors that no menu item carries a key equivalent for;
+            // rows whose title already appears above are dropped so nothing
+            // renders twice.
+            let menuTitles = Set(sections.flatMap { $0.1.map { $0.0.lowercased() } })
+            let also = [("Send the message", "Return, or ⌘Return by preference"), ("Read on: page down, then the next unread conversation", "Space"), ("Start typing a message", "Type while reading"), ("Edit your last message", "↑ in an empty composer"), ("Cancel a reply or edit", "Escape")]
+                .filter { !menuTitles.contains($0.0.lowercased()) }
+            if !also.isEmpty { sections.append(("Also", also)) }
             let paragraph = NSMutableParagraphStyle(); paragraph.tabStops = [NSTextTab(textAlignment: .left, location: 300)]; paragraph.paragraphSpacing = 3
             let output = NSMutableAttributedString()
             for (title, rows) in sections {

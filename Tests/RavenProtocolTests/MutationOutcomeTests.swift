@@ -10,3 +10,17 @@ import Testing
         #expect(!error.definitivelyRefusedMutation)
     }
 }
+
+/// A token-endpoint server fault is not a client mistake: the grant can
+/// succeed later, so a queued send must stay retryable instead of being
+/// parked as rejected.
+@Test func oauthServerFaultsStayRetryable() {
+    #expect(!RavenError.oauth("server_error").isPermanent)
+    #expect(!RavenError.oauth("temporarily_unavailable").isPermanent)
+}
+
+@Test func oauthClientFaultsRemainPermanent() {
+    for code in ["invalid_grant", "invalid_client", "unauthorized_client", "access_denied"] {
+        #expect(RavenError.oauth(code).isPermanent)
+    }
+}

@@ -9,14 +9,14 @@ and its workflows run on Forgejo Actions from `.forgejo/workflows/`.
 | Workflow | Trigger | Runner | Jobs |
 |---|---|---|---|
 | `ci.yml` — Native Mac checks | push to main, PR, manual | `macos-arm64` + `xcode-current` (mac-mini-1) | Xcode/SDK check, browser-auth self-check, `swift test`, release build, native attachment check, packaging lint |
-| `zai-code-review.yml` — GLM 5.3 PR Review | PR events | `pr-review` | automated review (deep GLM + MiMo fast + StepFun fallback) |
+| `zai-code-review.yml` — GLM 5.3 PR Review | PR events | `pr-review` | automated review (deep GLM + StepFun fast) |
 | `release.yml` — Release | `v*` tag | mac-mini-1, then `ubuntu-latest` | test, build, sign, notarize, publish to the apps site and forge, then mirror the release to GitHub |
 | `github-release-recovery.yml` — Mirror an existing release | manual | `ubuntu-latest` | mirror an already published forge release without rebuilding |
 
 ## Secrets and variables
 
 - Organization secret `ZAI_API_KEY` (required; the review skips without
-  it). `MIMO_API_KEY` (fast tier) and `STEPFUN_API_KEY` (fallback) are
+  it). `STEPFUN_API_KEY` (fast tier) are
   optional; an empty value turns that tier off.
 - Organization variable `XCODE_DEVELOPER_DIR` picks the Xcode the macOS
   job uses; without it the job finds one under `/Applications`.

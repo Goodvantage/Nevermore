@@ -120,7 +120,7 @@ extension ConversationWindow {
         }
     }
     @objc func schedule(_ sender: Any?) {
-        guard let session, let channel, attachments.isEmpty, !activeComposer.string.isEmpty else { return }
+        guard let session, let channel, editing == nil, attachments.isEmpty, !activeComposer.string.isEmpty else { return }
         // The draft is shared with other windows on this conversation; it is
         // fixed before the date sheet and must be unchanged when it closes.
         let draft: Draft
