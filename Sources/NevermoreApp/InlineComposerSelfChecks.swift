@@ -18,6 +18,29 @@ import NevermoreCore
             try await Task.sleep(for: .milliseconds(50))
             guard let source = owner.inlineComposer.textView else { return [("inline source is mounted", false)] }
             owner.focusComposer()
+            source.insertText("🙂 before after", replacementRange: NSRange(location: 0, length: source.string.utf16.count))
+            try await SelfCheck.finishInputEvent(owner.composer)
+            source.setSelectedRange(NSRange(location: "🙂 before ".utf16.count, length: 0))
+            source.insertText("x", replacementRange: NSRange(location: NSNotFound, length: 0))
+            try await SelfCheck.finishInputEvent(owner.composer)
+            let afterFirstLetter = source.selectedRange()
+            source.insertText("y", replacementRange: NSRange(location: NSNotFound, length: 0))
+            try await SelfCheck.finishInputEvent(owner.composer)
+            results.append(("typing in the middle of Markdown keeps the caret at the edit",
+                            afterFirstLetter == NSRange(location: "🙂 before x".utf16.count, length: 0)
+                            && source.selectedRange() == NSRange(location: "🙂 before xy".utf16.count, length: 0)
+                            && source.string == "🙂 before xyafter" && owner.inlineComposer.state.text == source.string))
+            source.setSelectedRange(NSRange(location: "🙂 ".utf16.count, length: "before".utf16.count))
+            source.insertText("B", replacementRange: NSRange(location: NSNotFound, length: 0))
+            try await SelfCheck.finishInputEvent(owner.composer)
+            results.append(("replacing selected Markdown keeps the caret at the edit",
+                            source.selectedRange() == NSRange(location: "🙂 B".utf16.count, length: 0)
+                            && source.string == "🙂 B xyafter" && owner.inlineComposer.state.text == source.string))
+            source.setMarkedText("に", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+            source.insertText("日本", replacementRange: NSRange(location: NSNotFound, length: 0))
+            try await SelfCheck.finishInputEvent(owner.composer)
+            results.append(("committing marked Markdown text syncs the editor binding",
+                            !source.hasMarkedText() && source.string == "🙂 B日本 xyafter" && owner.inlineComposer.state.text == source.string))
             source.insertText("**shared source**", replacementRange: NSRange(location: 0, length: source.string.utf16.count))
             await owner.saveTask?.value
             try await Task.sleep(for: .milliseconds(50))
@@ -54,6 +77,7 @@ import NevermoreCore
             let oldSource = source.string, oldAttachments = owner.attachments.count
             _ = owner.handleSourceClipboard(.paste, pasteboard: clipboard)
             await owner.waitForPromisedFiles(); await owner.saveTask?.value
+            results.append(("Markdown text paste syncs the editor binding", owner.inlineComposer.state.text == oldSource))
             results.append(("inline Markdown image paste stages a file and preserves source", source.string == oldSource && owner.attachments.count == oldAttachments + 1))
             owner.clearAttachments(); await owner.saveTask?.value
             source.setSelectedRange(NSRange(location: 2, length: 0))

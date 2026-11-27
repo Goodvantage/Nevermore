@@ -197,7 +197,9 @@ import NevermoreCore
         var previous = editorState; previous.source = savedSource
         previous.selection = sourceSelection.location; previous.selectionLength = sourceSelection.length
         registerUndo(Snapshot(editor: previous, visual: NSAttributedString(attributedString: owner.composer.attributedString()), visualSelection: owner.composer.selectedRange()), name: "Typing")
-        savedSource = source; state.text = source
+        // MarkdownEngine updates the binding after recording the native edit.
+        // Publishing it here first can trigger a rebuild that moves the caret.
+        savedSource = source
         sourceSelection = textView?.selectedRange() ?? sourceSelection
         owner.persistActiveDraft(); owner.updateCompletions(); owner.updateComposerHeight(); owner.updateLinkPreview()
     }
